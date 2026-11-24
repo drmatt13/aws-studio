@@ -7,37 +7,28 @@ Framework 1.0.0 requires Studio 1.0.0 or newer.
 
 ## Create a project
 
-From an installed distribution, choose a new or empty directory outside Studio.
-Use a lowercase name with letters, digits, and internal hyphens. Studio copies
-its pinned starter, assigns a new deployment identity, installs the project's
-locked dependencies, initializes a Git repository, and opens the project.
-Configure the production destination separately for that app.
+From the installed Studio directory, choose a new or empty directory outside
+Studio whose parent already exists. Studio copies its pinned starter, assigns
+a new deployment identity, installs the project’s locked dependencies, and opens it.
 
 ```sh
-mkdir -p /path/to/projects
-AWS_STUDIO_PROJECT_NODE=/path/to/node-v24.22.2/bin/node \
-  /path/to/node-v26.13.0/bin/node /path/to/studio/aws-studio/scripts/studio.mjs \
-  --create-project /path/to/projects/my-app
+npm run studio -- --create-project "../projects/my-app"
 ```
 
-Add `--name my-app` when choosing a different app and package name. First-time
-offline installation requires the starter's locked packages in the npm cache.
+Add `--name my-app` to choose a different app and package name. For a first
+offline launch, have the pinned Node/npm pairs and lockfile packages available locally.
 
 ## Open a local project
 
-Install the selected application's pinned dependencies from its own directory:
+From the Studio directory, point the launcher at a project with its dependencies installed:
 
 ```sh
-PROJECT_NODE_BIN=/path/to/node-v24.22.2/bin
-PATH="$PROJECT_NODE_BIN:$PATH" "$PROJECT_NODE_BIN/npm" ci --offline --no-audit --no-fund
+npm run studio "../projects/my-app"
 ```
 
-From the Studio installation, open the independently installed app:
-
-```sh
-AWS_STUDIO_PROJECT_NODE=/path/to/node-v24.22.2/bin/node \
-  /path/to/node-v26.13.0/bin/node scripts/studio.mjs --project /path/to/projects/my-app
-```
+Use an absolute path or a path relative to where you ran the command. On npm 11,
+`npm run studio --project "../projects/my-app"` also works. Studio finds compatible
+Node/npm installations or downloads its supported pinned pairs as needed.
 
 Open the printed loopback URL. Select **Development** or **Production** and inspect
 workloads, resources and their source. Reviewed changes save to the selected

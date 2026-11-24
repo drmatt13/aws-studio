@@ -336,10 +336,10 @@ checks and publication. The service accepts a phase only for its active request 
 uses its own timestamps for elapsed/phase time. These messages establish no proof and
 clear at terminal results, owner cancellation and child replacement. The GraphQL detail
 status and Coding preparation show the same server message without guessed percentages.
-The [project launch command](../../DEV-DEPLOYMENT.md#node-and-npm-selection) selects an
-installed Node/npm pair before Studio starts. Its inspection child uses the same Node
-executable and checks the runtime before walking dependencies. Source and dependency
-capture failures carry separate bounded diagnostics.
+The [Studio launcher](../../../client-app/launch.mjs) selects the host Node/npm pair.
+Project admission selects the app's pair independently. The inspection child uses the
+project Node executable and checks the runtime before walking dependencies. Source and
+dependency capture failures carry separate bounded diagnostics.
 
 Normal chain reads use memory and bounded durable evidence only, including cold startup,
 focus and stale evidence. They never start deep work. Only explicit **Check again** or

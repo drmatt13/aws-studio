@@ -23,11 +23,9 @@ import { copyIsolatedProject } from "../../packages/aws-studio/test/cdk/support/
 const checkout = path.resolve(__dirname, "../..");
 const studio = path.resolve(process.env.STUDIO_UNDER_TEST ?? checkout);
 
-function run(file: string, args: readonly string[], cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function run(args: readonly string[], cwd: string, env = process.env): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    // The loader comes from Studio's own installation: the working directory may belong to no project.
-    const loader = pathToFileURL(createRequire(path.join(studio, "client-app/package.json")).resolve("tsx")).href;
-    const child = spawn(process.execPath, ["--import", loader, file, ...args], { cwd, env: { ...process.env, FORCE_COLOR: "0" }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, args, { cwd, env: { ...env, FORCE_COLOR: "0" }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
@@ -40,7 +38,7 @@ const status = () => execFileSync("git", ["status", "--porcelain", "--untracked-
 
 test("Studio opens a separate project and reads that project, not its own checkout", { timeout: 10 * 60_000 }, async () => {
   const parent = realpathSync(mkdtempSync(path.join(os.tmpdir(), "studio-external-project-")));
-  const project = path.join(parent, "external-app");
+  const project = path.join(parent, "external app é");
   const before = status();
   try {
     copyIsolatedProject(testProjectRoot, project, { physicalRelease: true });
@@ -53,10 +51,23 @@ test("Studio opens a separate project and reads that project, not its own checko
     cdk.context["framework:app"] = "external-proof";
     writeFileSync(cdkJson, `${JSON.stringify(cdk, null, 2)}\n`);
 
-    // Both ways a project is opened: named with --project from a directory that belongs to no
-    // project, and discovered from inside it, as `npm run studio` in a checkout does.
-    for (const [label, cwd, args] of [["--project", parent, ["--print", "--project", project]], ["discovered", project, ["--print"]]] as const) {
-      const result = await run(path.join(studio, "client-app/server/index.ts"), args, cwd);
+    // The direct entry point also works when the caller belongs to no package.
+    const loader = pathToFileURL(createRequire(path.join(studio, "client-app/package.json")).resolve("tsx")).href;
+    const server = ["--import", loader, path.join(studio, "client-app/server/index.ts")];
+    const npm = process.env.npm_execpath;
+    assert.ok(npm, "the workspace test runs through npm");
+    const env = { ...process.env };
+    delete env.AWS_STUDIO_NODE;
+    delete env.AWS_STUDIO_PROJECT_NODE;
+    delete env.STUDIO_PROJECT;
+    const subdirectory = path.join(studio, "scripts");
+    for (const [label, cwd, args] of [
+      ["direct --project", parent, [...server, "--print", "--project", project]],
+      ["discovered", project, [...server, "--print"]],
+      ["npm 11 --project", studio, [npm, "run", "--silent", "studio", "--project", path.relative(studio, project), "--", "--print"]],
+      ["npm positional path from a subdirectory", subdirectory, [npm, "run", "--silent", "studio", path.relative(subdirectory, project), "--", "--print"]],
+    ] as const) {
+      const result = await run(args, cwd, env);
       assert.equal(result.code, 0, `${label}: Studio exited ${result.code}:\n${result.stderr.slice(-3000)}`);
       const snapshot = JSON.parse(result.stdout) as { repositoryRoot: string; application?: { name?: string }; models: Record<"dev" | "prod", { status: string }> };
       assert.equal(snapshot.repositoryRoot, realpathSync(project), `${label}: the snapshot is the external project's`);

@@ -67,7 +67,11 @@ try {
       /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file) || !/\.(?:[cm]?[jt]s|tsx|json|ps1)$/.test(file)) continue;
     copyReleaseFile(installation, file);
   }
-  for (const file of ["LICENSE", "scripts/framework-archive.ts", "scripts/release-compatibility.ts", "scripts/starters.json", "scripts/test-project-source.mjs"]) {
+  for (const file of [
+    "LICENSE", "scripts/framework-archive.ts", "scripts/release-compatibility.ts", "scripts/starters.json", "scripts/test-project-source.mjs",
+    "scripts/studio-bootstrap.mjs", "scripts/studio-toolchain.mjs", "scripts/studio-node-archives.json",
+    "packages/aws-studio/cli/project-node.mjs",
+  ]) {
     copyReleaseFile(installation, file);
   }
   copyReleaseFile(installation, "scripts/studio.mjs", path.join(root, "client-app/launch.mjs"));

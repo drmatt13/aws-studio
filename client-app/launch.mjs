@@ -1,41 +1,40 @@
-import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { readFileSync, realpathSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { projectToolchainEnv } from "../packages/aws-studio/cli/project-node.mjs";
+import { prepareStudioDependencies, runStudioChild, studioArguments } from "../scripts/studio-bootstrap.mjs";
+import { findOrInstallToolchain } from "../scripts/studio-toolchain.mjs";
 
-const installation = new URL("../", import.meta.url);
-const { version } = JSON.parse(readFileSync(new URL("package.json", installation), "utf8"));
-const release = JSON.parse(readFileSync(new URL("scripts/studio-release.json", installation), "utf8"));
-const exactVersion = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
-const compatibleNode = (minimum, current) => {
-  if (!exactVersion.test(minimum)) return false;
-  const [major, minor, patch] = current.split(".").map(Number);
-  const [requiredMajor, requiredMinor, requiredPatch] = minimum.split(".").map(Number);
-  return major === requiredMajor && (minor > requiredMinor || minor === requiredMinor && patch >= requiredPatch);
-};
+const installation = realpathSync(fileURLToPath(new URL("../", import.meta.url)));
+const manifest = JSON.parse(readFileSync(path.join(installation, "package.json"), "utf8"));
+const release = JSON.parse(readFileSync(path.join(installation, "scripts/studio-release.json"), "utf8"));
+const env = { ...process.env };
+const caller = env.npm_lifecycle_event === "studio" && path.isAbsolute(env.INIT_CWD ?? "") ? env.INIT_CWD : process.cwd();
+const args = studioArguments(process.argv.slice(2), caller);
+// npm may consume --project into its own configuration. The positional path is
+// already in args. Keep npm invocation settings out of nested Studio installs.
+for (const key of Object.keys(env)) {
+  if (/^npm_config_(?:project|workspace|workspaces|include_workspace_root|prefix|global)$/i.test(key)) delete env[key];
+}
 
-if (!compatibleNode(release.runtime?.node, process.versions.node)) {
-  process.stderr.write(`AWS Studio ${version} requires Node ${release.runtime.node} or later on its Node ${release.runtime.node.split(".")[0]}.x line. This executable is Node ${process.versions.node}.\n`);
-  process.exitCode = 1;
-} else if (process.argv[2] === "--version" && process.argv.length === 3) {
-  console.log(`AWS Studio ${version} · framework ${release.frameworkVersion} · Node ${process.versions.node}`);
-} else {
-  const require = createRequire(import.meta.url);
-  try {
-    const loader = pathToFileURL(require.resolve("tsx")).href;
-    const entry = fileURLToPath(new URL("client-app/server/index.ts", installation));
-    const child = spawn(process.execPath, ["--import", loader, entry, ...process.argv.slice(2)], { stdio: "inherit", windowsHide: true });
-    const interrupt = () => child.kill("SIGINT"), terminate = () => child.kill("SIGTERM");
-    process.on("SIGINT", interrupt);
-    process.on("SIGTERM", terminate);
-    child.once("error", error => { process.stderr.write(`${error.message}\n`); });
-    child.once("close", (code, signal) => {
-      process.off("SIGINT", interrupt);
-      process.off("SIGTERM", terminate);
-      process.exitCode = code ?? (signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 1);
-    });
-  } catch (error) {
-    process.stderr.write(`Install AWS Studio's locked dependencies with npm ci before launching. ${error.message}\n`);
-    process.exitCode = 1;
+try {
+  if (args.includes("--help")) {
+    console.log("Open a project with npm run studio <directory> or npm run studio -- --project <directory>. Paths are relative to where you ran the command.");
+    console.log("Forward additional Studio flags after --, such as --print, --port <number>, or --create-project <directory>.");
+    console.log("For an interrupted upgrade, use --project <directory> --recover-upgrade [--status | --keep-current <id> <fingerprint>] after --.");
+  } else {
+    const runtime = await findOrInstallToolchain(installation, env);
+    if (args.length === 1 && args[0] === "--version") {
+      console.log(`AWS Studio ${manifest.version} · framework ${release.frameworkVersion} · Node ${runtime.version}`);
+    } else {
+      const loader = await prepareStudioDependencies(installation, manifest.name === "aws-studio-distribution", runtime, env);
+      const entry = path.join(installation, "client-app/server/index.ts");
+      process.exitCode = await runStudioChild(runtime.node, ["--import", pathToFileURL(loader).href, entry, ...args], {
+        env: projectToolchainEnv(runtime, env), stdio: "inherit",
+      });
+    }
   }
+} catch (error) {
+  process.stderr.write(`${error.message}\n`);
+  process.exitCode = 1;
 }

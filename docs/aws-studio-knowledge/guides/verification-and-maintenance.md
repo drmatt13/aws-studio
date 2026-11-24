@@ -52,6 +52,9 @@ Set Studio's version in the root `package.json`. From the Studio checkout,
 `npm version patch --no-git-tag-version` updates the version and lockfile together.
 The packer reads that version and records it in the installed package. Set the
 bundled framework version and host runtime in `scripts/studio-release.json`.
+When changing a managed Node pin, update `scripts/studio-node-archives.json` using
+the digests published with that Node.js release. First-launch provisioning checks
+the pinned archive digest before extracting and activating the runtime.
 The framework package declares its own version,
 runtime ranges, minimum Studio release, evaluator protocol and creator capabilities.
 Retain the exact framework archive when releasing a Studio-only change.

@@ -1,7 +1,7 @@
 import { IncompatibleProjectError, resolveStudioProject, resolveStudioProjectRoot } from "./project";
 import { describeStudioRelease } from "./project-release";
 import { assertWindowsUserContext } from "aws-studio/cli/windows-security";
-import { projectRuntime } from "./project-runtime";
+import { prepareProjectRuntime } from "./project-runtime";
 
 /**
  * `npm run studio`: the Framework Studio server.
@@ -42,12 +42,12 @@ async function main(): Promise<void> {
     const name = nameIndex < 0 ? undefined : args[nameIndex + 1];
     if (nameIndex >= 0 && (!name || name.startsWith("--"))) throw new IncompatibleProjectError("--name needs a lowercase npm package name.");
     const { createStudioProject } = await import("./project-create");
-    const created = createStudioProject(target, name);
+    const created = await createStudioProject(target, name);
     process.stderr.write(`Created project: ${created}\n`);
     args = [...args.filter((_value, position) => position !== index && position !== index + 1 && (nameIndex < 0 || position !== nameIndex && position !== nameIndex + 1)), "--project", created];
   }
   const { root: repositoryRoot } = resolveStudioProject({ args, env: process.env, cwd: process.cwd() });
-  const runtime = projectRuntime(repositoryRoot);
+  const runtime = await prepareProjectRuntime(repositoryRoot);
   process.stderr.write(`Studio runtime: Node ${process.versions.node} (${process.execPath}); project runtime: Node ${runtime.version} (${runtime.node}), npm ${runtime.npmVersion} (${runtime.npm})\n`);
   // The bundled CLI belongs to this installation, so neither the project nor the working directory locates it.
   process.stderr.write(`${describeStudioRelease()}\n`);

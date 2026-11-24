@@ -237,11 +237,16 @@ Keep the existing app framework for a routine edit. Combine a required pin
 advance and its feature change in one reviewed approval.
 
 The distribution records its own version, runtime and the bundled framework's
-version and integrity. The project's installed manifest supplies the minimum
-Studio release, protocol and capabilities. The public Framework 1.0.0 requires
+version and integrity. The same npm launch command works from a checkout or
+distribution. It anchors an explicit project path to the caller's directory,
+prepares Studio's locked dependencies when missing, and selects the host and
+project toolchains independently. A supported missing pair is installed from a
+checksum-pinned Node.js archive into the user's runtime cache. The project's
+installed manifest supplies the minimum Studio release, protocol and capabilities.
+The public Framework 1.0.0 requires
 Studio 1.0.0. Evaluation starts a worker under the selected project Node and
 verifies the worker handshake.
-Missing deployment inputs have an explicit setup action. [Packer](../../../scripts/pack-studio.ts) · [Admission](../../../client-app/server/project-release.ts) · [Startup](../../../client-app/server/server.ts) · [Evaluator](../../../client-app/server/evaluator/pool.ts)
+Missing deployment inputs have an explicit setup action. [Launcher](../../../client-app/launch.mjs) · [Packer](../../../scripts/pack-studio.ts) · [Admission](../../../client-app/server/project-release.ts) · [Evaluator](../../../client-app/server/evaluator/pool.ts)
 
 Reviewed feature adoption stages the installed target framework before source
 planning. Apply activates the verified dependency tree with the source, lock and

@@ -5,7 +5,7 @@ import { APP_CONTEXT_KEY, APP_ID_CONTEXT_KEY, TARGETS_CONTEXT_KEY, newAppId, pro
 import { publicStarterPath, readStarterFiles, readStarterSelection, writeStarterFiles } from "../../scripts/test-project-source.mjs";
 import { IncompatibleProjectError } from "./project-errors";
 import { resolveProjectInstallation, studioInstallation } from "./project-release";
-import { projectRuntime, projectRuntimeEnvironment } from "./project-runtime";
+import { prepareProjectRuntime, projectRuntime, projectRuntimeEnvironment } from "./project-runtime";
 
 function filesFromInstalledStarter(root: string, directory = root): ReturnType<typeof readStarterFiles> {
   return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
@@ -49,7 +49,7 @@ function rebaseWorkspaceLinks(staging: string, target: string, lockEntries: Reco
 }
 
 /** Create from the installation's immutable public starter and publish only after npm ci and admission. */
-export function createStudioProject(directory: string, packageName?: string): string {
+export async function createStudioProject(directory: string, packageName?: string): Promise<string> {
   const requested = path.resolve(directory);
   const parent = realpathSync(path.dirname(requested));
   const target = path.join(parent, path.basename(requested));
@@ -85,7 +85,7 @@ export function createStudioProject(directory: string, packageName?: string): st
     // A newly created repository starts with no destination inherited from its starter.
     delete cdk.context[TARGETS_CONTEXT_KEY];
     writeFileSync(cdkPath, JSON.stringify(cdk, null, 2) + "\n");
-    const runtime = projectRuntime(staging, process.env, { installedFramework: false });
+    const runtime = await prepareProjectRuntime(staging, { installedFramework: false });
     const env = projectRuntimeEnvironment(runtime);
     for (const key of Object.keys(env)) {
       if (/^(?:npm_config_(?:workspace|workspaces|include_workspace_root|prefix|global)|INIT_CWD|FRAMEWORK_REPOSITORY_ROOT|FRAMEWORK_INPUTS_FILE)$/i.test(key)) delete env[key];

@@ -96,8 +96,8 @@ runtime health. Database status performs a separate selected-target observation;
 arbitrary Compose runtime overrides remain unsupported.
 
 ```powershell
-npm run studio            # http://127.0.0.1:4590/  (--port <n>, or STUDIO_PORT)
-npm run studio -- --print # the whole model as JSON, then exit
+npm run studio "../my-app"                 # http://127.0.0.1:4590/
+npm run studio -- "../my-app" --print       # the whole model as JSON, then exit
 ```
 
 Studio runs on your machine beside your editor, not in Compose. When it writes a file,

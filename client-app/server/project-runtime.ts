@@ -3,21 +3,40 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { findProjectToolchain, projectToolchainEnv, type ProjectToolchain } from "aws-studio/cli/project-node.mjs";
 
+interface RuntimeOptions { readonly installedFramework?: boolean }
+
+function projectRuntimeError(error: unknown): Error {
+  if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    return new Error("The project must declare its Node version in .nvmrc and its npm version in package.json.");
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(message.replaceAll("AWS_STUDIO_NODE", "AWS_STUDIO_PROJECT_NODE"), { cause: error });
+}
+
 /**
  * The Studio bootstrap override does not select the app runtime. The app's pins
  * and an optional explicit project override select the pair, before any app code.
  */
-export function projectRuntime(root: string, env: NodeJS.ProcessEnv = process.env, options: { readonly installedFramework?: boolean } = {}): ProjectToolchain {
+export function projectRuntime(root: string, env: NodeJS.ProcessEnv = process.env, options: RuntimeOptions = {}): ProjectToolchain {
   const selectedEnv = { ...env, AWS_STUDIO_NODE: env.AWS_STUDIO_PROJECT_NODE };
   let runtime: ProjectToolchain;
   try { runtime = findProjectToolchain(root, selectedEnv); }
-  catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error("The project must declare its Node version in .nvmrc and its npm version in package.json.");
-    }
-    throw new Error(message.replaceAll("AWS_STUDIO_NODE", "AWS_STUDIO_PROJECT_NODE"), { cause: error });
+  catch (error) { throw projectRuntimeError(error); }
+  return validateProjectRuntime(root, runtime, options);
+}
+
+/** Opening or creating a project can populate the user-level runtime cache. */
+export async function prepareProjectRuntime(root: string, options: RuntimeOptions = {}): Promise<ProjectToolchain> {
+  let runtime: ProjectToolchain;
+  try {
+    const { findOrInstallToolchain } = await import("../../scripts/studio-toolchain.mjs");
+    runtime = await findOrInstallToolchain(root, { ...process.env, AWS_STUDIO_NODE: process.env.AWS_STUDIO_PROJECT_NODE });
   }
+  catch (error) { throw projectRuntimeError(error); }
+  return validateProjectRuntime(root, runtime, options);
+}
+
+function validateProjectRuntime(root: string, runtime: ProjectToolchain, options: RuntimeOptions): ProjectToolchain {
   // The packaged project runner and the framework both declare which versions
   // they can execute under. Test those constraints as data, with no app imports.
   function check(file: string, label: string): void {

@@ -17,8 +17,8 @@ framework and Prisma workflows. The Database workbench edits its fixed authored 
 contract through a separate source authority; it does not expand the configuration writer.
 
 ```powershell
-npm run studio            # http://127.0.0.1:4590/   (--port <n>, or STUDIO_PORT)
-npm run studio -- --print # the whole model as JSON, then exit
+npm run studio "../my-app"                 # http://127.0.0.1:4590/
+npm run studio -- "../my-app" --print       # the whole model as JSON, then exit
 ```
 
 ## Views

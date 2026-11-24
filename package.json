@@ -13,7 +13,7 @@
     "packageManager": { "name": "npm", "version": ">=11.19.1 <12", "onFail": "warn" }
   },
   "scripts": {
-    "studio": "node scripts/project-node.mjs node --import tsx client-app/server/index.ts",
+    "studio": "node client-app/launch.mjs",
     "pack": "node scripts/project-node.mjs node --import tsx scripts/pack.ts",
     "pack:studio": "node --import tsx scripts/pack-studio.ts",
     "build": "npm --workspace framework-studio run build",
