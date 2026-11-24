@@ -365,8 +365,10 @@ export function connectionIssues(connection: ConnectionGroup, mode: Mode, index:
   }
   const one = missing.length === 1;
   const files = [...new Set(missing.map(edge => edge.inputRequirement!.file))];
-  // Framework inputs take no default; only the file can supply them.
-  const defaults = missing.some(edge => !index.resources.get(edge.to)?.frameworkInput);
+  const defaults = missing.some(edge => {
+    const input = index.resources.get(edge.to);
+    return !input?.frameworkInput || input.inputChoices?.fallback;
+  });
   return [...readiness, {
     severity: "error",
     badge: "error",

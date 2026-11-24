@@ -30,13 +30,8 @@ jobs:
           node scripts/check-lockfile-platforms.mjs
           node docs/aws-studio-knowledge/check.mjs
           python3 docs/check-links.py
-      - name: Describe starter fixture configuration
-        if: vars.AWS_STUDIO_PUBLIC_STARTER_REPOSITORY == ''
-        run: echo '::notice::The native and PostgreSQL gates run when AWS_STUDIO_PUBLIC_STARTER_REPOSITORY names a public starter repository.'
-
   local-database:
     name: Fresh-clone PostgreSQL startup and retained data
-    if: vars.AWS_STUDIO_PUBLIC_STARTER_REPOSITORY != ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -60,7 +55,7 @@ jobs:
       - name: Check out the public starter fixture
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ vars.AWS_STUDIO_PUBLIC_STARTER_REPOSITORY }}
+          repository: ${{ steps.starter.outputs.repository }}
           ref: ${{ steps.starter.outputs.commit }}
           path: aws-studio-starter-projects
           persist-credentials: false
@@ -84,7 +79,6 @@ jobs:
 
   verify:
     name: Node 24 / ${{ matrix.os }}
-    if: vars.AWS_STUDIO_PUBLIC_STARTER_REPOSITORY != ''
     strategy:
       fail-fast: false
       matrix:
@@ -116,7 +110,7 @@ jobs:
       - name: Check out the public starter fixture
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ vars.AWS_STUDIO_PUBLIC_STARTER_REPOSITORY }}
+          repository: ${{ steps.starter.outputs.repository }}
           ref: ${{ steps.starter.outputs.commit }}
           path: aws-studio-starter-projects
           persist-credentials: false

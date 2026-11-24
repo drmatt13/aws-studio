@@ -268,11 +268,11 @@ test("an Errors filter appears only with errors, starts on, and keeps error wire
   assert.notEqual(state.pickAt(at.x, at.y)?.id, wire.id, "off, the wire follows its category filter again");
 });
 
-test("framework settings groups stand on the inputs island, read only, with errored connections for missing lines", async () => {
+test("framework settings groups expose input requirements and show errored connections for missing lines", async () => {
   const scene = buildScene(response.snapshot.models.dev, { layoutModels: Object.values(response.snapshot.models), resourceAvailability: catalogAvailability(response.snapshot.models) });
   const node = scene.nodes.find(item => item.id === "framework:local")!;
   // Its entries are input declarations without managedBy, so the developer owns them; no platform lock.
-  assert.deepEqual([node.icon, node.island, cornerBadges(node).right, node.label], ["group", "island:inputs", undefined, "Local development"]);
+  assert.deepEqual([node.icon, node.island, node.label], ["group", "island:inputs", "Local development"]);
   assert.equal(response.snapshot.models.dev.ownership?.["framework:local"]?.managedBy, "developer");
   assert.ok(!scene.nodes.some(item => item.id.startsWith("framework:local.")), "entries fold into their group's building");
   await mount(true, "framework:local");
@@ -284,9 +284,13 @@ test("framework settings groups stand on the inputs island, read only, with erro
   await ui.waitFor(() => assert.equal(ui.screen.getByLabelText("Selection").textContent, "framework:local.postgresHostPort"));
   const behavior = document.querySelector<HTMLElement>("[data-slot=\"framework-input-behavior\"]")!;
   assert.ok(behavior, "the input's behavior is shown");
-  assert.equal(behavior.querySelectorAll("input, select, textarea").length, 0, "and cannot be edited: no default can be added");
-  assert.ok(behavior.textContent?.includes("Default") && behavior.textContent.includes("None"));
-  assert.equal(document.querySelector("[data-slot=\"resource-editor\"]"), null, "the catalog's input editor never opens on a framework input");
+  const required = inspector.getByRole<HTMLInputElement>("checkbox", { name: "Required in development" });
+  assert.equal(required.checked, true);
+  assert.equal(required.matches(":disabled"), false);
+  assert.equal(inspector.getByRole("checkbox", { name: "Available in development" }).matches(":disabled"), true);
+  assert.equal(inspector.queryByLabelText("Default in development"), null, "Compose reads the port from the file");
+  ui.fireEvent.click(required);
+  assert.equal(required.checked, false);
   ui.cleanup();
   // A required line its file leaves unset is a missing value on the group's connection.
   const unset = (model: typeof response.snapshot.models.dev) => ({
@@ -296,7 +300,8 @@ test("framework settings groups stand on the inputs island, read only, with erro
   });
   const broken = buildScene(unset(response.snapshot.models.dev), { layoutModels: [unset(response.snapshot.models.dev), response.snapshot.models.prod] });
   const group = broken.nodes.find(item => item.id === "framework:local")!;
-  assert.deepEqual([group.issues?.[0]?.title, cornerBadges(group).right], ["Required value missing", "error"]);
+  assert.match(group.issues?.[0]?.title ?? "", /^Required values? missing$/);
+  assert.equal(cornerBadges(group).right, "error");
   assert.ok(broken.edges.some(edge => edge.from === CDK_ENVIRONMENT_ID && edge.to === "framework:local" && missingConnectionInput(edge)), "the file's supply connection to the group is errored");
 });
 

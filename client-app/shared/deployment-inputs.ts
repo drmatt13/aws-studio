@@ -4,6 +4,10 @@ import type { ApplyResponse, DiffLine } from "./api";
 /** One Studio environment editor, backed by two independently authored files. */
 export const CDK_ENVIRONMENT_ID = "envfile:cdk";
 
+/** These local tools resolve their test-account settings through the input builders. */
+export const LOCAL_TEST_ACCOUNT_INPUTS = ["LOCAL_TEST_USER_EMAIL", "LOCAL_TEST_USER_PASSWORD"] as const;
+export const LOCAL_TEST_PASSWORD_DEFAULT = "LOCAL_TEST_USER_PASSWORD_DEFAULT";
+
 /** Requirement resolution metadata only. Never contains an authored value. */
 export interface InputRequirement {
   readonly resource: string;

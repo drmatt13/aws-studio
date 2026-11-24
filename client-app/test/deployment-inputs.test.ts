@@ -7,7 +7,7 @@ import { parseEnv } from "node:util";
 import { test } from "node:test";
 import { createDeploymentInput, initializeDeploymentInputs, withDeploymentInputs as projectDeploymentInputs } from "../server/deployment-inputs";
 import { projectInputMetadata } from "../server/evaluator/input-metadata";
-import { CDK_ENVIRONMENT_ID, isUndeclaredEnvironmentInput } from "../shared/deployment-inputs";
+import { CDK_ENVIRONMENT_ID, isUndeclaredEnvironmentInput, LOCAL_TEST_PASSWORD_DEFAULT } from "../shared/deployment-inputs";
 import { InfrastructureService } from "../server/infrastructure";
 import { sourcePublicationEpoch, withSourceRead } from "aws-studio/source/source-gate";
 import { assertWindowsPrivatePath } from "aws-studio/cli/windows-security";
@@ -46,6 +46,29 @@ function remove(root: string) {
   assert.ok(path.basename(root).startsWith("deployment-inputs-"));
   rmSync(root, { recursive: true });
 }
+
+test("starter setup generates a unique private test-account password and preserves it on repeat", () => {
+  const root = studioProjectScratch("deployment-inputs-password-");
+  try {
+    const cdk = path.join(root, "cdk-app");
+    mkdirSync(cdk);
+    const marker = "# studio:generate-local-test-password\n";
+    for (const mode of ["dev", "prod"]) writeFileSync(path.join(cdk, `.env.${mode}.template`), marker);
+    const prepare = () => {
+      assert.equal(createDeploymentInput(root, "dev").created, true);
+      return parseEnv(readFileSync(path.join(cdk, ".env.dev"), "utf8"))[LOCAL_TEST_PASSWORD_DEFAULT];
+    };
+    const first = prepare();
+    assert.match(first!, /^Aa1![A-Za-z0-9_-]{32}$/);
+    assert.equal(createDeploymentInput(root, "dev").created, false);
+    assert.equal(parseEnv(readFileSync(path.join(cdk, ".env.dev"), "utf8"))[LOCAL_TEST_PASSWORD_DEFAULT], first);
+    rmSync(path.join(cdk, ".env.dev"));
+    assert.ok(prepare() !== first);
+    assert.equal(createDeploymentInput(root, "prod").created, true);
+    assert.equal(readFileSync(path.join(cdk, ".env.prod"), "utf8"), marker);
+    assert.equal(readFileSync(path.join(cdk, ".env.dev.template"), "utf8"), marker);
+  } finally { remove(root); }
+});
 
 test("startup reads existing deployment inputs under a source read lease without advancing the publication epoch", async () => {
   const root = fixture();
@@ -119,14 +142,14 @@ test("both files list the same names, and the catalog decides each graph's defau
     const file = (mode: "dev" | "prod") => withDeploymentInputs(root, models[mode], models).resources.find((resource) => resource.id === `envfile:${mode}`)!.deploymentFile!;
     const dev = file("dev"), prod = file("prod");
     const entry = (from: typeof dev, name: string) => from.entries.find((item) => item.name === name);
-    const names = ["DATABASE_MULTI_AZ", "DATABASE_ONLY", "LOCAL_ONLY", "PORT", "SETTING", "SKIP_EMAIL_VERIFICATION", "TOKEN"];
-    // Each file also lists the framework lines its own environment requires, written or not.
+    const names = ["DATABASE_MULTI_AZ", "DATABASE_ONLY", "LOCAL_ONLY", "PORT", "SETTING", "SKIP_EMAIL_VERIFICATION", "TOKEN",
+      "LOCAL_DEV_URL", "RETAIN_STATEFUL_RESOURCES", "USE_FRONTEND_CUSTOM_DOMAIN", "USE_COGNITO_CUSTOM_DOMAIN"];
+    // Each file also lists framework settings with a requirement or default.
     const required = (mode: "dev" | "prod") => REQUIRED_FRAMEWORK_INPUTS[mode].filter((name) => !name.startsWith("DATABASE_"));
     assert.deepEqual(dev.entries.map((item) => item.name), [...new Set([...names, ...required("dev")])].sort());
     assert.deepEqual(prod.entries.map((item) => item.name), [...new Set([...names, ...required("prod")])].sort(), "a line written where the catalog does not read it stays visible");
     // Variables the application reads outside the catalog name their owner, default and choices.
-    assert.deepEqual([entry(prod, "SKIP_EMAIL_VERIFICATION")!.owner, entry(prod, "SKIP_EMAIL_VERIFICATION")!.default, entry(prod, "SKIP_EMAIL_VERIFICATION")!.choices], ["deployment", undefined, ["true", "false"]],
-      "a framework setting keeps its choices but takes no default: the file supplies it");
+    assert.deepEqual([entry(prod, "SKIP_EMAIL_VERIFICATION")!.owner, entry(prod, "SKIP_EMAIL_VERIFICATION")!.default, entry(prod, "SKIP_EMAIL_VERIFICATION")!.choices], ["deployment", "false", ["true", "false"]]);
     assert.match(entry(prod, "SKIP_EMAIL_VERIFICATION")!.note!, /production deployment refuses/);
     assert.equal(entry(prod, "DATABASE_MULTI_AZ")!.owner, "database");
     assert.equal(entry(dev, "DATABASE_MULTI_AZ")!.notRead, undefined, "a mirrored row writes nothing, so nothing is flagged");
@@ -152,7 +175,7 @@ test("both files list the same names, and the catalog decides each graph's defau
   } finally { remove(root); }
 });
 
-test("framework inputs project as managed groups with no defaults, and a required line left unset is a missing value", () => {
+test("framework input groups distinguish defaults from unset required values", () => {
   const root = fixture();
   try {
     writeFileSync(path.join(root, "cdk-app/.env.dev"), "CDK_APP_NAME=private-name-value\nLOCAL_DEV_URL=http://private-dev-url.example\nPOSTGRES_HOST_PORT=15432\nPGADMIN_HOST_PORT=\nLOCAL_AWS_PROFILE=\nSETTING=\n");
@@ -169,25 +192,24 @@ test("framework inputs project as managed groups with no defaults, and a require
     // cdk-app/cdk.json names deployments; no inputs file setting does any more.
     assert.equal(byId.has("framework:deployment.cdkAppName"), false);
     const url = entry("framework:deployment.localDevUrl");
-    assert.deepEqual([url.kind, url.parent, url.fromEnv, url.default, url.required, url.inputRequirement!.status], ["input", "framework:deployment", "LOCAL_DEV_URL", undefined, true, "configured"]);
-    assert.deepEqual(url.modes?.dev, { present: true, required: true }, "required where its template writes it");
+    assert.deepEqual([url.kind, url.parent, url.fromEnv, url.default, url.required, url.inputRequirement!.status], ["input", "framework:deployment", "LOCAL_DEV_URL", "http://localhost:3000", true, "configured"]);
+    assert.deepEqual(url.modes?.dev, { present: true, required: true, default: "http://localhost:3000" }, "required where its template writes it");
     assert.equal(entry("framework:local.pgadminHostPort").inputRequirement!.status, "missing", "a blank required line has no default to stand in");
-    assert.equal(entry("framework:deployment.skipEmailVerification").inputRequirement!.status, "missing", "an unwritten required line is missing");
+    assert.equal(entry("framework:deployment.skipEmailVerification").inputRequirement!.status, "default");
     assert.equal(entry("framework:local.localAwsProfile").inputRequirement!.status, "optional", "the template writes LOCAL_AWS_PROFILE, but blank is allowed");
-    assert.equal(entry("framework:deployment.retainStatefulResources").inputRequirement!.status, "optional", "a commented template line is optional");
-    assert.ok(!projected.resources.some((resource) => resource.frameworkInput && resource.default !== undefined), "framework inputs take no default");
+    assert.equal(entry("framework:deployment.retainStatefulResources").inputRequirement!.required, false, "a commented template line is optional");
     assert.ok(!["private-name-value", "private-dev-url", "15432"].some((value) => JSON.stringify(projected.resources).includes(value)), "values never enter the graph");
     const shadowed = project({ ...dev, resources: [...model.resources, { id: "resource:devUrl", path: ["devUrl"], kind: "input", fromEnv: "LOCAL_DEV_URL", absent: false }] });
     assert.ok(!shadowed.resources.some((resource) => resource.id === "framework:deployment.localDevUrl"), "a name the catalog declares stays the catalog's");
     // Supply connections reach each framework input like any input's, carrying its requirement.
     const wires = (graph: ModeModel, models = { dev, prod }) => project(graph, models).edges.filter((edge) => edge.to.startsWith("framework:")).map((edge) => `${edge.from} ${edge.label} ${edge.inputRequirement?.status}`);
     const devWires = wires(dev);
-    for (const wire of ["envfile:dev LOCAL_DEV_URL configured", "envfile:dev PGADMIN_HOST_PORT missing", "envfile:dev SKIP_EMAIL_VERIFICATION missing", "envfile:dev LOCAL_AWS_PROFILE optional", "envfile:prod USE_FRONTEND_CUSTOM_DOMAIN missing"]) assert.ok(devWires.includes(wire), wire);
+    for (const wire of ["envfile:dev LOCAL_DEV_URL configured", "envfile:dev PGADMIN_HOST_PORT missing", "envfile:dev SKIP_EMAIL_VERIFICATION default", "envfile:dev LOCAL_AWS_PROFILE optional", "envfile:prod USE_FRONTEND_CUSTOM_DOMAIN default"]) assert.ok(devWires.includes(wire), wire);
     assert.ok(!devWires.some((wire) => wire.startsWith("envfile:prod POSTGRES_HOST_PORT")), "production never reads a local setting");
     assert.ok(!devWires.some((wire) => wire.includes("RETAIN_STATEFUL_RESOURCES")), "an optional line nobody wrote has no connection");
     const devFile = projected.resources.find((item) => item.id === "envfile:dev")!.deploymentFile!;
     const line = devFile.entries.find((item) => item.name === "SKIP_EMAIL_VERIFICATION")!;
-    assert.deepEqual([line.owner, line.targets, line.default, line.status, line.requirements![0]!.required], ["deployment", ["framework:deployment.skipEmailVerification"], undefined, "missing", true], "a required line is listed before it is written");
+    assert.deepEqual([line.owner, line.targets, line.default, line.status, line.requirements![0]!.required], ["deployment", ["framework:deployment.skipEmailVerification"], "false", "missing", true], "a required line is listed before it is written");
     const prodPort = project(prod).resources.find((item) => item.id === "envfile:prod")!.deploymentFile!.entries.find((item) => item.name === "POSTGRES_HOST_PORT")!;
     assert.deepEqual([prodPort.owner, prodPort.notRead, prodPort.requirements], ["local", true, []]);
     const managed = { ...prod, managedDatabase: { settings: { multiAz: false } } as unknown as ModeModel["managedDatabase"] };
@@ -218,7 +240,7 @@ test("sign-in providers are a framework-managed catalog group whose lines are al
     const secret = inDev.get("resource:signInProviders.googleClientSecret")!;
     assert.deepEqual([secret.inputRequirement!.required, secret.inputRequirement!.status], [true, "missing"], "a partly set provider needs the rest of its lines");
     assert.match(secret.inputRequirement!.reasons.join(" "), /Google sign-in reads GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET together/);
-    assert.deepEqual(secret.modes, { dev: { present: true, required: true }, prod: { present: true, required: true } });
+    assert.deepEqual(secret.modes, { dev: { present: true, required: false }, prod: { present: true, required: false } }, "the editable declaration policy is independent of the provider's conditional requirement");
     assert.equal(inProd.get("resource:signInProviders.googleClientSecret")!.inputRequirement!.status, "configured");
     const meta = inDev.get("resource:signInProviders.metaAppId")!;
     assert.deepEqual([meta.inputRequirement!.required, meta.inputRequirement!.status, meta.modes!.dev.required], [false, "optional", false], "an unset provider is simply off");

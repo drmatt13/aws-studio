@@ -1375,7 +1375,7 @@ from offline/local tests. Use a disposable fixture for deliberate failures.
 | docker-compose.services.yml | Generated: one container per service that runs locally, included by docker-compose.yml |
 | framework-config/inputs/deployment.ts | The deployment settings (domains, SES sender, retention, …), declared with the catalog's builders: default, choices and a note for each |
 | packages/aws-studio/cdk/deployment.ts | What each deployment setting means for the graph: validation, production refusals and compatibility aliases |
-| cdk-app/framework-inputs.ts | The local development tooling's settings (Compose host ports, local AWS profile and region, warm Lambda processes, seeded test user), declared the same way with no defaults, and `REQUIRED_FRAMEWORK_INPUTS`: the framework lines each inputs file must write, matching its template. AWS Studio shows every framework setting as a framework-managed input group and flags a required one a file leaves unset |
+| cdk-app/framework-inputs.ts | Local development settings and `REQUIRED_FRAMEWORK_INPUTS`, the legacy list of required lines. Studio shows the settings by reader. A test-account reader that exports `localTestAccountInputs` can honor availability and an email default from the declarations. The password is read from the development inputs file |
 
 Each command states the graph it builds as CDK context: development unless it says
 `-c prodDeployment=true` (the deprecated `-c useLocalDevStack` is its inverse). The deployment

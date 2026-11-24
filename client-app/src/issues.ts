@@ -102,12 +102,11 @@ function missingValueIssue(resource: ModelResource, resources?: Iterable<ModelRe
   if (resource.kind === "input" || resource.kind === "secret") {
     if (!valueMissing(resource)) return undefined;
     const { name, file, mode } = resource.inputRequirement!;
-    const secret = resource.kind === "secret";
-    // A framework input, like a secret, takes no default: only the file supplies it.
+    const secret = resource.kind === "secret" || resource.inputChoices?.sensitive;
     return { severity: "error", title: "Required value missing", badge: "error", details: [
       `${name} has no value for ${ENVIRONMENT[mode]}: ${file} leaves it unset${secret ? "" : " and no default stands in"}.`,
       secret ? `Set it in ${file}; a secret never takes a source default.`
-        : resource.frameworkInput ? `Set it in ${file}; the framework reads it from there and takes no default.`
+        : resource.frameworkInput && !resource.inputChoices?.fallback ? `Set it in ${file}; the framework reads it from there and takes no default.`
           : `Set it in ${file}, or give the parameter a default.`,
     ] };
   }
@@ -116,7 +115,7 @@ function missingValueIssue(resource: ModelResource, resources?: Iterable<ModelRe
   if (!unmet.length) return undefined;
   const one = unmet.length === 1;
   const files = [...new Set(unmet.map(entry => entry.inputRequirement!.file))].join(" and ");
-  const inputs = unmet.filter(entry => entry.kind === "input" && !entry.frameworkInput).length;
+  const inputs = unmet.filter(entry => entry.kind === "input" && (!entry.frameworkInput || entry.inputChoices?.fallback)).length;
   const remedy = !inputs ? "" : inputs === unmet.length ? (one ? ", or give it a default" : ", or give them defaults") : ", or give the inputs defaults";
   return { severity: "error", title: one ? "Required value missing" : "Required values missing", badge: "error", details: [
     `${entryCount(unmet)} ${one ? "has" : "have"} no value: ${files} leaves ${one ? "it" : "them"} unset${inputs ? " and no default stands in" : ""}.`,

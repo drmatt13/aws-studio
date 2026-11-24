@@ -16,9 +16,10 @@ export function InputAllowedValues({ resource }: { readonly resource: ModelResou
   const fields = useRef<(HTMLInputElement | null)[]>([]);
   const add = useRef<HTMLButtonElement>(null);
   const form = draft.resourceForm(resource);
-  if (form.secret) return null;
+  if (form.secret || resource.inputChoices?.sensitive) return null;
   const choices = form.choices ?? resource.values ?? [];
-  const editable = !resource.frameworkInput || !!resource.inputChoices;
+  const owner = model.ownership?.[resource.id];
+  const editable = !resource.frameworkInput || (resource.frameworkInput === "authentication" || !!resource.inputChoices) && (!owner || owner.managedBy === "developer");
   const disabled = sourceEditBlocked({ draftState, draft, model, live }) || live.running !== null || draftState.entries.some(entry => entry.kind === "environment" || entry.kind === "create");
   const entry = draftState.entries.find(entry => entry.kind === "resource" && entry.intent.resource === resource.id);
   const error = inputChoicesError(choices) ?? entry?.error;
@@ -53,8 +54,8 @@ export function InputAllowedValues({ resource }: { readonly resource: ModelResou
             }}>Add allowed value</button>
           </div> : null}
           {error ? <p id={`${prefix}-error`} role="status" className="mt-2 mb-0 text-caption text-refuse wrap-anywhere">{error}</p> : null}
-          {resource.inputChoices?.defaults.length ? <p className="mt-2 mb-0 text-caption text-graphite">Declared defaults: {resource.inputChoices.defaults.join(", ")}.</p> : null}
-          {resource.inputChoices ? <p className="mt-2 mb-0 text-caption text-graphite"><a href={editorLink(snapshot.repositoryRoot, resource.inputChoices.source)}>Open {resource.inputChoices.source.file}</a>. Changing choices does not change how the framework reader interprets them.</p> : null}
+          {!resource.inputChoices?.fallback && resource.inputChoices?.defaults.length ? <p className="mt-2 mb-0 text-caption text-graphite">Declared defaults: {resource.inputChoices.defaults.join(", ")}.</p> : null}
+          {resource.inputChoices ? <p className="mt-2 mb-0 text-caption text-graphite"><a href={editorLink(snapshot.repositoryRoot, resource.inputChoices.source)}>Open {resource.inputChoices.source.file}</a></p> : null}
         </fieldset>
       ) : <p className="m-0 text-caption text-graphite">{choices.length ? choices.join(", ") : "Unrestricted text"}. {resource.frameworkInput === "database" ? "These choices follow the database setting's type, rather than an enum declaration." : "This input has no editable literal enum declaration. Edit its source to change the allowed values."}</p>}
     </section>

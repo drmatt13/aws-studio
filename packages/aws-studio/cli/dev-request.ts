@@ -12,16 +12,20 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { parseEnv } from "node:util";
 import { frameworkRepositoryRoot, readAuthoredInputs } from "aws-studio/config/source";
+import { projectDeclarations } from "aws-studio/config/project-declarations";
 
 async function main(): Promise<void> {
   // Only a development export writes LOCAL_FRAMEWORK_DEPLOYMENT to root .env:
   // without it, the Cognito pool this would sign in to could be anyone's.
-  const exportedFile = path.join(frameworkRepositoryRoot(), ".env");
+  const root = frameworkRepositoryRoot();
+  const exportedFile = path.join(root, ".env");
   const exported = existsSync(exportedFile) ? parseEnv(readFileSync(exportedFile, "utf8")) : {};
   if (!exported.LOCAL_FRAMEWORK_DEPLOYMENT?.trim()) {
     throw new Error("dev:request runs only against a development deployment: root .env was not written by a development export. Run npm run export:cdk-outputs for your development deployment first.");
   }
-  const inputs = readAuthoredInputs();
+  const authored = readAuthoredInputs(root, { ...process.env, FRAMEWORK_MODE: "dev" });
+  const { localTestAccountInputs } = projectDeclarations(root).frameworkInputs();
+  const inputs = localTestAccountInputs?.(authored) ?? authored;
   const email = inputs.LOCAL_TEST_USER_EMAIL;
   const password = inputs.LOCAL_TEST_USER_PASSWORD;
   const port = inputs.LOCAL_API_DEV_SERVER_HOST_PORT;

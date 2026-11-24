@@ -54,6 +54,7 @@ export function resolveDeploymentInputs({ getContext, env, target, databaseSetti
   const readers = { env, getContext: (key: string) => (CONTEXT_ALIASES[key] ?? [key]).map((name) => getContext(name)).find((value) => value !== undefined) };
   const resolved = (reference: ResourceReference) => {
     const result = resolveInput(reference, readers);
+    if (result.state === "missing") throw new Error(`${reference.fromEnv} needs a value or a declaration default in ${mode}.`);
     if (result.state === "invalid") {
       throw new Error(`${reference.fromEnv} (or -c ${CONTEXT_ALIASES[contextKey(reference)]?.[0] ?? contextKey(reference)}) must be ${reference.values!.map((value) => `"${value}"`).join(" or ")}. Received: ${result.value}`);
     }
@@ -354,12 +355,16 @@ function resolveSignInProviders(
   const declared = defineInputs(declarations.signInInputs().signInProviders, { mode }) as unknown as Readonly<Record<string, ResourceReference>>;
   const result: Record<string, Record<string, string>> = {};
   for (const [id, provider] of Object.entries(SIGN_IN_PROVIDERS)) {
+    const keys = signInProviderKeys(id);
+    if (keys.some(key => declared[key]?.absent)) continue;
     const secret = declared[provider.secret]!;
     const values = Object.fromEntries(Object.entries(provider.settings).map(([field, key]) => [field, text(declared[key])]));
-    const lines = signInProviderKeys(id).map((key) => declared[key].fromEnv!);
+    const lines = keys.map((key) => declared[key].fromEnv!);
+    const hasSecret = !!optionalString(env[secret.fromEnv!]);
+    if (secret.required && !hasSecret) throw new Error(`${secret.fromEnv} needs a value in ${mode}.`);
     const unset = [
       ...Object.entries(provider.settings).filter(([field]) => values[field] === undefined).map(([, key]) => declared[key].fromEnv!),
-      ...(optionalString(env[secret.fromEnv!]) ? [] : [secret.fromEnv!]),
+      ...(hasSecret ? [] : [secret.fromEnv!]),
     ];
     if (unset.length === lines.length) continue;
     if (unset.length > 0) {

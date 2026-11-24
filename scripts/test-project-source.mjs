@@ -22,10 +22,10 @@ export function readStarterSelection(installation = platformRoot, env = process.
   if (!hashPattern.test(settings.commit) || !/^[a-z0-9-]+$/.test(settings.app ?? "")) {
     throw new Error("scripts/starters.json requires an exact starter commit and a single application directory.");
   }
-  if (!env.AWS_STUDIO_STARTERS) {
-    throw new Error("Set AWS_STUDIO_STARTERS to the local AWS Studio starters Git repository.");
-  }
-  const root = realpathSync(env.AWS_STUDIO_STARTERS);
+  const checkout = env.AWS_STUDIO_STARTERS ?? path.resolve(installation, "../aws-studio-starter-projects");
+  let root;
+  try { root = realpathSync(checkout); }
+  catch { throw new Error(`The starter checkout is missing at ${checkout}. Clone ${settings.repository} beside AWS Studio or set AWS_STUDIO_STARTERS.`); }
   let commit;
   try {
     commit = git(root, ["rev-parse", "--verify", settings.commit + "^{commit}"], {

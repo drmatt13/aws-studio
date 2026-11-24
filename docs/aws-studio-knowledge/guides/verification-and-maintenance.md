@@ -86,10 +86,8 @@ with the archive SHA-256 digests and the exact starter commit. Record native or
 emulated execution explicitly.
 
 The [platform verification workflow](../../../.github/workflows/verify.yml)
-always checks lockfile metadata and documentation. The native and PostgreSQL
-jobs run when the non-secret GitHub Actions repository variable
-`AWS_STUDIO_PUBLIC_STARTER_REPOSITORY` names the public starter catalog as
-`owner/repo`. The jobs fetch the exact commit in `scripts/starters.json` before
+checks lockfile metadata and documentation. The native and PostgreSQL jobs
+read the starter repository and exact commit in `scripts/starters.json` before
 preparing the app fixture and warming its npm cache. Keep the oldest eligible
 Studio distribution, framework archive and starter commit when adding a
 cohort. Use small fixtures for missing, partial, complete and ambiguous

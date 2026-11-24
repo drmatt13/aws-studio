@@ -1,6 +1,6 @@
-import { environmentCardClasses, inspectorSectionClasses } from "../inspector-ui";
+import { inspectorSectionClasses } from "../inspector-ui";
 import { sourceEditBlocked } from "../editing-state";
-import { environmentCheckboxClasses, Select, TextInput } from "../ui/FormControls";
+import { TextInput } from "../ui/FormControls";
 
 import { useEffect, useId, useRef, useState } from "react";
 import type { Mode, ModelResource } from "../../shared/model";
@@ -9,16 +9,10 @@ import { api } from "../api";
 import { useStudio } from "../studio";
 import type { ResourceModeForm } from "../draft";
 import { resourceOutputEnvironmentName } from "aws-studio/config";
-import { EnvironmentName, FormGroup, InspectorSwitch } from "./InspectorUI";
+import { FormGroup, InspectorSwitch } from "./InspectorUI";
 import { LocalValue } from "./LocalValue";
 import { InputAllowedValues } from "./InputAllowedValues";
-
-/** An environment card's checkbox options: ink text on the card's tint, a 24 px row, dimmed when unavailable. */
-const modeOptionClasses =
-  "flex min-h-(--panel-caption-target) min-w-0 cursor-pointer items-center gap-2 text-ink has-disabled:cursor-not-allowed has-disabled:text-graphite";
-
-const MODES = ["dev", "prod"] as const;
-const MODE_NAMES = { dev: "development", prod: "production" } as const;
+import { InputBehaviorFields } from "./InputBehaviorFields";
 
 export function ResourceEditor({ resource }: { readonly resource: ModelResource }) {
   const { snapshot, mode, model, live, draft, draftState } = useStudio();
@@ -164,90 +158,8 @@ export function ResourceEditor({ resource }: { readonly resource: ModelResource 
         ) : null}
         <fieldset disabled={disabled} className="m-0 min-w-0 border-0 p-0">
           <FormGroup title="Input behavior" appearance="plain">
-            <div
-              className="grid grid-cols-2 gap-2 inspector-360:grid-cols-1"
-              data-slot="input-modes"
-            >
-              {MODES.map((mode) => {
-                const present = modes[mode].present;
-                const label = `${linked ? "Default" : "Value"} in ${MODE_NAMES[mode]}`;
-                const value = present
-                  ? linked
-                    ? modes[mode].default
-                    : (modes[mode].value ?? "")
-                  : "";
-                const change = (value: string) =>
-                  setMode(mode, linked ? { default: value } : { value });
-                return (
-                  <div
-                    key={mode}
-                    role="group"
-                    aria-labelledby={`${help}-${mode}`}
-                    aria-describedby={`${help}-modes`}
-                    className={environmentCardClasses({ mode, active: present })}
-                    data-slot="input-mode"
-                    data-mode={mode}
-                  >
-                    <EnvironmentName id={`${help}-${mode}`} mode={mode} active={present} />
-                    <label className={modeOptionClasses}>
-                      <input
-                        type="checkbox"
-                        aria-label={`Available in ${MODE_NAMES[mode]}`}
-                        checked={present}
-                        onChange={(event) => setMode(mode, { present: event.target.checked })}
-                        className={environmentCheckboxClasses[mode]}
-                      />
-                      Available
-                    </label>
-                    {linked ? (
-                      <label className={modeOptionClasses}>
-                        <input
-                          type="checkbox"
-                          aria-label={`Required in ${MODE_NAMES[mode]}`}
-                          disabled={!present}
-                          checked={present && modes[mode].required}
-                          onChange={(event) => setMode(mode, { required: event.target.checked })}
-                          className={environmentCheckboxClasses[mode]}
-                        />
-                        Required
-                      </label>
-                    ) : null}
-                    {!secret ? (
-                      <label className="mt-1 grid min-w-0 gap-1 text-graphite">
-                        {linked ? "Default" : "Value"}
-                        {choices.length ? (
-                          <Select
-                            controlSize="panel"
-                            className="w-full text-ink"
-                            aria-label={label}
-                            disabled={!present}
-                            value={value}
-                            onChange={(event) => change(event.target.value)}
-                          >
-                            <option value="" disabled={!linked}>
-                              {linked ? "None" : "Choose a value"}
-                            </option>
-                            {choices.map((value, index) => (
-                              <option key={index}>{value}</option>
-                            ))}
-                          </Select>
-                        ) : (
-                          <TextInput
-                            controlSize="panel"
-                            className="w-full text-ink"
-                            aria-label={label}
-                            disabled={!present}
-                            value={value}
-                            placeholder={linked ? "None" : "Enter a value"}
-                            onChange={(event) => change(event.target.value)}
-                          />
-                        )}
-                      </label>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
+            <InputBehaviorFields modes={modes} linked={linked} choices={choices}
+              showDefault={!secret} descriptionId={`${help}-modes`} onChange={setMode} />
             <p id={`${help}-modes`} className="mt-2 mb-0 text-caption text-graphite">
               {linked ? (
                 <>

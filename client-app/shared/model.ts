@@ -377,11 +377,20 @@ export interface ModelResource {
   readonly clientEnvironment?: import("./client-environment").ClientEnvironmentFile;
   /**
    * A framework-managed input group or entry: a variable the framework itself reads from the CDK
-   * inputs files, by reader. Projected from its declarations, read-only, and never in the catalog.
+   * inputs files, by reader. Projected beside the catalog.
    */
   readonly frameworkInput?: import("./deployment-inputs").FrameworkSettingOwner;
-  /** An explicit framework builder whose enum can be edited separately from its managed policy. */
-  readonly inputChoices?: { readonly source: SourceLocation; readonly defaults: readonly string[] };
+  /** Source-edit capabilities of an explicit framework builder. */
+  readonly inputChoices?: {
+    readonly source: SourceLocation;
+    readonly defaults: readonly string[];
+    readonly availability?: true;
+    readonly fallback?: true;
+    readonly sensitive?: true;
+    readonly policy?: true;
+    readonly privateFallback?: true;
+    readonly legacyRequired?: readonly Mode[];
+  };
   /** Assignment metadata for this catalog declaration; never dotenv values. */
   readonly inputSources?: readonly { readonly file: string; readonly entry: import("./deployment-inputs").DeploymentInputEntry }[];
 }

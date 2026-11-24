@@ -8,6 +8,7 @@ import { locateConfigSource } from "aws-studio/source-index";
 import type { ApplyResponse, BatchPlanResponse, CommentReviewOptions, DraftEdit } from "../../shared/api";
 import { currentCommentOptions, reviewedComments, withCommentReview } from "./comments";
 import type { ModeModel } from "../../shared/model";
+import { inputModeIntents, sameInputModes } from "../../shared/resources";
 import { EvaluatorPool } from "../evaluator/pool";
 import { assertWritable, hashEditableFiles, sha256, toRelative } from "../files";
 import { SnapshotBuilder, type StudioState } from "../snapshot";
@@ -37,7 +38,7 @@ import { networkSettings } from "../../shared/networks";
 import { planFailureDestination, planTriggers, validateTriggerBindings } from "./triggers";
 import { triggerTiming } from "../../shared/trigger-availability";
 import { assertStackFile, nativeSignature, planNativeRemovals, scanWith } from "./native-triggers";
-import { assertOwnershipAllows, assessOwnership } from "./ownership-guard";
+import { assertOwnershipAllows, assessOwnership, guardedOwner } from "./ownership-guard";
 import { ownershipSummaries, planOwnership } from "./ownership";
 import { CLIENT_ENVIRONMENT_FILE } from "../../shared/client-environment";
 import { parseClientMappings, rewriteClientMappings, validateClientMappings } from "../client-environment-source";
@@ -269,7 +270,8 @@ export class BatchEditor {
         ?? model.resources.find(resource => resource.id === edit.intent.resource);
       if (!resource || !["input", "secret"].includes(resource.kind) || !resource.inputChoices && !namingCapabilities(Object.values(state.snapshot.models))[resource.id]?.code) throw new EditError(422, "Select an authored input or secret to edit its configuration.");
       const oldGroup = resource.path.slice(0, -1).join(".");
-      if (resource.inputChoices && edit.intent.group !== oldGroup) throw new EditError(422, "Framework input groups are managed; only allowed values can be edited.");
+      if (resource.frameworkInput && guardedOwner(state, resource.id) !== "developer") throw new EditError(422, "The framework input declaration must be developer-owned to edit its behavior.");
+      if (resource.frameworkInput && (edit.intent.group !== oldGroup || edit.intent.fromEnv !== undefined && edit.intent.fromEnv !== resource.fromEnv || edit.intent.kind !== resource.kind)) throw new EditError(422, "Framework input edits must preserve the reader, variable name and group.");
       if (oldGroup !== edit.intent.group) moves.push({ entity: resource.id, path: [...(edit.intent.group ? [edit.intent.group] : []), resource.path.at(-1)!] });
       const references = edit.intent.kind !== resource.kind ? await planResourceNaming(this.root, state, { kind: "references", entity: resource.id }, overrides) : undefined;
       const referenceIssues = references?.issues ?? [];
@@ -894,10 +896,11 @@ export class BatchEditor {
       cleanupCreatedDirectories(entry);
       const actual = await this.builder.refresh();
       if (dependencyReview) await assertActivatedProjectInstallation(this.root, dependencyReview);
-      for (const edit of entry.edits) if (edit.kind === "resourceConfig" && edit.intent.choices !== undefined) {
+      for (const edit of entry.edits) if (edit.kind === "resourceConfig") {
         for (const mode of ["dev", "prod"] as const) {
           const resource = actual.snapshot.models[mode].resources.find(resource => resource.id === (entry.entityRemap?.[edit.intent.resource] ?? edit.intent.resource));
-          if (resource && !resource.absent && JSON.stringify(resource.values ?? []) !== JSON.stringify(edit.intent.choices.map(value => value.trim()))) throw new Error("The saved input choices did not match the review.");
+          if (edit.intent.resource.startsWith("framework:") && (!resource?.inputChoices || !sameInputModes(inputModeIntents(resource), edit.intent.modes))) throw new Error("The saved framework input behavior did not match the review.");
+          if (edit.intent.choices !== undefined && resource && (!resource.absent || resource.inputChoices) && JSON.stringify(resource.values ?? []) !== JSON.stringify(edit.intent.choices.map(value => value.trim()))) throw new Error("The saved input choices did not match the review.");
         }
       }
       const mappingChange = changes.find((change) => change.file === path.join(this.root, CLIENT_ENVIRONMENT_FILE));

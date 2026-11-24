@@ -11,7 +11,7 @@ import path from "node:path";
  * service permits typed edits to just the two fixed mode-specific dotenv files.
  * Local replay has its own authority for the selected event's resolved handler;
  * it does not expand this configuration-file allowlist. Fingerprints additionally cover the two
- * fixed public CDK input declaration files, whose separate resource writer permits enum-only edits.
+ * fixed public input declaration files, whose resource writer edits supported builder settings.
  */
 
 export function sha256(text: string): string {
@@ -35,7 +35,7 @@ export function editableFiles(repositoryRoot: string): string[] {
   const configDirectory = path.join(repositoryRoot, "framework-config");
   if (existsSync(configDirectory)) visit(configDirectory);
   // Deployment inputs are covered by framework-config above. Local tooling inputs
-  // have their own fixed enum-only writer outside that application directory.
+  // have a fixed resource writer outside that application directory.
   const localInputs = "cdk-app/framework-inputs.ts";
   if (existsSync(path.join(repositoryRoot, localInputs))) files.push(localInputs);
   return files.sort();

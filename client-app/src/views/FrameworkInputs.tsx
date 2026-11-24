@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { FRAMEWORK_INPUT_GROUPS } from "../../shared/deployment-inputs";
 import type { Mode, ModelResource } from "../../shared/model";
 import type { ResourceDetails } from "../../shared/resources";
 import { api } from "../api";
+import { sourceEditBlocked } from "../editing-state";
 import {
   environmentCardClasses,
   inspectorHeaderClasses,
@@ -20,6 +21,7 @@ import { EntityName } from "./EntityName";
 import { InputGroupEntries } from "./InputGroup";
 import {
   EnvironmentName,
+  FormGroup,
   InspectorFact,
   InspectorFacts,
   InspectorKind,
@@ -30,6 +32,7 @@ import { LocalValue } from "./LocalValue";
 import { OwnershipStatus } from "./ResourceStatus";
 import { Ownership } from "./Ownership";
 import { InputAllowedValues } from "./InputAllowedValues";
+import { InputBehaviorFields } from "./InputBehaviorFields";
 
 const MODES = ["dev", "prod"] as const;
 const file = (mode: Mode) => `cdk-app/.env.${mode}`;
@@ -100,10 +103,8 @@ export function FrameworkInputGroupView({
         data-slot="framework-input-reader"
       >
         <p className={inspectorNoteClasses}>
-          Read by {group.reader} from {group.modes.map(file).join(" and ")};
-          workloads never read them. Framework inputs take no default, so each
-          file supplies its own values, and a required one it leaves unset is an
-          error on its connection.
+          Read by {group.reader} from {group.modes.map(file).join(" and ")}.
+          Open an input to view its behavior and edit its local value.
         </p>
         {group.rule ? <p className={inspectorNoteClasses}>{group.rule}</p> : null}
         <FileLinks modes={group.modes} />
@@ -113,17 +114,12 @@ export function FrameworkInputGroupView({
   );
 }
 
-/**
- * One framework-managed input. Its behavior is the framework's (which files supply it, and where
- * it is required) and takes no default, so it is shown, not edited; its value is edited in place
- * like any input's, through the file.
- */
 export function FrameworkInputView({
   resource,
 }: {
   readonly resource: ModelResource;
 }) {
-  const { model, mode, snapshot, select, draftState } = useStudio();
+  const { model, mode, snapshot, select, draft, draftState, live } = useStudio();
   const group = FRAMEWORK_INPUT_GROUPS[resource.frameworkInput!];
   const modes = {
     dev: !!resource.modes?.dev.present,
@@ -132,6 +128,15 @@ export function FrameworkInputView({
   const [details, setDetails] = useState<ResourceDetails>();
   const [error, setError] = useState<string>();
   const [reload, setReload] = useState(0);
+  const help = useId();
+  const form = draft.resourceForm(resource);
+  const owner = model.ownership?.[resource.id];
+  const signIn = resource.frameworkInput === "authentication";
+  const policy = signIn ? { policy: true, availability: true, fallback: resource.kind !== "secret" } : resource.inputChoices;
+  const editable = policy?.policy && (!owner || owner.managedBy === "developer") ? policy : undefined;
+  const entry = draftState.entries.find(item => item.kind === "resource" && item.intent.resource === resource.id);
+  const environmentPending = draftState.entries.some(item => item.kind === "environment");
+  const disabled = sourceEditBlocked({ draftState, draft, model, live }) || live.running !== null || environmentPending;
   useEffect(() => {
     const controller = new AbortController();
     setDetails(undefined);
@@ -156,7 +161,7 @@ export function FrameworkInputView({
     <>
       <header className={inspectorHeaderClasses}>
         <InspectorKind environments={pills(modes)}>
-          {resource.kind === "secret" ? "Framework secret" : "Framework input"}
+          {resource.kind === "secret" || resource.inputChoices?.sensitive ? "Framework secret" : "Framework input"}
         </InspectorKind>
         <EntityName
           entity={resource.id}
@@ -185,45 +190,76 @@ export function FrameworkInputView({
         aria-label="Input settings"
         data-slot="framework-input-behavior"
       >
-        <h3 className="mt-0 mb-3 text-label font-semibold">Input behavior</h3>
-        <div
-          className="grid grid-cols-2 gap-2 inspector-360:grid-cols-1"
-          data-slot="input-modes"
-        >
-          {MODES.map((environment) => {
-            const policy = resource.modes?.[environment];
-            const present = !!policy?.present;
-            return (
-              <div
-                key={environment}
-                className={environmentCardClasses({
-                  mode: environment,
-                  active: present,
-                })}
-                data-slot="input-mode"
-                data-mode={environment}
-              >
-                <EnvironmentName mode={environment} active={present} />
-                <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-caption text-ink">
-                  <dt className="text-graphite">Available</dt>
-                  <dd className="m-0">{present ? "Yes" : "No"}</dd>
-                  <dt className="text-graphite">Required</dt>
-                  <dd className="m-0">{policy?.required ? "Yes" : "No"}</dd>
-                  <dt className="text-graphite">Default</dt>
-                  <dd className="m-0">None</dd>
-                </dl>
-              </div>
-            );
-          })}
-        </div>
+        {editable ? (
+          <fieldset disabled={disabled} className="m-0 min-w-0 border-0 p-0">
+            <FormGroup title="Input behavior" appearance="plain">
+              <InputBehaviorFields modes={form.modes} linked choices={form.choices ?? []}
+                showDefault={!!editable.fallback} descriptionId={help}
+                availability={editable.availability ? group.modes : []}
+                onChange={(environment, change) => draft.setResource(resource, {
+                  ...form, modes: { ...form.modes, [environment]: { ...form.modes[environment], ...change } },
+                })} />
+              <p id={help} className={cx(inspectorNoteClasses, "mt-2")}>
+                {group.modes.length === 1 ? `Read by ${group.reader} in ${group.modes[0] === "dev" ? "development" : "production"} only. ` : ""}
+                {editable.availability ? "Availability controls whether the reader uses this input. " : "The reader sets availability. "}
+                {editable.fallback || resource.inputChoices?.privateFallback ? "The default applies when the file leaves the value blank." : "Set its value in the environment file."}
+                {signIn ? " The provider needs all of its inputs to be available and set." : ""}
+              </p>
+            </FormGroup>
+          </fieldset>
+        ) : (
+          <>
+            <h3 className="mt-0 mb-3 text-label font-semibold">Input behavior</h3>
+            <div
+              className="grid grid-cols-2 gap-2 inspector-360:grid-cols-1"
+              data-slot="input-modes"
+            >
+              {MODES.map((environment) => {
+                const policy = resource.modes?.[environment];
+                const present = !!policy?.present;
+                return (
+                  <div
+                    key={environment}
+                    className={environmentCardClasses({
+                      mode: environment,
+                      active: present,
+                    })}
+                    data-slot="input-mode"
+                    data-mode={environment}
+                  >
+                    <EnvironmentName mode={environment} active={present} />
+                    <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-caption text-ink">
+                      <dt className="text-graphite">Available</dt>
+                      <dd className="m-0">{present ? "Yes" : "No"}</dd>
+                      <dt className="text-graphite">Required</dt>
+                      <dd className="m-0">{policy?.required ? "Yes" : "No"}</dd>
+                      <dt className="text-graphite">Default</dt>
+                      <dd className="m-0">{policy?.default ?? "None"}</dd>
+                    </dl>
+                  </div>
+                );
+              })}
+            </div>
+            <p className={cx(inspectorNoteClasses, "mt-2")}>Behavior follows {group.reader}.</p>
+            {resource.frameworkInput === "database" && snapshot.models.prod.managedDatabase ? (
+              <button className={buttonClasses({ variant: "link" })}
+                onClick={() => select(snapshot.models.prod.managedDatabase!.resource)}>
+                Configure production database settings
+              </button>
+            ) : null}
+          </>
+        )}
+        {environmentPending && editable ? (
+          <p className={cx(inspectorNoteClasses, "mt-2")}>Apply or discard local value changes before editing input settings.</p>
+        ) : null}
         {resource.note ? (
           <p className="mt-3 mb-0 text-caption">{resource.note}</p>
         ) : null}
-        <p className={cx(inspectorNoteClasses, "mt-2")}>
-          Framework managed: {group.reader} reads it from the inputs file, so it
-          takes no file-level default. Its availability and requirements stay managed;
-          an explicit enum declaration can be edited below. Set its value below or in the file.
-        </p>
+        {mode === "dev" && !resource.absent && resource.inputChoices?.privateFallback ? (
+          <LocalValue resource={resource} details={details} error={error} busy={!!draftState.busy}
+            onRetry={() => setReload(value => value + 1)} privateDefault />
+        ) : null}
+        {entry?.error ? <p className="mb-0 mt-2 text-refuse wrap-anywhere" role="alert">{entry.error}</p> : null}
       </section>
       <InputAllowedValues resource={resource} />
       {resource.absent ? (
@@ -231,10 +267,10 @@ export function FrameworkInputView({
           <p className="m-0 text-caption text-graphite">
             Not read in {mode === "dev" ? "Development" : "Production"}.
           </p>
-          <FileLinks
+          {MODES.some(environment => modes[environment]) ? <FileLinks
             modes={MODES.filter((environment) => modes[environment])}
             name={resource.fromEnv}
-          />
+          /> : null}
         </section>
       ) : (
         <LocalValue

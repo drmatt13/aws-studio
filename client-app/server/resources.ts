@@ -7,6 +7,7 @@ import { sha256 } from "./files";
 import type { SnapshotBuilder, StudioState } from "./snapshot";
 import { inputText, selectedDeploymentInput } from "./deployment-inputs";
 import { inputChoicesError } from "../shared/resources";
+import { LOCAL_TEST_PASSWORD_DEFAULT } from "../shared/deployment-inputs";
 
 export function readResourceIntent(body: unknown): ResourceIntent {
   const intent = (body as { intent?: unknown } | undefined)?.intent as Record<string, unknown> | undefined;
@@ -45,7 +46,8 @@ export class ResourceService {
     const model = state.snapshot.models[mode];
     // An input declared `.only()` the other graph is still one declaration, edited from either graph.
     const declared = (graph: typeof model) => graph.resources.find((resource) => resource.id === id && !resource.absent);
-    const entry = declared(model) ?? declared(state.snapshot.models[mode === "dev" ? "prod" : "dev"]);
+    const entry = declared(model) ?? declared(state.snapshot.models[mode === "dev" ? "prod" : "dev"]) ??
+      model.resources.find((resource) => resource.id === id && resource.inputChoices);
     if (model.stale) throw new EditError(422, this.builder.sourceHold ?? "The resource declaration is unavailable. Refresh after fixing the configuration.");
     if (!entry || (entry.kind !== "input" && entry.kind !== "secret") || (!entry.fromEnv && entry.authoredValue === undefined)) throw new EditError(404, "Select a defined input parameter or secret.");
     if (!entry.inputChoices && !state.built.catalog.has(entry.path.join("."))) throw new EditError(422, "The resource declaration could not be located in source.");
@@ -68,8 +70,11 @@ export class ResourceService {
     const text = inputText(this.root, file);
     const values = text === undefined ? {} : parseEnv(text);
     const value = values[resource.fromEnv!];
+    const privateDefault = mode === "dev" && resource.inputChoices?.privateFallback
+      ? values[LOCAL_TEST_PASSWORD_DEFAULT] : undefined;
     // Configuration presence (even NAME=) is distinct from the framework's non-blank requirement.
-    return { file, inputFile: { exists: text !== undefined, hash: sha256(text ?? "") }, configured: value !== undefined, ...(value !== undefined ? { value } : {}) };
+    return { file, inputFile: { exists: text !== undefined, hash: sha256(text ?? "") }, configured: value !== undefined, ...(value !== undefined ? { value } : {}),
+      ...(mode === "dev" && resource.inputChoices?.privateFallback ? { privateDefault: { configured: privateDefault !== undefined, value: privateDefault } } : {}) };
   }
   plan(intent: ResourceIntent, revision: string, mode: Mode): Promise<ResourcePlan> {
     return this.exclusive(async () => {

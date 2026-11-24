@@ -2,7 +2,8 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { defineInputs, listResourceDeclarations, type ResourceReference } from "aws-studio/config";
 import type { ProjectDeclarations } from "aws-studio/config/project-declarations";
-import type { Mode } from "../../shared/model";
+import type { InputModePolicy, Mode } from "../../shared/model";
+import { sensitiveName } from "../operations/redaction";
 
 interface Setting {
   readonly key: string;
@@ -10,12 +11,14 @@ interface Setting {
   readonly managedBy?: "framework" | "developer";
   readonly values?: readonly string[];
   readonly note?: string;
+  readonly modes: Readonly<Record<Mode, InputModePolicy>>;
 }
 
 export interface InputMetadata {
   readonly deployment: readonly Setting[];
   readonly local: readonly Setting[];
   readonly required: Readonly<Record<Mode, readonly string[]>>;
+  readonly localTestAccountPolicy?: true;
   readonly signIn: readonly {
     readonly id: string;
     readonly title: string;
@@ -35,7 +38,7 @@ export function projectInputMetadata(root: string, mode: Mode): InputMetadata {
   const { projectDeclarations } = projectRequire("aws-studio/config/project-declarations") as { projectDeclarations(root: string): ProjectDeclarations };
   const declarations = projectDeclarations(root);
   const { deploymentInputs } = declarations.deploymentInputs();
-  const { localInputs, REQUIRED_FRAMEWORK_INPUTS } = declarations.frameworkInputs();
+  const { localInputs, REQUIRED_FRAMEWORK_INPUTS, localTestAccountInputs } = declarations.frameworkInputs();
   const { SIGN_IN_PROVIDERS, signInProviderKeys } = declarations.signInCatalog();
   const signInInputs = Object.keys(SIGN_IN_PROVIDERS).length
     ? defineInputs(declarations.signInInputs().signInProviders, { mode }) as unknown as Readonly<Record<string, ResourceReference>>
@@ -45,12 +48,23 @@ export function projectInputMetadata(root: string, mode: Mode): InputMetadata {
       key: reference.path.at(-1)!,
       fromEnv: reference.fromEnv!,
       managedBy: reference.managedBy,
-      values: reference.values,
+      values: sensitiveName(reference.fromEnv!) ? undefined : reference.values,
       note: reference.note,
+      modes: Object.fromEntries((["dev", "prod"] as const).map(environment => {
+        const policy = reference.modes?.[environment] ?? {
+          present: !reference.absent, required: !!reference.required, default: reference.default,
+        };
+        return [environment, {
+          present: policy.present,
+          required: policy.required,
+          ...(policy.default !== undefined && !sensitiveName(reference.fromEnv!) ? { default: policy.default } : {}),
+        }];
+      })) as Record<Mode, InputModePolicy>,
     })) : [];
   }
   return {
     deployment: settings(deploymentInputs(mode)), local: settings(localInputs()), required: REQUIRED_FRAMEWORK_INPUTS,
+    ...(typeof localTestAccountInputs === "function" ? { localTestAccountPolicy: true } : {}),
     signIn: Object.entries(SIGN_IN_PROVIDERS).map(([id, { title, cognitoName }]) => {
       const keys = signInProviderKeys(id);
       return { id, title, cognitoName, keys, lines: keys.flatMap(key => {

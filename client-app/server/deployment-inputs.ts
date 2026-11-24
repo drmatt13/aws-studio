@@ -1,16 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { withSourceWriteSync } from "aws-studio/source/source-gate";
 import { openPrivateFileSync } from "aws-studio/cli/private-files";
 import { sensitiveName } from "./operations/redaction";
 import path from "node:path";
 import { parseEnv } from "node:util";
-import { CDK_ENVIRONMENT_ID, FRAMEWORK_INPUT_GROUPS, type DeploymentInputEntry, type DeploymentInputFile, type FrameworkSettingOwner, type InputRequirement } from "../shared/deployment-inputs";
+import { CDK_ENVIRONMENT_ID, FRAMEWORK_INPUT_GROUPS, LOCAL_TEST_PASSWORD_DEFAULT, type DeploymentInputEntry, type DeploymentInputFile, type FrameworkSettingOwner, type InputRequirement } from "../shared/deployment-inputs";
 import type { InputModePolicy, Mode, ModeModel, ModelEdge, ModelResource, OwnershipFacts, SourceLocation } from "../shared/model";
 import { inputRequirements } from "./input-requirements";
 import { resolveInput, type InputResolution } from "aws-studio/config/resources";
 import { DATABASE_SETTING_INPUTS } from "aws-studio/config/database";
-import { frameworkInputChoices } from "./input-choices-source";
+import { frameworkInputBehavior, frameworkInputChoices } from "./input-choices-source";
 import { EMPTY_INPUT_METADATA, type InputMetadata } from "./evaluator/input-metadata";
 
 export const deploymentInputPath = (mode: Mode) => `cdk-app/.env.${mode}`;
@@ -56,8 +56,13 @@ function createDeploymentInputOwned(root: string, mode: Mode): { file: string; c
   if (mode !== "dev" && mode !== "prod") throw new Error("Choose development or production inputs.");
   const file = deploymentInputPath(mode);
   if (inputText(root, file) !== undefined) return { file, created: false };
-  const template = inputText(root, deploymentInputTemplate(mode));
+  let template = inputText(root, deploymentInputTemplate(mode));
   if (template === undefined) throw new Error(`Missing ${deploymentInputTemplate(mode)}.`);
+  if (mode === "dev" && /^# studio:generate-local-test-password\r?$/m.test(template) && parseEnv(template)[LOCAL_TEST_PASSWORD_DEFAULT] === undefined) {
+    const newline = template.includes("\r\n") ? "\r\n" : "\n";
+    template = template.replace(/^# studio:generate-local-test-password(?=\r?$)/m, `${LOCAL_TEST_PASSWORD_DEFAULT}=Aa1!${randomBytes(24).toString("base64url")}`);
+    if (!template.endsWith("\n")) template += newline;
+  }
   // Prepare complete private bytes before the authoritative path becomes visible. A failed
   // write or flush must never leave a partial input that the next startup treats as authored.
   const temporary = path.join(root, `${file}.studio-${randomUUID()}.tmp`);
@@ -149,11 +154,13 @@ function inputModes(resource: ModelResource, models?: Readonly<Record<Mode, Mode
  * A sign-in provider's lines, as aws-studio/cdk/deployment resolves them: all or nothing in each file.
  * Once a file sets any of a provider's lines, the rest are required there.
  */
-function signInRequirements(providers: InputMetadata["signIn"], requirements: ReturnType<typeof inputRequirements>, group: string): ReturnType<typeof inputRequirements> {
+function signInRequirements(providers: InputMetadata["signIn"], requirements: ReturnType<typeof inputRequirements>, group: string, graph: ModeModel): ReturnType<typeof inputRequirements> {
   const result = new Map(requirements);
+  const byId = new Map(graph.resources.map(resource => [resource.id, resource]));
   for (const provider of providers) {
+    if (provider.keys.some(key => byId.get(`${group}.${key}`)?.absent)) continue;
     const lines = provider.keys.flatMap((key) => requirements.get(`${group}.${key}`) ?? []);
-    if (!lines.some((line) => line.status === "configured")) continue;
+    if (!lines.some((line) => line.status === "configured" || line.status === "default")) continue;
     const reason = `${provider.title} sign-in reads ${lines.map((line) => line.name).join(", ")} together: once this file sets one, it needs them all.`;
     for (const line of lines) result.set(line.resource, { ...line, required: true, status: line.status === "optional" ? "missing" : line.status, reasons: [...line.reasons, reason] });
   }
@@ -196,7 +203,11 @@ export function withDeploymentInputs(root: string, model: ModeModel, models?: Re
   // Each input's state in this graph, by the framework's own resolver. Only the state leaves:
   // values stay here, and a secret's value is never read.
   // File supply and input resources own declaration requirements. Workloads own their extra requirements.
-  const requirementsFor = Object.fromEntries(MODES.map((mode) => [mode, signInRequirements(metadata.signIn, inputRequirements(models?.[mode] ?? model, inputs[mode].problem ? {} : inputs[mode].parsed as Record<string, string>, mode, inputs[mode].file, !inputs[mode].problem, { declarationOnly: true }), signIn)])) as Record<Mode, ReturnType<typeof inputRequirements>>;
+  const requirementsFor = Object.fromEntries(MODES.map((mode) => {
+    const graph = models?.[mode] ?? model;
+    const requirements = inputRequirements(graph, inputs[mode].problem ? {} : inputs[mode].parsed as Record<string, string>, mode, inputs[mode].file, !inputs[mode].problem, { declarationOnly: true });
+    return [mode, signInRequirements(metadata.signIn, requirements, signIn, graph)];
+  })) as Record<Mode, ReturnType<typeof inputRequirements>>;
   const consumerRequirements = new Map(model.targets.filter(target => model.mode === "dev" ? target.lanes.local || target.lanes.dev : target.lanes.prod).map(target => [target.ref,
     inputRequirements(model, own.problem ? {} : own.parsed as Record<string, string>, model.mode, own.file, !own.problem, { target: target.ref })]));
   const resolutions = new Map<string, InputResolution>();
@@ -225,42 +236,72 @@ export function withDeploymentInputs(root: string, model: ModeModel, models?: Re
   const written = new Set(MODES.flatMap((mode) => Object.keys(inputs[mode].parsed)));
   // Variables the catalog does not declare but the framework itself reads: its deployment settings,
   // the production database's overrides and the local development tooling's settings. Each projects
-  // as a framework-managed input, by reader, with no default: a line its environment's template writes
-  // is required there, so a file that drops one shows a missing value. A name the catalog also
+  // by reader. Legacy template requirements are combined with the declaration's policy. A name the catalog also
   // declares stays the catalog's, and database overrides apply only with a managed database.
   const database = (models?.prod ?? model).managedDatabase;
-  type Owned = { readonly owner: FrameworkSettingOwner; readonly key: string; readonly choices?: readonly string[]; readonly note?: string; readonly inputChoices?: ModelResource["inputChoices"] };
+  type Owned = { readonly owner: FrameworkSettingOwner; readonly key: string; readonly choices?: readonly string[]; readonly note?: string; readonly inputChoices?: ModelResource["inputChoices"]; readonly modes?: Readonly<Record<Mode, InputModePolicy>> };
   const owned = new Map<string, Owned>();
-  for (const reference of metadata.deployment) owned.set(reference.fromEnv, { owner: "deployment", key: reference.key,
-    ...(reference.values ? { choices: reference.values } : {}), ...(reference.note ? { note: reference.note } : {}) });
+  for (const owner of ["deployment", "local"] as const) for (const reference of metadata[owner]) {
+    const { availability, fallback } = frameworkInputBehavior(owner, reference.fromEnv, metadata.localTestAccountPolicy);
+    const modes = Object.fromEntries(MODES.map(mode => {
+      const declared = reference.modes?.[mode];
+      const present = FRAMEWORK_INPUT_GROUPS[owner].modes.includes(mode) && (!availability || declared?.present !== false);
+      return [mode, {
+        present, required: present && (metadata.required[mode].includes(reference.fromEnv) || !!declared?.required),
+        ...(present && fallback && declared?.default !== undefined ? { default: declared.default } : {}),
+      }];
+    })) as Record<Mode, InputModePolicy>;
+    owned.set(reference.fromEnv, { owner, key: reference.key, choices: reference.values, note: reference.note, modes });
+  }
   for (const [field, name] of Object.entries(DATABASE_SETTING_INPUTS) as [keyof typeof DATABASE_SETTING_INPUTS, string][]) {
+    if (owned.get(name)?.owner === "local") continue;
     owned.set(name, { owner: "database", key: field, ...(typeof database?.settings[field] === "boolean" ? { choices: ["true", "false"] } : {}) });
   }
-  for (const reference of metadata.local) owned.set(reference.fromEnv, { owner: "local", key: reference.key,
-    ...(reference.values ? { choices: reference.values } : {}), ...(reference.note ? { note: reference.note } : {}) });
   for (const [name, known] of owned) {
     try {
       const facts = frameworkInputChoices(root, known.owner, known.key, name);
-      if (facts) owned.set(name, { ...known, choices: facts.choices, inputChoices: { source: facts.source, defaults: facts.defaults } });
+      if (facts) {
+        const behavior = frameworkInputBehavior(known.owner, name, metadata.localTestAccountPolicy);
+        const sensitive = sensitiveName(name);
+        owned.set(name, { ...known, choices: sensitive ? undefined : facts.choices, inputChoices: {
+          source: facts.source, defaults: sensitive ? [] : facts.defaults,
+          ...(facts.literalPolicy ? { policy: true } : {}),
+          ...(behavior.availability ? { availability: true } : {}),
+          ...(behavior.fallback ? { fallback: true } : {}),
+          ...(sensitive ? { sensitive: true } : {}),
+          ...(behavior.availability && known.owner === "local" && name === "LOCAL_TEST_USER_PASSWORD" ? { privateFallback: true } : {}),
+          legacyRequired: MODES.filter(mode => metadata.required[mode].includes(name)),
+        } });
+      }
     } catch { /* Unsafe or computed source remains read-only. */ }
   }
   for (const name of declared.keys()) owned.delete(name);
   const projected = (known: Owned) => known.owner !== "database" || !!database;
   const frameworkId = (known: Owned) => `${FRAMEWORK_INPUT_GROUPS[known.owner].id}.${known.key}`;
-  const readIn = (known: Owned, mode: Mode) => FRAMEWORK_INPUT_GROUPS[known.owner].modes.includes(mode);
+  const password = owned.get("LOCAL_TEST_USER_PASSWORD");
+  const passwordDefault = password?.inputChoices?.privateFallback ? password : undefined;
+  const policyFor = (name: string, known: Owned, mode: Mode): InputModePolicy => known.modes?.[mode] ?? {
+    present: FRAMEWORK_INPUT_GROUPS[known.owner].modes.includes(mode),
+    required: FRAMEWORK_INPUT_GROUPS[known.owner].modes.includes(mode) && metadata.required[mode].includes(name),
+  };
   const frameworkRequirement = (name: string, known: Owned, mode: Mode): InputRequirement => {
-    const required = metadata.required[mode].includes(name);
-    const line = lineStatus(inputs[mode].parsed[name]);
+    const { required, default: fallback } = policyFor(name, known, mode);
+    const configured = lineStatus(inputs[mode].parsed[name]) === "configured";
+    const defaulted = fallback !== undefined || known === passwordDefault && mode === "dev" &&
+      lineStatus(inputs.dev.parsed[LOCAL_TEST_PASSWORD_DEFAULT]) === "configured";
     return { resource: frameworkId(known), name, mode, file: deploymentInputPath(mode), required,
-      status: line === "configured" ? "configured" : required ? "missing" : "optional",
-      reasons: [`Read by ${FRAMEWORK_INPUT_GROUPS[known.owner].reader}; framework inputs take no default.`] };
+      status: inputs[mode].problem ? "unknown" : configured ? "configured" : defaulted ? "default" : required ? "missing" : "optional",
+      reasons: [`Read by ${FRAMEWORK_INPUT_GROUPS[known.owner].reader}.`] };
   };
   const files: DeploymentInputFile[] = MODES.map((mode) => {
     const { file, text, parsed, locations, problem } = inputs[mode];
     const counterpart = inputs[mode === "dev" ? "prod" : "dev"].parsed;
     const requirements = requirementsFor[mode];
-    // A required framework input is listed even before its line is written.
-    const frameworkNames = metadata.required[mode].filter((name) => owned.has(name) && projected(owned.get(name)!));
+    // A required input or one with a default is listed before its line is written.
+    const frameworkNames = [...owned].flatMap(([name, known]) => {
+      const policy = policyFor(name, known, mode);
+      return projected(known) && policy.present && (policy.required || policy.default !== undefined) ? [name] : [];
+    });
     const names = new Set([...written, ...declared.keys(), ...frameworkNames].filter((name) => {
       const targets = declared.get(name);
       return !targets || targets.some((target) => target.modes![mode].present) || parsed[name] !== undefined;
@@ -268,11 +309,11 @@ export function withDeploymentInputs(root: string, model: ModeModel, models?: Re
     const entries = [...names].sort().map((name) => {
       const targets = declared.get(name) ?? [];
       const present = targets.filter((target) => target.modes![mode].present);
-      const known = targets.length ? undefined : owned.get(name);
+      const isPrivateDefault = name === LOCAL_TEST_PASSWORD_DEFAULT;
+      const known = targets.length ? undefined : isPrivateDefault ? passwordDefault : owned.get(name);
       const framework = !!known && projected(known);
-      const unread = !!known && !readIn(known, mode);
-      // Framework inputs take no default: the file supplies them.
-      const fallback = known ? undefined : present.find((target) => target.kind === "input" && target.modes![mode].default !== undefined)?.modes![mode].default;
+      const unread = !!known && (isPrivateDefault && mode !== "dev" || !policyFor(name, known, mode).present);
+      const fallback = known ? policyFor(name, known, mode).default : present.find((target) => target.kind === "input" && target.modes![mode].default !== undefined)?.modes![mode].default;
       const choices = known ? known.choices : present.find((target) => target.values)?.values;
       const status = lineStatus(parsed[name]);
       const line = locations.get(name);
@@ -285,15 +326,13 @@ export function withDeploymentInputs(root: string, model: ModeModel, models?: Re
         ...(choices ? { choices } : {}),
         ...((targets.length && !present.length) || (unread && status !== "missing") ? { notRead: true as const } : {}),
         ...(known ? { owner: known.owner, ...(known.note ? { note: known.note } : {}) } : {}),
-        requirements: framework ? unread ? [] : [frameworkRequirement(name, known!, mode)] : present.flatMap((target) => requirements.get(target.id) ? [requirements.get(target.id)!] : []),
+        requirements: framework ? unread || isPrivateDefault ? [] : [frameworkRequirement(name, known!, mode)] : present.flatMap((target) => requirements.get(target.id) ? [requirements.get(target.id)!] : []),
         ...(source ? { source } : {}) };
     });
     return { mode, path: file, template: deploymentInputTemplate(mode), exists: text !== undefined, entries, ...(problem ? { problem } : {}),
       ...(text === undefined && setupProblems[mode] ? { setupProblem: setupProblems[mode] } : {}) };
   });
   const resources: ModelResource[] = catalog.map((resource) => resource.fromEnv || resource.authoredValue !== undefined ? { ...resource,
-    // A sign-in provider's lines are required where its file sets any of them.
-    ...(resource.frameworkInput && resource.modes ? { modes: Object.fromEntries(MODES.map((mode) => [mode, { ...resource.modes![mode], required: !!requirementsFor[mode].get(resource.id)?.required }])) as Record<Mode, InputModePolicy> } : {}),
     inputComparisons: selectedComparisons.get(resource.id),
     ...(resolutions.has(resource.id) ? { inputState: resolutions.get(resource.id)!.state } : {}),
     ...(resource.fromEnv ? {
@@ -315,12 +354,14 @@ export function withDeploymentInputs(root: string, model: ModeModel, models?: Re
     const absent = !group.modes.includes(model.mode);
     resources.push({ id: group.id, path: [group.title], kind: "group", absent, frameworkInput: owner });
     for (const [name, known] of members) {
-      const modes = Object.fromEntries(MODES.map((mode) => [mode, { present: readIn(known, mode), required: readIn(known, mode) && metadata.required[mode].includes(name) }])) as Record<Mode, InputModePolicy>;
-      resources.push({ id: frameworkId(known), path: [group.title, known.key], parent: group.id, kind: "input", absent, frameworkInput: owner, fromEnv: name,
+      const modes = { dev: policyFor(name, known, "dev"), prod: policyFor(name, known, "prod") };
+      const policy = modes[model.mode];
+      resources.push({ id: frameworkId(known), path: [group.title, known.key], parent: group.id, kind: "input", absent: !policy.present, frameworkInput: owner, fromEnv: name,
         ...(known.inputChoices ? { inputChoices: known.inputChoices } : {}),
         ...(known.choices ? { values: known.choices } : {}), ...(known.note ? { note: known.note } : {}),
-        ...(modes[model.mode].required ? { required: true } : {}), modes,
-        ...(absent ? {} : { inputRequirement: frameworkRequirement(name, known, model.mode) }),
+        ...(policy.required ? { required: true } : {}), modes,
+        ...(policy.default !== undefined ? { default: policy.default } : {}),
+        ...(policy.present ? { inputRequirement: frameworkRequirement(name, known, model.mode) } : {}),
         inputSources: files.flatMap((file) => file.entries.filter((entry) => entry.name === name).map((entry) => ({ file: file.path, entry }))) });
     }
   }

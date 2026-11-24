@@ -131,13 +131,18 @@ The `enableWebSocketApi` example reads `ENABLE_WEB_SOCKET_API`, with a default o
 The restriction switch selects unrestricted text or an explicit list; add/remove controls retain
 keyboard focus. Choices are non-blank and unique ignoring case, with at most 100 single-line
 values of 500 characters each. Declared defaults and source values must fit the proposed list.
-Secrets never acquire enum metadata. Explicit deployment/local framework builders expose this
-same editor while their reader/identity/mode policy remains managed. The source writer locates
-the literal owning builder, preserves retained comments and other calls, fingerprints both fixed
-declaration files, revalidates apply and verifies refreshed choices before confirming success.
-Projection reads this public metadata from current source rather than cached server imports, so
-an applied enum change is reflected without restarting Studio. Computed enums and inferred
-database types stay source-owned. Private environment edits remain a separate review.
+Secrets never acquire enum metadata. Explicit developer-owned deployment and local builders
+expose the same editor and editable requirements. Deployment declarations also expose availability
+and public defaults. A local test-account reader that exports `localTestAccountInputs` supports
+development availability for both credentials and a public email default. Its password default
+is independently editable in the private development input file. Studio can generate it when a
+starter opts in through its development template. Raw Compose readers keep their own availability
+and defaults.
+The source writer preserves the reader, variable name, group and retained comments. It updates
+the legacy requirements list when an edited input becomes optional, and verifies the refreshed
+policy before confirming success. Sign-in provider inputs expose their declaration policy while
+the provider still evaluates its credentials together. Inferred database overrides link to the
+database's typed settings. Private environment edits use their own review.
 
 Source projection includes public `authoredValue` and mode `value` metadata, while resolved
 environment-file values stay out of snapshots and symbolic client previews. New client

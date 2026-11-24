@@ -15,8 +15,8 @@ import { createSnapshotFixture } from "./support/source-fixture";
 
 /**
  * Framework inputs are the variables the framework itself reads from the CDK inputs files. They
- * project as framework-managed input groups with no defaults, required where their environment's
- * template writes them. These hold the templates, the required list and their readers together,
+ * project as input groups, required where their environment's template writes them.
+ * These checks keep the templates, the required list and their readers together,
  * and every variable the templates name to exactly one place.
  */
 
@@ -60,12 +60,12 @@ test("each template writes exactly the framework lines its environment requires"
   }
 });
 
-test("local framework inputs have a reader and take no default", () => {
+test("local framework inputs have a reader and the test email has a public default", () => {
   const readers = [RELEASE_COMPOSE_FILE, "node_modules/aws-studio/cli/local-export.ts", "node_modules/aws-studio/cli/dev.mjs", "node_modules/aws-studio/src/local/lambda-process.ts",
     "node_modules/aws-studio/src/local/environment.ts", "packages/database/scripts/seed-test-user-cli.ts"].map(text).join("\n");
   for (const setting of local) {
     assert.ok(readers.includes(setting.fromEnv!), `${setting.fromEnv} has a reader`);
-    assert.equal(setting.default, undefined, `${setting.fromEnv}: the inputs file supplies it`);
+    assert.equal(setting.default, setting.fromEnv === "LOCAL_TEST_USER_EMAIL" ? "testuser@example.com" : undefined);
   }
 });
 
@@ -110,12 +110,17 @@ test("the repository projects framework-managed groups by reader, held only wher
       assert.ok(group, `${mode}: ${owner}`);
       assert.deepEqual([group.kind, group.frameworkInput, group.absent], ["group", owner, !FRAMEWORK_INPUT_GROUPS[owner].modes.includes(mode)], `${mode}: ${owner}`);
       const entries = resources.filter((item) => item.parent === group.id);
-      assert.ok(entries.length > 0 && entries.every((entry) => entry.kind === "input" && entry.frameworkInput === owner && entry.default === undefined), `${owner} entries take no default`);
+    assert.ok(entries.length > 0 && entries.every((entry) => entry.kind === "input" && entry.frameworkInput === owner));
+    if (owner === "database") assert.ok(entries.every((entry) => entry.default === undefined));
+    if (owner === "local" && mode === "dev") {
+      assert.equal(entries.find(entry => entry.fromEnv === "LOCAL_TEST_USER_EMAIL")?.default, "testuser@example.com");
+      assert.equal(entries.find(entry => entry.fromEnv === "LOCAL_TEST_USER_PASSWORD")?.inputChoices?.privateFallback, true);
+    }
     }
   }
 });
 
-test("a missing framework input never offers a default as the remedy", () => {
+test("a missing raw Compose input directs the user to its local value", () => {
   const requirement = { resource: "framework:local.postgresHostPort", name: "POSTGRES_HOST_PORT", mode: "dev" as const, file: "cdk-app/.env.dev", required: true, status: "missing" as const, reasons: [] };
   const entry: ModelResource = { id: "framework:local.postgresHostPort", path: ["Local development", "postgresHostPort"], parent: "framework:local", kind: "input", absent: false,
     frameworkInput: "local", fromEnv: "POSTGRES_HOST_PORT", inputRequirement: requirement };

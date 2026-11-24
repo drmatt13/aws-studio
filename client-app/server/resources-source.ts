@@ -16,7 +16,7 @@ import type { StudioState } from "./snapshot";
 import { readCatalogSource } from "./source/catalog";
 import { CLIENT_ENVIRONMENT_FILE, isSplitMapping, type ClientEnvironmentBinding, type ClientEnvironmentMappings } from "../shared/client-environment";
 import { parseClientMappings, rewriteClientMappings } from "./client-environment-source";
-import { planFrameworkInputChoices } from "./input-choices-source";
+import { planFrameworkInputSettings } from "./input-choices-source";
 import { descriptorFactory, frameworkExport } from "./source/factories";
 import { catalogModule, resourceAlias, addResourceImport } from "./edits/resource-alias";
 
@@ -282,7 +282,7 @@ function migrateClientInputReferences(root: string, resource: ModelResource, int
 }
 
 export function planResourceSource(root: string, state: StudioState, resource: ModelResource, intent: ResourceIntent, overlay: ReadonlyMap<string, string> = new Map(), allowNoop = false, skipReferenceEdits = false): { overrides: Record<string, string>; nextResource: string } {
-  if (resource.frameworkInput && !resource.id.startsWith("resource:")) return planFrameworkInputChoices(root, resource, intent, overlay);
+  if (resource.frameworkInput && !resource.id.startsWith("resource:")) return planFrameworkInputSettings(root, resource, intent, overlay);
   const choices = intent.choices ?? resource.values;
   if (intent.choices && (intent.kind === "secret" || inputChoicesError(intent.choices))) return fail(inputChoicesError(intent.choices) ?? "Secrets do not declare allowed values.");
   if (!IDENTIFIER.test(intent.group || "ungrouped") || ["__proto__", "constructor", "prototype"].includes(intent.group)) return fail("A group must be a safe TypeScript property name, or empty for no group.");

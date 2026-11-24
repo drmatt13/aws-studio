@@ -22,6 +22,7 @@ export interface ResourceDetails {
   /** Selected environment-file value (private), or a standalone public source value. */
   readonly value?: string;
   readonly configured: boolean;
+  readonly privateDefault?: { readonly value?: string; readonly configured: boolean };
 }
 
 /** One graph's settings for an authored input, as an edit states them. */

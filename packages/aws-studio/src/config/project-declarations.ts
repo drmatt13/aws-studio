@@ -41,6 +41,7 @@ export interface SignInInputsModule { readonly signInProviders: InputDeclaration
 export interface FrameworkInputsModule {
   localInputs(): DeclaredInputs;
   readonly REQUIRED_FRAMEWORK_INPUTS: Readonly<Record<CloudMode, readonly string[]>>;
+  localTestAccountInputs?(inputs: Readonly<Record<string, string | undefined>>): Readonly<Record<string, string | undefined>>;
 }
 
 /** Each enabled provider's resolved non-secret settings, by provider id. */

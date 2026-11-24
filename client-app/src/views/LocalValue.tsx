@@ -4,6 +4,7 @@ import { cx } from "../ui/classes";
 import { useId } from "react";
 import type { ModelResource } from "../../shared/model";
 import type { ResourceDetails } from "../../shared/resources";
+import { LOCAL_TEST_PASSWORD_DEFAULT } from "../../shared/deployment-inputs";
 import type { EnvironmentEdit } from "../draft";
 import { useStudio } from "../studio";
 import { openEnvironmentVariable } from "../environment-variable-link";
@@ -18,23 +19,29 @@ export function LocalValue({
   error,
   busy,
   onRetry,
+  privateDefault = false,
 }: {
   readonly resource: ModelResource;
   readonly details?: ResourceDetails;
   readonly error?: string;
   readonly busy: boolean;
   readonly onRetry: () => void;
+  readonly privateDefault?: boolean;
 }) {
   const { mode, model, draft, draftState, live, select } = useStudio();
   const help = useId();
-  const name = resource.fromEnv!;
+  const name = privateDefault ? LOCAL_TEST_PASSWORD_DEFAULT : resource.fromEnv!;
   const file = details?.file ?? `cdk-app/.env.${mode}`;
   const pending = draft.environment(mode);
   const edit = pending?.edits.find((item) => item.name === name);
-  const value = edit?.value ?? details?.value ?? "";
-  const secret = resource.kind === "secret";
-  const hasDefault = !secret && resource.default !== undefined;
-  const usingDefault = !value.trim() && hasDefault && !!resource.default?.trim();
+  const fileValue = privateDefault ? details?.privateDefault : details;
+  const value = edit?.value ?? fileValue?.value ?? "";
+  const secret = resource.kind === "secret" || !!resource.inputChoices?.sensitive ||
+    !!(resource.frameworkInput && resource.inputSources?.some(({ entry }) => entry.sensitive));
+  const hasPublicDefault = !secret && resource.default !== undefined;
+  const stagedDefault = pending?.edits.find(item => item.name === LOCAL_TEST_PASSWORD_DEFAULT);
+  const hasDefault = !privateDefault && (hasPublicDefault || !!(stagedDefault?.value ?? details?.privateDefault?.value)?.trim());
+  const usingDefault = !value.trim() && hasDefault;
   const otherChanges = draftState.entries.some(
     (entry) => entry.kind !== "environment" || entry.mode !== mode,
   );
@@ -56,13 +63,13 @@ export function LocalValue({
           key: name,
           name,
           value: nextValue,
-          ...(details.configured ? { original: details.value ?? "" } : { create: true }),
+          ...(fileValue?.configured ? { original: fileValue.value ?? "" } : { create: true }),
         };
     draft.setEnvironment(
       mode,
       pending?.hash ?? details.inputFile.hash,
-      !details.configured && nextValue === "" ? others : [...others, next],
-      details.configured ? [name] : [],
+      !fileValue?.configured && nextValue === "" ? others : [...others, next],
+      fileValue?.configured ? [name] : [],
     );
   };
   const revert = () => {
@@ -71,7 +78,7 @@ export function LocalValue({
         mode,
         pending.hash,
         pending.edits.filter((item) => item.name !== name),
-        details?.configured ? [name] : [],
+        fileValue?.configured ? [name] : [],
       );
   };
   const status = edit
@@ -80,14 +87,14 @@ export function LocalValue({
       ? "Using default"
       : value.trim()
         ? "Set locally"
-        : details?.configured
+        : fileValue?.configured
           ? "Empty"
           : "Not set";
-  const requiredMissing = resource.inputRequirement?.required && !value.trim() && !usingDefault;
+  const requiredMissing = !privateDefault && resource.inputRequirement?.required && !value.trim() && !usingDefault;
   return (
     <InspectorSection
-      title="Local value"
-      data-slot="local-input"
+      title={privateDefault ? "Default in development" : "Local value"}
+      data-slot={privateDefault ? "private-input-default" : "local-input"}
       actions={
         <span
           className="text-caption font-medium text-graphite"
@@ -173,8 +180,8 @@ export function LocalValue({
               {resource.values && !secret ? (
                 <Select
                   controlSize="panel"
-                  className="w-full"
-                  aria-label={`Value for ${name}`}
+                className="w-full"
+                aria-label={`Value for ${name}`}
                   aria-describedby={help}
                   value={value}
                   disabled={disabled}
@@ -182,7 +189,7 @@ export function LocalValue({
                   data-slot="local-input-choice"
                 >
                   <option value="">
-                    {hasDefault ? `Use default · ${resource.default}` : "No local value"}
+                    {hasPublicDefault ? `Use default · ${resource.default}` : "No local value"}
                   </option>
                   {value && !resource.values.includes(value) ? (
                     <option value={value}>{value} (current)</option>
@@ -248,7 +255,7 @@ export function LocalValue({
             data-slot="local-input-help"
           >
             {/* The status line already says Empty or Not set, and an empty value select already reads "Use default · value". */}
-            {hasDefault && !(resource.values && !secret && value === "") ? (
+            {hasPublicDefault && !(resource.values && !secret && value === "") ? (
               <p className="m-0">
                 Default: <code className="text-[inherit]">{resource.default}</code>
               </p>
@@ -259,14 +266,14 @@ export function LocalValue({
               <p className="m-0">Review Changes to save this value. Nothing is deployed.</p>
             ) : null}
             {secret ? (
-              <p className="m-0">Masked by default. Saved only in this local file.</p>
+              <p className="m-0">{privateDefault ? "Used when the local password is blank. Saved only in this development file." : "Masked by default. Saved only in this local file."}</p>
             ) : null}
             {!details.inputFile ? (
               <p className="m-0">Restart Studio to enable inline value editing.</p>
             ) : null}
           </div>
           {/* A missing value is the header's issue notice; here only a met requirement is noted. */}
-          {!edit && !requirementIssue(resource.inputRequirement) ? (
+          {!privateDefault && !edit && !requirementIssue(resource.inputRequirement) ? (
             <RequirementNotice requirement={resource.inputRequirement} />
           ) : null}
           {pending?.error ? (
