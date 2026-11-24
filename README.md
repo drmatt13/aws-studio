@@ -70,10 +70,13 @@ Use Node 24.22.2 or newer on the 24.x line and its bundled npm 11.19.1 or newer 
 11.x line. On Windows, use an unelevated terminal and local NTFS checkouts.
 The platform's offline bootstrap reads the generated framework peer from the starter
 commit recorded in `scripts/starters.json`. Point `AWS_STUDIO_STARTERS` at a local
-copy of the starter Git repository containing that commit. The companion project is
-[aws-studio-starter-projects](https://github.com/drmatt13/aws-studio-starter-projects).
+copy of the starter Git repository containing that commit. The companion project,
+[aws-studio-starter-projects](https://github.com/drmatt13/aws-studio-starter-projects),
+is private and requires GitHub access. Clone it alongside Studio to use the paths
+in the examples below.
 Create or copy the reference application into its own project directory before using
 it as a development app.
+Omit `--offline` on a connected first install to populate the npm cache.
 
 From the platform checkout on macOS or Linux, with the sibling starter repository
 and a populated npm cache:
@@ -90,7 +93,7 @@ npm run studio -- --project /path/to/project
 From the platform checkout in PowerShell, with the sibling repositories available:
 
 ```powershell
-$env:AWS_STUDIO_STARTERS = (Resolve-Path '..\aws-studio-starters').Path
+$env:AWS_STUDIO_STARTERS = (Resolve-Path '..\aws-studio-starter-projects').Path
 node scripts/bootstrap-test-peer.mjs
 npm ci --offline
 ```
