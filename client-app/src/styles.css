@@ -1,0 +1,35 @@
+/* Owner: Studio styling entry. Register production sources and exact responsive
+ * contracts here. Feature presentation belongs to React utilities and primitives. */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "./styles/theme.css";
+@import "./styles/base.css" layer(base);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "./";
+@source "../index.html";
+
+@custom-variant vp-1200 (@media (max-width: 1200px));
+@custom-variant vp-1100 (@media (max-width: 1100px));
+@custom-variant vp-900 (@media (max-width: 900px));
+@custom-variant vp-850 (@media (max-width: 850px));
+@custom-variant vp-800 (@media (max-width: 800px));
+@custom-variant vp-760 (@media (max-width: 760px));
+@custom-variant vp-720 (@media (max-width: 720px));
+@custom-variant vp-700 (@media (max-width: 700px));
+@custom-variant vp-650 (@media (max-width: 650px));
+@custom-variant vp-600 (@media (max-width: 600px));
+@custom-variant vp-560 (@media (max-width: 560px));
+@custom-variant vp-540 (@media (max-width: 540px));
+@custom-variant vp-480 (@media (max-width: 480px));
+@custom-variant vp-420 (@media (max-width: 420px));
+@custom-variant map-band (@media (min-width: 701px) and (max-width: 1100px));
+@custom-variant coarse (@media (any-pointer: coarse));
+@custom-variant forced-colors (@media (forced-colors: active));
+@custom-variant inspector-420 (@container inspector (max-width: 420px));
+@custom-variant inspector-360 (@container inspector (max-width: 360px));
+@custom-variant inspector-300 (@container inspector (max-width: 300px));
+@custom-variant detail-640 (@container (max-width: 640px));
+/* The Activity tray is open and covers the foot of the workspace. */
+@custom-variant activity-open ([data-ui="shell"]:has([data-ui="activity-drawer"]) &);
+/* Toggle intent changes immediately; activity-open also spans the closing slide. */
+@custom-variant activity-expanded ([data-ui="shell"]:has(#studio-activity-drawer[aria-hidden="false"]) &);

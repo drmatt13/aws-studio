@@ -1,0 +1,498 @@
+import { ChevronRight, Code2, Diamond } from "lucide-react";
+import { Fragment, useId, type ReactNode, type ComponentProps } from "react";
+import type { Mode } from "../../shared/model";
+import { cx } from "../ui/classes";
+import { inspectorSectionClasses } from "../inspector-ui";
+import { EnvironmentPills } from "./DeploymentBadge";
+
+/** Boolean settings use the same named, keyboard-operable On/Off control. */
+export function InspectorSwitch({
+  id,
+  label,
+  checked,
+  onChange,
+  disabled,
+  describedBy,
+  invalid,
+  className,
+}: {
+  readonly id?: string;
+  readonly label: string;
+  readonly checked: boolean;
+  readonly onChange: (checked: boolean) => void;
+  readonly disabled?: boolean;
+  readonly describedBy?: string;
+  readonly invalid?: boolean;
+  readonly className?: string;
+}) {
+  return (
+    <button
+      id={id}
+      type="button"
+      data-slot="inspector-switch"
+      className={cx(
+        "group/switch inline-flex min-h-(--panel-icon-target) cursor-pointer items-center gap-2 rounded-full border-0 bg-transparent p-1 font-semibold text-graphite aria-checked:text-accept disabled:cursor-default disabled:opacity-55 aria-disabled:cursor-progress",
+        className,
+      )}
+      role="switch"
+      aria-label={label}
+      aria-checked={checked}
+      aria-describedby={describedBy}
+      aria-invalid={invalid}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+    >
+      <span className="min-w-[3ch] text-right">{checked ? "On" : "Off"}</span>
+      <span
+        className="relative h-6 w-11 shrink-0 rounded-full border border-field-rule bg-wash transition-[background-color,border-color] duration-180 ease-[ease] group-aria-checked/switch:border-accept group-aria-checked/switch:bg-accept group-enabled/switch:group-hover/switch:border-graphite group-enabled/switch:group-aria-checked/switch:group-hover/switch:border-accept group-enabled/switch:group-aria-checked/switch:group-hover/switch:brightness-[1.08] motion-reduce:transition-none"
+        aria-hidden
+      >
+        <span className="absolute top-[2px] left-[2px] size-[18px] rounded-full bg-faint shadow-[0_1px_3px_rgb(0_0_0/.35)] transition-[transform,background-color] duration-180 ease-[ease] group-aria-checked/switch:translate-x-5 group-aria-checked/switch:bg-white motion-reduce:transition-none" />
+      </span>
+    </button>
+  );
+}
+
+/** An inspector header's type label, with its subject's Dev | Prod pair at the right where it has one. */
+export function InspectorKind({
+  children,
+  environments,
+}: {
+  readonly children: ReactNode;
+  readonly environments?: ComponentProps<typeof EnvironmentPills>;
+}) {
+  return (
+    <div data-slot="inspector-kind" className="flex items-center justify-between gap-3">
+      <span className="min-w-0 text-graphite text-meta font-medium tracking-[.03em] wrap-anywhere">
+        {children}
+      </span>
+      {environments ? <EnvironmentPills interactive {...environments} className="-my-1 shrink-0" /> : null}
+    </div>
+  );
+}
+
+/** The Development or Production name at the head of an environment card, in its environment's color. */
+export function EnvironmentName({
+  mode,
+  active = true,
+  id,
+}: {
+  readonly mode: Mode;
+  readonly active?: boolean;
+  readonly id?: string;
+}) {
+  return (
+    <span
+      id={id}
+      className={cx(
+        "flex items-center gap-1.5 text-meta font-medium",
+        // A touch of ink keeps the environment hue readable (4.5:1) on its card's tint in both themes.
+        active ? "[color:color-mix(in_srgb,currentColor_85%,var(--ink))]" : "text-graphite",
+      )}
+      data-slot="environment-name"
+    >
+      {mode === "dev" ? <Code2 size={14} aria-hidden /> : <Diamond size={14} aria-hidden />}
+      {mode === "dev" ? "Development" : "Production"}
+    </span>
+  );
+}
+
+/**
+ * A list row led by its service artwork. The icon, title and trailing badges or actions share
+ * one centered line; metadata lines below align with the title, never under the icon.
+ * Rows inside a list are ruled between one another only.
+ */
+export function InspectorResourceRow({
+  icon,
+  title,
+  trailing,
+  children,
+  as: Row = "li",
+  role,
+  className,
+  "data-slot": slot,
+}: {
+  readonly icon: ReactNode;
+  readonly title: ReactNode;
+  readonly trailing?: ReactNode;
+  readonly children?: ReactNode;
+  readonly as?: "li" | "div";
+  /** A staged row announces itself; only a `div` row takes a role. */
+  readonly role?: "status";
+  readonly className?: string;
+  readonly "data-slot"?: string;
+}) {
+  return (
+    <Row
+      data-slot={slot ?? "resource-row"}
+      role={role}
+      className={cx(
+        "grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 border-b border-rule py-2.5 first:pt-0 last:border-b-0 last:pb-0",
+        className,
+      )}
+    >
+      {icon}
+      <div className={cx("min-w-0 wrap-anywhere", !trailing && "col-span-2")}>{title}</div>
+      {trailing ? (
+        <div className="flex shrink-0 items-center gap-2 justify-self-end">{trailing}</div>
+      ) : null}
+      {children ? (
+        <div className="col-span-2 col-start-2 grid min-w-0 justify-items-start gap-0.5 text-caption text-graphite wrap-anywhere">
+          {children}
+        </div>
+      ) : null}
+    </Row>
+  );
+}
+
+/**
+ * A resource row that opens onto its evidence and actions. The summary keeps
+ * `InspectorResourceRow`'s geometry (icon, title and trailing state on one centered line, the
+ * metadata line beneath the title), and the whole row is the toggle, so it draws no marker.
+ */
+export function InspectorDisclosureRow({
+  icon,
+  title,
+  caption,
+  trailing,
+  children,
+  "data-slot": slot,
+}: {
+  readonly icon: ReactNode;
+  readonly title: ReactNode;
+  readonly caption?: ReactNode;
+  readonly trailing?: ReactNode;
+  readonly children?: ReactNode;
+  readonly "data-slot"?: string;
+}) {
+  return (
+    <details
+      data-slot={slot ?? "disclosure-row"}
+      data-disclosure="permission"
+      className="min-w-0 border-b border-rule py-2.5 first:pt-0 last:border-b-0 last:pb-0"
+    >
+      <InspectorSummary
+        marker={false}
+        className="-mx-1 -my-1 grid cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 rounded-sm p-1 hover:bg-wash"
+      >
+        {icon}
+        <strong className={cx("min-w-0 font-medium wrap-anywhere", !trailing && "col-span-2")}>
+          {title}
+        </strong>
+        {trailing ? (
+          <span className="flex shrink-0 items-center gap-2 justify-self-end">{trailing}</span>
+        ) : null}
+        {caption ? (
+          <span className="col-span-2 col-start-2 min-w-0 text-caption text-graphite wrap-anywhere">
+            {caption}
+          </span>
+        ) : null}
+      </InspectorSummary>
+      {children}
+    </details>
+  );
+}
+
+/** A dotted identifier such as `stack.member` wraps after a dot before it ever breaks inside a name. */
+export function DottedName({ children }: { readonly children: string }) {
+  return children.split(".").map((part, index) => (
+    <Fragment key={index}>
+      {index ? (
+        <>
+          .<wbr />
+        </>
+      ) : null}
+      {part}
+    </Fragment>
+  ));
+}
+
+/** A word longer than this may not fit a narrow panel's line by itself, so its humps may break. */
+const LONG_WORD = 12;
+
+/**
+ * A name or technical identifier (a target ref, catalog path, config key, variable, type or file)
+ * wraps after a separator or before an opening bracket before it ever breaks inside a word. A long
+ * camel-case word may also break at its humps, so a narrow panel never strands a letter on its own
+ * line; short words such as PostgreSQL stay whole.
+ */
+export function Identifier({ children }: { readonly children: string }) {
+  return children
+    .split(/(?<=[\s.:/_])|(?=\[)/)
+    .flatMap((word) => (word.length > LONG_WORD ? word.split(/(?<=[a-z0-9])(?=[A-Z])/) : [word]))
+    .map((part, index) => (
+      <Fragment key={index}>
+        {index ? <wbr /> : null}
+        {part}
+      </Fragment>
+    ));
+}
+
+/**
+ * The facts beneath an identity header: a type, an owning group, generated files, source lines.
+ * Every list shares one label column, so values start at the same x in every inspector and
+ * consecutive lists read as one. Rows sit on the 24 px caption pitch; a long value wraps inside
+ * its column while its label stays on the value's first line.
+ */
+export function InspectorFacts({ className, ...props }: ComponentProps<"dl">) {
+  return (
+    <dl
+      {...props}
+      className={cx(
+        "m-0 grid grid-cols-[88px_minmax(0,1fr)] items-baseline gap-x-3 text-caption text-graphite",
+        className,
+      )}
+    />
+  );
+}
+
+/** One labelled fact. Its value is the row's content; the label only names it. */
+export function InspectorFact({
+  label,
+  children,
+}: {
+  readonly label: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <>
+      <dt className="min-w-0 wrap-anywhere">{label}</dt>
+      <dd className="m-0 flex min-h-6 min-w-0 items-center text-ink">{children}</dd>
+    </>
+  );
+}
+/** A count beside a heading or supporting summary; the shared disclosure right-aligns its own. */
+export function InspectorCount({
+  children,
+  className,
+}: {
+  readonly children: ReactNode;
+  readonly className?: string;
+}) {
+  return (
+    <span
+      data-slot="section-count"
+      className={cx(
+        "inline-block shrink-0 rounded-sm bg-wash px-2 text-meta leading-[1.5] font-medium text-graphite tabular-nums",
+        className,
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** One heading and content rhythm across every inspector and configuration form.
+ * A heading action keeps its 32 px target without lowering the title, so every section title sits
+ * the same distance below its rule. A description belongs to its title (4 px below it, in the
+ * title's column, so an action never crowds it); content follows the heading block by 12 px. */
+export function InspectorSection({
+  title,
+  description,
+  children,
+  actions,
+  className = "",
+  contentClassName,
+  embedded = false,
+  appearance = "inspector",
+  "data-slot": slot,
+}: {
+  readonly title: string;
+  readonly description?: ReactNode;
+  readonly children: ReactNode;
+  readonly actions?: ReactNode;
+  readonly className?: string;
+  readonly contentClassName?: string;
+  readonly embedded?: boolean;
+  readonly appearance?: "inspector" | "native";
+  readonly "data-slot"?: string;
+}) {
+  const id = useId();
+  return (
+    <section
+      data-inspector-section
+      data-slot={slot ?? "inspector-section"}
+      className={cx(appearance === "inspector" && !embedded && inspectorSectionClasses, className)}
+      aria-labelledby={id}
+    >
+      <div
+        data-slot="section-heading"
+        className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3"
+      >
+        <h3
+          id={id}
+          className={cx(
+            "min-w-0 wrap-anywhere",
+            !actions && "col-span-full",
+            appearance === "inspector" && "m-0 text-label font-semibold text-balance",
+          )}
+        >
+          {title}
+        </h3>
+        {actions ? (
+          <span className="-my-1.5 inline-flex shrink-0 items-center">{actions}</span>
+        ) : null}
+        {description ? (
+          <p
+            className={cx(
+              "mt-1 mb-0 min-w-0 text-caption leading-[1.5] text-graphite",
+              !actions && "col-span-full",
+            )}
+            data-slot="section-description"
+          >
+            {description}
+          </p>
+        ) : null}
+      </div>
+      <div
+        data-slot="section-content"
+        className={cx("min-w-0 [&>:first-child]:mt-0 [&>:last-child]:mb-0", contentClassName)}
+      >
+        {children}
+      </div>
+    </section>
+  );
+}
+
+/** A compact, keyboard-accessible section heading; fresh sections start closed. */
+export function InspectorDisclosure({
+  title,
+  children,
+  count,
+  status,
+  defaultOpen = false,
+  open,
+  onToggle,
+  className = "",
+  contentClassName,
+  embedded = false,
+  appearance = "inspector",
+  "data-slot": slot,
+}: {
+  readonly title: string;
+  readonly children: ReactNode;
+  readonly count?: number;
+  readonly status?: "modified" | "invalid";
+  readonly defaultOpen?: boolean;
+  readonly className?: string;
+  readonly contentClassName?: string;
+  readonly embedded?: boolean;
+  readonly appearance?: "inspector" | "native";
+  readonly "data-slot"?: string;
+  readonly open?: boolean;
+  readonly onToggle?: (open: boolean) => void;
+}) {
+  return (
+    <section
+      data-inspector-disclosure
+      data-inspector-section
+      data-slot={slot ?? "inspector-disclosure"}
+      className={cx(
+        appearance === "inspector" && cx(!embedded && "border-b border-rule px-5", "py-2"),
+        className,
+      )}
+    >
+      <details
+        data-disclosure="icon"
+        className="group/disclosure"
+        open={open ?? defaultOpen}
+        onToggle={onToggle ? (event) => onToggle(event.currentTarget.open) : undefined}
+      >
+        <summary className="-mx-1 flex min-h-(--panel-icon-target) cursor-pointer list-none items-center gap-2 rounded-sm px-1 text-label font-semibold hover:bg-wash [&::-webkit-details-marker]:hidden">
+          <ChevronRight
+            size={14}
+            aria-hidden
+            className="shrink-0 text-graphite transition-transform duration-150 group-open/disclosure:rotate-90 motion-reduce:transition-none"
+          />
+          <span className="min-w-0 wrap-anywhere">{title}</span>
+          {status ? (
+            <span
+              data-slot="section-state"
+              data-state={status}
+              className={cx(
+                "ml-auto text-caption font-medium",
+                status === "invalid" ? "text-refuse" : "text-dev",
+              )}
+            >
+              {status === "invalid" ? "Needs attention" : "Modified"}
+            </span>
+          ) : null}
+          {count !== undefined ? (
+            <InspectorCount className={status ? "ml-0" : "ml-auto"}>{count}</InspectorCount>
+          ) : null}
+        </summary>
+        <div
+          data-slot="section-content"
+          className={cx(
+            "min-w-0 group-open/disclosure:pt-3 group-open/disclosure:pb-2 [&>:first-child]:mt-0 [&>:last-child]:mb-0",
+            contentClassName,
+          )}
+        >
+          {children}
+        </div>
+      </details>
+    </section>
+  );
+}
+
+export function FormGroup({
+  title,
+  description,
+  children,
+  appearance = "inspector",
+}: {
+  readonly title: string;
+  readonly description?: ReactNode;
+  readonly children: ReactNode;
+  readonly appearance?: "inspector" | "plain";
+}) {
+  // Inspector density is contextual; document forms retain their native fieldset geometry.
+  return (
+    <fieldset
+      className={cx(
+        appearance === "plain"
+          ? "m-0 min-w-0 border-0 p-0"
+          : "in-[[data-inspector-context]]:mx-0 in-[[data-inspector-context]]:mt-4 in-[[data-inspector-context]]:mb-0 in-[[data-inspector-context]]:min-w-0 in-[[data-inspector-context]]:border-0 in-[[data-inspector-context]]:border-t in-[[data-inspector-context]]:border-rule in-[[data-inspector-context]]:px-0 in-[[data-inspector-context]]:pt-3 in-[[data-inspector-context]]:pb-0 in-[[data-inspector-context]]:first:mt-0 in-[[data-inspector-context]]:first:border-t-0 in-[[data-inspector-context]]:first:pt-0 ",
+        "[&>legend+*]:clear-both",
+      )}
+    >
+      <legend className="in-[[data-inspector-context]]:float-left in-[[data-inspector-context]]:mb-3 in-[[data-inspector-context]]:w-full in-[[data-inspector-context]]:p-0 in-[[data-inspector-context]]:text-label in-[[data-inspector-context]]:font-semibold">
+        {title}
+      </legend>
+      {description ? (
+        <p className="clear-both mt-0 mb-3 text-caption leading-[1.5] text-graphite">
+          {description}
+        </p>
+      ) : null}
+      {children}
+    </fieldset>
+  );
+}
+
+/** Native disclosure markers are replaced only inside inspector contexts. */
+export function InspectorSummary({
+  children,
+  className,
+  marker = true,
+  targetSize = "caption",
+  ...props
+}: ComponentProps<"summary"> & { readonly marker?: boolean; readonly targetSize?: "caption" | "row" }) {
+  return (
+    <summary
+      {...props}
+      className={cx(
+        "in-[[data-inspector-context]]:list-none in-[[data-inspector-context]]:[&::-webkit-details-marker]:hidden",
+        targetSize === "row" ? "min-h-11" : "in-[[data-inspector-context]]:min-h-(--panel-caption-target)",
+        className,
+      )}
+    >
+      {marker ? (
+        <ChevronRight
+          aria-hidden
+          className="mr-[.35em] hidden size-[1.1em] flex-none align-[-.2em] text-graphite in-[[data-inspector-context]]:inline-block [details[open]>summary>&]:rotate-90 forced-colors:text-[CanvasText]"
+        />
+      ) : null}
+      {children}
+    </summary>
+  );
+}

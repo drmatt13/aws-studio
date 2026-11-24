@@ -1,0 +1,707 @@
+import { readNetworkDraft } from "../shared/networks";
+import { readPrivateZoneEdit } from "../shared/private-dns";
+import { isLocalProcessKind } from "../shared/operations";
+import { randomBytes, randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import path from "node:path";
+import express, { type NextFunction, type Request, type Response } from "express";
+import { readCreationRequest, CreationValidationError } from "../shared/creation";
+import type { CommentReviewOptions, DraftEdit, SnapshotResponse } from "../shared/api";
+import { COMMANDS, CommandRunner } from "./commands";
+import { EditError, EditService } from "./edits/transaction";
+import { SourceJournal } from "./edits/journal";
+import { SourceGateError } from "aws-studio/source/source-gate";
+import { isGatewayOperation, readGatewayOperation } from "../shared/gateway-operations";
+import { readWorkloadOperation } from "../shared/workload-operations";
+import { readIamPolicyEdit } from "../shared/permission-rules";
+import { apiGuard, hostGuard } from "./guards";
+import { developmentLogsRouter } from "./development-logs";
+import { CombinedDevelopmentLogReader, developmentLogCacheDirectory } from "aws-studio/local/development-logs";
+import type { EditIntent } from "./edits/plan";
+import { sha256 } from "./files";
+import { ResourceService, readResourceIntent } from "./resources";
+import { SnapshotBuilder, type StudioState } from "./snapshot";
+import { watchRepository } from "./watch";
+import type { SourceWatchState } from "../shared/watch";
+import { InfrastructureService } from "./infrastructure";
+import { initializeDeploymentInputs } from "./deployment-inputs";
+import { DeploymentInputService, inputMode, readInputFiles } from "./deployment-input-edits";
+import { DeployService } from "./deploy/service";
+import { deployRouter } from "./deploy/routes";
+import { FrontendReleaseService } from "./frontend-release";
+import { DeploymentIdentityService } from "./deployment-identities";
+import { frontendReleaseRouter } from "./frontend-release-routes";
+import { AppNameService, type DeploymentDiscovery } from "./app-name";
+import { appNameRouter } from "./app-name-routes";
+import { readIdentityPolicyEdit } from "./identity-policy-source";
+import { IdentityPolicyService, identityPolicyRouter } from "./identity-policy";
+import { sendJson } from "./http";
+import { STUDIO_PROTOCOL_VERSION, STUDIO_RESTART_MESSAGE } from "../shared/protocol";
+import { readDatabaseDraft, readDatabasePlacementDraft } from "../shared/managed-database";
+import { DatabaseWorkbenchService } from "./database-workbench";
+import { DatabaseHistoryService } from "./database-history";
+import { DatabaseApplicationService } from "./database-application";
+import { DatabaseCloudService } from "./database-cloud";
+import { databaseSqlRouter } from "./database-sql";
+import { IdentityService } from "./identity/service";
+import { identityRouter } from "./identity/routes";
+import { CognitoOperations } from "./identity/operations";
+import { StatefulResourceService, statefulResourceRouter } from "./stateful-resources";
+import { webSocketDefaults } from "./websockets";
+import { AwsConnectionsService } from "./aws-connections/service";
+import { awsConnectionsRouter } from "./aws-connections/routes";
+import { AgentLabService, agentLabRouter } from "./agent-lab";
+import { installSourceWriteGuard } from "aws-studio/source/io";
+import { assertOwnershipAllows } from "./edits/ownership-guard";
+import { reviewProposalOwnership } from "./edits/proposal-ownership";
+import { AgentTaskClient } from "./agent-runtime/client";
+import { agentTaskRouter } from "./agent-runtime/router";
+import { processIdentity } from "aws-studio/source/identity";
+import { GraphQLChainService } from "./graphql-chain/service";
+import { graphqlChainRouter } from "./graphql-chain/routes";
+import { graphqlWorkspaceRouter } from "./graphql-workspace/routes";
+import { GraphQLRuntimeService } from "./graphql-workspace/runtime";
+import { readProjectRelease, releaseIsOlder, studioDistributionMetadata, studioReleaseArchive } from "./project-release";
+
+/**
+ * The studio's HTTP surface: one origin, on the loopback interface only.
+ *
+ * Three guards stand in front of everything:
+ *
+ * - the Host header must name this server (`127.0.0.1:<port>` or
+ *   `localhost:<port>`), so a page on another site that rebinds its own
+ *   hostname to 127.0.0.1 is answered with nothing;
+ * - every API call carries a per-process token, written into the page this
+ *   server serves and readable by no other origin;
+ * - every request that changes something must also come from this origin.
+ *
+ * No CORS headers are sent, ever.
+ */
+
+const STUDIO_ROOT = path.resolve(__dirname, "..");
+const DEFAULT_PORT = 4590;
+
+function portFrom(args: readonly string[]): number {
+  const flag = args.indexOf("--port");
+  const raw = flag >= 0 ? args[flag + 1] : process.env.STUDIO_PORT;
+  const port = raw === undefined ? DEFAULT_PORT : Number(raw);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error(`--port takes a number from 1024 to 65535, not ${raw}.`);
+  return port;
+}
+
+export function readIntent(body: unknown): EditIntent {
+  const record = (body ?? {}) as Record<string, unknown>;
+  const intent = record.intent as Record<string, unknown> | undefined;
+  if (!intent || typeof intent.target !== "string" || typeof intent.field !== "string") {
+    throw new EditError(400, "An edit names a target and a field.");
+  }
+  if (intent.inherit === true) return { target: intent.target, field: intent.field, inherit: true };
+  if (typeof intent.value !== "string" && typeof intent.value !== "number" && typeof intent.value !== "boolean") {
+    throw new EditError(400, "An edit gives a string, number or boolean value, or inherit: true.");
+  }
+  return { target: intent.target, field: intent.field, value: intent.value };
+}
+
+
+export function readCommentOptions(value: unknown): CommentReviewOptions | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => key !== "comments")) throw new EditError(400, "Comment review options must contain only comment choices.");
+  const comments = (value as Record<string, unknown>).comments;
+  if (comments === undefined) return {};
+  if (!comments || typeof comments !== "object" || Array.isArray(comments) || Object.keys(comments).length > 500 || Object.entries(comments).some(([id, resolution]) => !/^[a-f0-9]{64}$/.test(id) || (resolution !== "keep" && resolution !== "remove"))) throw new EditError(400, "Choose Keep or Remove for each reviewed source comment.");
+  return { comments: comments as Readonly<Record<string, "keep" | "remove">> };
+}
+
+export function readDraftEdits(entries: unknown): readonly DraftEdit[] {
+    if (!Array.isArray(entries) || !entries.length || entries.length > 100) throw new EditError(400, "A draft contains between 1 and 100 setting changes.");
+    return entries.map((edit: unknown): DraftEdit => {
+      const item = edit as Record<string, unknown> | undefined;
+      if (item?.kind === "frameworkUpgrade" && Object.keys(item).length === 1) return { kind: "frameworkUpgrade" };
+      if (item?.kind === "rename" && Object.keys(item).every(key => ["kind", "entity", "name"].includes(key)) && typeof item.entity === "string" && typeof item.name === "string") return { kind: "rename", entity: item.entity, name: item.name };
+      if (item?.kind === "displayName" && Object.keys(item).every(key => ["kind", "entity", "value"].includes(key)) && typeof item.entity === "string" && (item.value === null || typeof item.value === "string")) return { kind: "displayName", entity: item.entity, value: item.value };
+      if (item?.kind === "resourceConfig" && Object.keys(item).every(key => ["kind", "intent"].includes(key))) return { kind: "resourceConfig", intent: readResourceIntent(item) };
+      if (isGatewayOperation(String(item?.kind))) {
+        try { return readGatewayOperation(item); } catch (error) { throw new EditError(400, error instanceof Error ? error.message : "Choose a supported Gateway operation."); }
+      }
+      if (["implementation", "connection", "removeWorkload"].includes(String(item?.kind))) {
+        try { return readWorkloadOperation(item); } catch (error) { throw new EditError(400, error instanceof Error ? error.message : "Choose a supported workload operation."); }
+      }
+      if (item?.kind === "deploy") {
+        if (Object.keys(item).some(key => !["kind", "target", "value"].includes(key)) || typeof item.target !== "string") throw new EditError(400, "Choose a declared workload and Deploy setting.");
+        const value = item.value;
+        if (typeof value === "string" && ["both", "local-only", "cloud-only", "none", "inherit"].includes(value)) return { kind: "deploy", target: item.target, value: value as import("../shared/api").DeployValue };
+        if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1 && "when" in value && value.when && typeof value.when === "object" && !Array.isArray(value.when)) {
+          const when = value.when as Record<string, unknown>;
+          if (Object.keys(when).length === 2 && typeof when.resource === "string" && typeof when.equals === "string" && when.equals.trim()) return { kind: "deploy", target: item.target, value: { when: { resource: when.resource, equals: when.equals } } };
+        }
+        throw new EditError(400, "Choose a Deploy token or one input and matching value.");
+      }
+      if (item?.kind === "create") {
+        try { return { kind: "create", request: readCreationRequest(item.request) }; }
+        catch (error) { if (error instanceof CreationValidationError) throw new EditError(422, `${error.field}: ${error.message}`); throw error; }
+      }
+      if (item?.kind === "placement" || item?.kind === "network") {
+        try { return readNetworkDraft(item); }
+        catch (error) { throw new EditError(422, error instanceof Error ? error.message : String(error)); }
+      }
+      if (item?.kind === "privateZone") {
+        try { return readPrivateZoneEdit(item); }
+        catch (error) { throw new EditError(422, error instanceof Error ? error.message : String(error)); }
+      }
+      if (item?.kind === "removeNetwork" && Object.keys(item).every(key => ["kind", "network"].includes(key)) && typeof item.network === "string" && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(item.network)) return { kind: "removeNetwork", network: item.network };
+      if (item?.kind === "database") {
+        try { return readDatabaseDraft(item); } catch (error) { throw new EditError(422, error instanceof Error ? error.message : String(error)); }
+      }
+      if (item?.kind === "databasePlacement") {
+        try { return readDatabasePlacementDraft(item); } catch (error) { throw new EditError(422, error instanceof Error ? error.message : String(error)); }
+      }
+      if (item?.kind === "field") return { kind: "field", intent: readIntent(item) };
+      if (item?.kind === "identityPolicy") return readIdentityPolicyEdit(item);
+      if (item?.kind === "iamPolicy") { try { return readIamPolicyEdit(item); } catch (error) { throw new EditError(400, error instanceof Error ? error.message : "Choose an IAM policy operation."); } }
+      if (item?.kind === "clientEnvironment") return { kind: "clientEnvironment", mappings: item.mappings as never };
+      if (item?.kind === "tags" && Object.keys(item).every(key => ["kind", "entity", "tags"].includes(key)) && typeof item.entity === "string" && item.tags && typeof item.tags === "object" && !Array.isArray(item.tags)) return { kind: "tags", entity: item.entity, tags: item.tags as Readonly<Record<string, string>> };
+      if (item?.kind === "ownership" && Object.keys(item).every(key => ["kind", "entity", "managedBy"].includes(key)) && typeof item.entity === "string" && (item.managedBy === "framework" || item.managedBy === "developer")) return { kind: "ownership", entity: item.entity, managedBy: item.managedBy };
+      if (item?.kind === "description" && typeof item.entity === "string" && typeof item.value === "string") return { kind: "description", entity: item.entity, value: item.value };
+      if (item?.kind === "route" && typeof item.route === "string" && typeof item.value === "string") return { kind: "route", route: item.route, value: item.value };
+      if (item?.kind === "triggers" && typeof item.event === "string" && Array.isArray(item.bindings)) return { kind: "triggers", event: item.event, bindings: item.bindings };
+      if (item?.kind === "nativeTrigger" && typeof item.edge === "string") return { kind: "nativeTrigger", edge: item.edge };
+      if (item?.kind === "onFailure" && typeof item.event === "string" && (item.value === null || (typeof item.value === "object" && !Array.isArray(item.value)))) return { kind: "onFailure", event: item.event, value: item.value as never };
+      throw new EditError(400, "A draft change names an editable field, description, HTTP route or trigger.");
+    });
+}
+
+export async function startServer(repositoryRoot: string, args: readonly string[]): Promise<Server> {
+  const port = portFrom(args);
+  const app = express();
+  const server = createServer(app);
+  const cleanups: (() => void | Promise<unknown>)[] = [];
+  let ready = false;
+  let closing = false;
+  let startup: Promise<void> | undefined;
+  let disposal: Promise<void> | undefined;
+  app.use((_request, response, next) => {
+    if (!ready) { response.status(503).send("Studio is starting. Try again shortly."); return; }
+    next();
+  });
+  const dispose = (): Promise<void> => {
+    if (disposal) return disposal;
+    closing = true;
+    ready = false;
+    disposal = (async () => {
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeAllConnections();
+      const failures: unknown[] = [];
+      const drain = async () => {
+        while (cleanups.length) {
+          try { await cleanups.pop()!(); } catch (error) { failures.push(error); }
+        }
+      };
+      // Stop existing evaluators before joining startup: a declaration may be
+      // synchronously blocked and unable to service an IPC disconnect itself.
+      await drain();
+      await startup?.catch(() => undefined);
+      // An in-flight asynchronous acquisition may have registered its disposer
+      // while startup settled. Release those resources before exiting too.
+      await drain();
+      await closed;
+      process.off("SIGINT", shutdown);
+      process.off("SIGTERM", shutdown);
+      if (failures.length) throw new AggregateError(failures, "Studio cleanup failed.");
+    })();
+    return disposal;
+  };
+  const shutdown = () => void dispose().then(() => process.exit(0), (error) => {
+    process.stderr.write(`${String(error)}\n`);
+    process.exit(1);
+  });
+  // Keep ownership visible while asynchronous cleanup runs. Dependencies that
+  // re-emit an otherwise unhandled signal must not bypass the pending disposer.
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  try {
+    startup = (async () => {
+      // Claim the port before Vite, watchers or evaluators acquire resources.
+      await new Promise<void>((resolve, reject) => {
+        const failed = (error: Error) => reject(error);
+        server.once("error", failed);
+        server.listen(port, "127.0.0.1", () => { server.off("error", failed); resolve(); });
+      });
+      if (closing) return;
+      await configureServer(repositoryRoot, port, app, server, (cleanup) => cleanups.push(cleanup), () => closing, shutdown);
+    })();
+    await startup;
+    if (closing) { await dispose(); return server; }
+    ready = true;
+  } catch (error) {
+    await dispose().catch((cleanupError) => process.stderr.write(`${String(cleanupError)}\n`));
+    throw error;
+  }
+  process.stderr.write(`Framework Studio is running at http://127.0.0.1:${port}/\n`);
+  return server;
+}
+
+async function configureServer(
+  repositoryRoot: string,
+  port: number,
+  app: ReturnType<typeof express>,
+  server: Server,
+  defer: (cleanup: () => void | Promise<unknown>) => void,
+  isClosing: () => boolean,
+  requestRestart: () => void,
+): Promise<void> {
+  const token = randomBytes(24).toString("hex");
+  const restartKey = randomBytes(24).toString("hex"), runtimeId = randomUUID();
+  const log = (line: string) => process.stderr.write(`${line}\n`);
+
+  // Input setup occurs only when the developer chooses Create on that mode's file.
+  const inputSetupProblems: Partial<Record<"dev" | "prod", string>> = {};
+  const initializeInputs = (modes?: readonly ("dev" | "prod")[]) => {
+    const results = initializeDeploymentInputs(repositoryRoot, modes);
+    for (const result of results) {
+      if (result.problem) inputSetupProblems[result.mode] = result.problem;
+      else delete inputSetupProblems[result.mode];
+    }
+    return results;
+  };
+  const builder = new SnapshotBuilder(repositoryRoot, log, () => inputSetupProblems);
+  const refreshes = new Set<Promise<StudioState | undefined>>();
+  defer(async () => {
+    // Close every snapshot/review evaluator before joining refresh wrappers;
+    // terminal disposal also refuses already queued follow-up acquisitions.
+    await builder.dispose();
+    await Promise.allSettled([...refreshes]);
+    await builder.dispose();
+  });
+  // Every Studio source write is checked against ownership, whichever writer produced it.
+  defer(installSourceWriteGuard((root, file, before, after) => { const state = builder.current; if (state) assertOwnershipAllows(root, state, [{ file, before, after }]); }));
+  const upgradeVersion = (() => {
+    try { return studioReleaseArchive().version; }
+    catch { return undefined; }
+  })();
+  const availableFrameworkUpgrade = (): SnapshotResponse["frameworkUpgrade"] => {
+    if (!upgradeVersion) return;
+    try {
+      const installed = readProjectRelease(repositoryRoot);
+      if (installed?.spec.startsWith("file:") && releaseIsOlder(installed.version, upgradeVersion)) return { installed: installed.version, available: upgradeVersion };
+    } catch { /* A malformed project pin is reported through model evaluation. */ }
+  };
+  const edits = new EditService(repositoryRoot, builder);
+  const resources = new ResourceService(repositoryRoot, builder);
+  const inputs = new DeploymentInputService(repositoryRoot, builder);
+  const commands = new CommandRunner(repositoryRoot);
+  const graphqlChain = new GraphQLChainService(repositoryRoot);
+  defer(() => graphqlChain.dispose());
+  defer(() => commands.dispose());
+  const agentLab = new AgentLabService();
+  defer(() => agentLab.dispose());
+  const agentTasks = new AgentTaskClient(repositoryRoot, process.env.FRAMEWORK_STUDIO_AGENT_STATE_DIRECTORY, () => ({
+    id: runtimeId, identity: processIdentity(runtimeId), port, token, protocol: STUDIO_PROTOCOL_VERSION, restartKey,
+    entry: path.join(STUDIO_ROOT, "server/index.ts"), loader: createRequire(path.join(STUDIO_ROOT, "package.json")).resolve("tsx"),
+  }));
+  defer(() => agentTasks.close());
+  const clients = new Set<Response>();
+  defer(() => { for (const client of clients) client.end(); clients.clear(); });
+  let sourceWatch: SourceWatchState | undefined;
+
+  const broadcast = (event: string, data: unknown) => {
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const client of clients) client.write(message);
+  };
+  const infrastructure = new InfrastructureService(repositoryRoot, () => builder.current?.snapshot, undefined, () => broadcast("infrastructure", {}));
+  const deploy = new DeployService(repositoryRoot, broadcast, { operations: true, observeExistingContainers: true, disabledLocalServices: () => {
+    const model = builder.current?.snapshot.models.dev;
+    return new Set(model?.status === "ok" && !model.stale ? model.targets.filter(target => target.kind === "service" && !target.lanes.local).map(target => target.id) : []);
+  } });
+  defer(() => deploy.dispose());
+  let activeAwsRequests = 0;
+  const connections = new AwsConnectionsService(repositoryRoot, {
+    busy: profiles => activeAwsRequests > 0 || deploy.hasUnobservedOperations() || deploy.activeJobs().some(job => !isLocalProcessKind(job.kind) && typeof job.params.profile === "string" && profiles.includes(job.params.profile)),
+    changed: profiles => {
+      if (profiles.length) for (const profile of profiles) deploy.observer.invalidate(profile);
+      else deploy.observer.invalidate();
+      infrastructure.invalidateConnections();
+      broadcast("aws-connections", { profiles });
+    },
+  });
+  deploy.setConnections(connections);
+  defer(() => connections.dispose());
+  const stateful = new StatefulResourceService(repositoryRoot, builder, deploy);
+  /** Every preview was offered against one snapshot; a new one expires them all, whoever wrote it. */
+  const published = (revision: string, external: readonly string[] = []) => {
+    edits.expirePlans();
+    resources.expirePlans();
+    inputs.expirePlans();
+    stateful.expirePlans();
+    // Discovery includes repository target matching, and status includes local
+    // compatibility. Both must be read against the newly published source.
+    deploy.observer.invalidate();
+    broadcast("snapshot", { revision, external });
+  };
+  let evaluating = false;
+  let evaluationFailed = false;
+  const refresh = (external: readonly string[]): Promise<StudioState | undefined> => {
+    if (isClosing()) return Promise.resolve(undefined);
+    const task = (async () => {
+      evaluating = true;
+      broadcast("status", { evaluating: true });
+      try {
+        const state = await builder.refresh();
+        evaluationFailed = false;
+        published(state.snapshot.revision, external);
+        return state;
+      } catch (error) {
+        if (error instanceof SourceGateError && error.activeOwner) {
+          const { state, publication } = builder.presentation;
+          if (state && publication.status === "busy") return state;
+        }
+        evaluationFailed = true;
+        log(`Refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+        published("");
+        return undefined;
+      } finally {
+        evaluating = false;
+        broadcast("status", { evaluating: false });
+      }
+    })();
+    refreshes.add(task);
+    void task.finally(() => refreshes.delete(task));
+    return task;
+  };
+
+  app.disable("x-powered-by");
+
+  app.use(hostGuard(port));
+  app.get("/_studio/runtime-ready", (_request, response) => response.json({ pid: process.pid, activation: process.env.FRAMEWORK_STUDIO_ACTIVATION_NONCE ?? null }));
+
+  const api = express.Router();
+  api.use(express.json({ limit: "640kb" }));
+  api.use(apiGuard(token));
+  api.use((request, response, next) => {
+    if (request.method !== "GET" && request.get("x-studio-protocol") !== STUDIO_PROTOCOL_VERSION) {
+      response.status(409).json({ error: STUDIO_RESTART_MESSAGE }); return;
+    }
+    next();
+  });
+  api.use((request, response, next) => {
+    const awsOperation = request.method === "POST" && /^\/(?:operations|deploy\/operations|identity\/(?:operations|domain-dns)|frontend-release|database\/(?:cloud|application)|stateful-resources)(?:\/|$)/.test(request.path);
+    if (!awsOperation) { next(); return; }
+    if (connections.hasCredentialMutation) {
+      response.status(409).json({ error: "AWS session sign-out is in progress. Wait for it to finish before starting an AWS operation." }); return;
+    }
+    activeAwsRequests++;
+    let finished = false;
+    const release = () => { if (!finished) { finished = true; activeAwsRequests--; } };
+    response.once("finish", release); response.once("close", release);
+    next();
+  });
+  const send = sendJson;
+  api.use("/graphql/chain", graphqlChainRouter(graphqlChain));
+  api.use("/graphql", graphqlWorkspaceRouter(repositoryRoot, new GraphQLRuntimeService(repositoryRoot, () => deploy.localStatus())));
+  api.use("/agent-lab", agentLabRouter(agentLab));
+  api.use("/agent-tasks", agentTaskRouter(agentTasks, proposal => reviewProposalOwnership(repositoryRoot, builder.current, proposal)));
+  api.post("/agent-runtime/restart", (request, response) => {
+    if (request.get("x-studio-agent-restart") !== restartKey) { response.status(403).json({ error: "A registered independent task host must request this restart." }); return; }
+    if (commands.busy || activeAwsRequests || deploy.hasUnobservedOperations() || deploy.activeJobs().some(job => !isLocalProcessKind(job.kind))) { response.status(409).json({ error: "Wait for Studio operations to finish before restarting." }); return; }
+    response.status(202).json({ restarting: true }); setTimeout(requestRestart, 100).unref();
+  });
+  api.use("/aws-connections", awsConnectionsRouter(connections));
+  api.use("/identity-policy", identityPolicyRouter(new IdentityPolicyService(repositoryRoot, () => builder.current)));
+  api.use("/database/sql", databaseSqlRouter(repositoryRoot));
+  const identities = new DeploymentIdentityService(repositoryRoot);
+  api.use("/frontend-release", frontendReleaseRouter(new FrontendReleaseService(repositoryRoot), identities, () => { void refresh([]); }));
+  // A rename review looks in AWS, read-only, through Deploy's own discovery.
+  const appName = new AppNameService(repositoryRoot, (profile, region) => deploy.discover(profile, region, false) as ReturnType<DeploymentDiscovery>);
+  api.use("/app-name", appNameRouter(appName, () => { void refresh([]); }));
+  const identityService = new IdentityService(repositoryRoot, deploy, undefined, undefined, undefined, mode => builder.presented?.evaluation.inputMetadata?.[mode]);
+  api.use("/identity", identityRouter(identityService, new CognitoOperations(repositoryRoot, identityService)));
+  api.use("/stateful-resources", statefulResourceRouter(stateful, revision => published(revision)));
+  const sourceJournal = new SourceJournal(repositoryRoot);
+  const recoveryState = () => { try { return { sourceRecovery: sourceJournal.pending() }; } catch (error) { return { sourceRecoveryProblem: `Source recovery records cannot be read: ${error instanceof Error ? error.message : String(error)}. Source writes remain blocked; inspect .cache/framework-studio/transactions without discarding user files.` }; } };
+  api.get("/source-recovery", (_request, response) => send(response, async () => sourceJournal.pending()));
+  api.post("/source-recovery/restore", (request, response) => send(response, async () => {
+    const result = sourceJournal.restore(String(request.body?.id ?? ""), String(request.body?.approval ?? ""));
+    await refresh([]);
+    return result;
+  }));
+  api.post("/source-recovery/keep", (request, response) => send(response, async () => {
+    const state = await refresh([]);
+    if (!state || Object.values(state.snapshot.models).some(model => model.stale || model.status === "error" || model.targets.some(target => target.implementation && !target.implementation.ready))) throw new EditError(422, "Current source or implementation artifacts need attention. Fix the reported configuration/implementation errors, refresh, then review recovery again. No files were changed.");
+    return sourceJournal.keepCurrent(String(request.body?.id ?? ""), String(request.body?.fingerprint ?? ""), String(request.body?.approval ?? ""));
+  }));
+  const database = new DatabaseWorkbenchService(repositoryRoot, () => refresh([]));
+  const databaseHistory = new DatabaseHistoryService(repositoryRoot);
+  const databaseApplication = new DatabaseApplicationService(repositoryRoot, database, () => databaseHistory.load());
+  const databaseCloud = new DatabaseCloudService(repositoryRoot);
+  const requestSignal = (request: Request, response: Response) => {
+    const controller = new AbortController();
+    request.on("aborted", () => controller.abort());
+    response.on("close", () => { if (!response.writableEnded) controller.abort(); });
+    return controller.signal;
+  };
+  api.get("/database/workbench", (_request, response) => send(response, () => database.load()));
+  api.post("/database/workbench/validate", (request, response) => send(response, () => database.validate(request.body?.source, requestSignal(request, response))));
+  api.post("/database/workbench/format", (request, response) => send(response, () => database.format(request.body?.source)));
+  api.post("/database/workbench/review", (request, response) => send(response, () => database.review(request.body?.source, String(request.body?.expectedRevision ?? ""))));
+  api.post("/database/workbench/save", (request, response) => send(response, () => database.save(String(request.body?.reviewId ?? ""))));
+  api.post("/database/workbench/inspect", (request, response) => send(response, async () => {
+    const history = await databaseHistory.load();
+    const result = await database.inspect(String(request.body?.targetId ?? ""), String(request.body?.expectedRevision ?? ""), history.revision, history);
+    const after = await databaseHistory.load();
+    return after.revision === history.revision ? result : { ...result, status: "stale", message: "Migration history changed during inspection. Inspect again before using this evidence." };
+  }));
+  api.get("/database/history", (_request, response) => send(response, () => databaseHistory.load()));
+  api.post("/database/history/compare", (request, response) => send(response, () => databaseHistory.compare(request.body, requestSignal(request, response))));
+  api.post("/database/history/plan", (request, response) => send(response, () => databaseHistory.plan(request.body, requestSignal(request, response))));
+  api.post("/database/history/install", (request, response) => send(response, async () => {
+    const result = await databaseHistory.install(request.body);
+    if (result.status === "installed") broadcast("database-history", {});
+    return result;
+  }));
+  api.post("/database/history/discard", (request, response) => send(response, () => databaseHistory.discard(String(request.body?.reviewId ?? ""))));
+  api.get("/database/application/operations", (_request, response) => send(response, () => databaseApplication.listOperations()));
+  api.post("/database/application/review", (request, response) => send(response, () => databaseApplication.review(String(request.body?.targetId ?? ""), String(request.body?.sourceHash ?? ""), request.body?.initialize === true)));
+  api.post("/database/application/apply", (request, response) => send(response, () => databaseApplication.apply(String(request.body?.reviewId ?? ""), String(request.body?.confirmation ?? ""))));
+  api.post("/database/cloud/prepare", (request, response) => send(response, () => databaseCloud.prepare(String(request.body?.deployment ?? ""), String(request.body?.profile ?? ""))));
+  api.post("/database/cloud/review", (request, response) => send(response, () => databaseCloud.review(String(request.body?.deployment ?? ""), String(request.body?.profile ?? ""), String(request.body?.confirmation ?? ""), String(request.body?.preparationId ?? ""))));
+  api.post("/database/cloud/apply", (request, response) => send(response, () => databaseCloud.apply(String(request.body?.reviewId ?? ""), String(request.body?.confirmation ?? ""))));
+
+  api.get("/snapshot", (_request, response) => {
+    const { state, publication } = builder.presentation;
+    if (evaluationFailed) {
+      response.status(500).json({ error: `${state ? "Configuration evaluation failed" : "The first evaluation failed"}. Check the Studio terminal, fix the reported source or filesystem problem, then restart npm run studio. Preserve .cache and .framework recovery records.` });
+      return;
+    }
+    if (!state) {
+      response.status(503).json({ error: "The first evaluation is still running." });
+      return;
+    }
+    const body: SnapshotResponse = {
+      ...recoveryState(),
+      frameworkUpgrade: publication.status === "ready" ? availableFrameworkUpgrade() : undefined,
+      sourceWatch,
+      sourcePublication: publication,
+      snapshot: state.snapshot,
+      evaluating,
+      commands: Object.fromEntries(
+        Object.entries(COMMANDS).map(([name, { label, description, writes }]) => [name, { label, description, writes }]),
+      ),
+      busy: commands.busy ?? null,
+    };
+    response.json(body);
+  });
+
+  api.post("/snapshot/refresh", (_request, response) => send(response, async () => {
+    const state = await refresh([]);
+    if (!state) throw new EditError(503, "Source could not be reloaded. Check the Studio server output and retry.");
+    return { revision: state.snapshot.revision };
+  }));
+
+  api.get("/events", (request, response) => {
+    response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive" });
+    response.write(`event: hello\ndata: ${JSON.stringify({ revision: builder.current?.snapshot.revision ?? null, evaluating, sourceWatch })}\n\n`);
+    clients.add(response);
+    const heartbeat = setInterval(() => response.write(": keep-alive\n\n"), 25_000);
+    request.on("close", () => {
+      clearInterval(heartbeat);
+      clients.delete(response);
+    });
+  });
+
+  api.get("/websockets/defaults", (_request, response) => send(response, () => webSocketDefaults(repositoryRoot)));
+  api.get("/infrastructure", (request, response) => send(response, async () => infrastructure.get(request.query.mode === "prod" ? "prod" : "dev")));
+  api.post("/deployment-inputs/create", (request, response) => send(response, async () => {
+    if (request.body?.mode !== "dev" && request.body?.mode !== "prod") throw new EditError(400, "Choose development or production inputs.");
+    const result = initializeInputs([request.body.mode])[0]!;
+    await refresh([result.file]);
+    if (result.problem) throw new EditError(422, result.problem);
+    return { file: result.file, created: result.created };
+  }));
+  api.get("/deployment-inputs/details", (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    send(response, async () => inputs.details(inputMode(request.query.mode)));
+  });
+  api.get("/deployment-inputs/value", (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    send(response, async () => inputs.reveal(inputMode(request.query.mode), String(request.query.name ?? "")));
+  });
+  api.post("/deployment-inputs/plan", (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    send(response, async () => inputs.plan(readInputFiles(request.body?.files), String(request.body?.revision ?? "")));
+  });
+  api.post("/deployment-inputs/apply", (request, response) => send(response, async () => {
+    const result = await inputs.apply(String(request.body?.planId ?? ""));
+    published(result.revision);
+    return result;
+  }));
+  api.post("/infrastructure/synthesize", (request, response) => send(response, async () => {
+    if (request.body?.mode !== "dev" && request.body?.mode !== "prod") throw new EditError(400, "Choose development or production synthesis.");
+    const profile = await deploy.requireProfile(request.body?.profile);
+    return infrastructure.synthesize(request.body.mode, profile);
+  }));
+
+  api.get("/resources/details", (request, response) => send(response, async () => resources.details(String(request.query.id ?? ""), request.query.mode === "prod" ? "prod" : "dev")));
+  api.post("/resources/plan", (request, response) => send(response, () => resources.plan(readResourceIntent(request.body), String(request.body?.revision ?? ""), request.body?.mode === "prod" ? "prod" : "dev")));
+  api.post("/resources/apply", (request, response) => send(response, async () => {
+    const result = await resources.apply(String(request.body?.planId ?? ""));
+    published(result.revision);
+    return result;
+  }));
+  api.post("/routes/plan", (request, response) => send(response, async () => {
+    if (typeof request.body?.route !== "string" || typeof request.body?.value !== "string") throw new EditError(400, "A route edit names a route and its new path.");
+    return edits.planRoute(request.body.route, request.body.value, String(request.body.revision ?? ""));
+  }));
+
+  api.post("/edits/plan", (request, response) =>
+    send(response, () => edits.plan(readIntent(request.body), String((request.body as { revision?: unknown })?.revision ?? ""))),
+  );
+  api.post("/edits/batch/plan", (request, response) => send(response, () => edits.planBatch(readDraftEdits(request.body?.edits), String(request.body?.revision ?? ""), readCommentOptions(request.body?.options))));
+  api.post("/edits/batch/coding-review", (request, response) => send(response, async () => {
+    if (typeof request.body?.requestKey !== "string") throw new EditError(400, "A source review handoff needs an idempotency key.");
+    const review = await edits.exportReviewedBatch(String(request.body?.planId ?? ""));
+    return agentTasks.submitStructured(review, request.body.requestKey);
+  }));
+  api.post("/edits/batch/apply", (request, response) => send(response, async () => {
+    const result = await edits.applyBatch(String(request.body?.planId ?? ""));
+    published(result.revision);
+    return result;
+  }));
+  api.post("/cdk-links/refresh", (_request, response) =>
+    send(response, async () => {
+      const state = await refresh([]);
+      if (!state) throw new EditError(503, "CDK links could not be refreshed. See the studio server output.");
+      return { edges: state.snapshot.source.cdkLinks.edges.length, files: Object.keys(state.snapshot.source.cdkLinks.files).length };
+    }),
+  );
+  api.post("/edits/apply", (request, response) =>
+    send(response, async () => {
+      const result = await edits.apply(String((request.body as { planId?: unknown })?.planId ?? ""));
+      published(result.revision);
+      return result;
+    }),
+  );
+  api.post("/commands/:name", (request, response) =>
+    send(response, async () => {
+      const name = String(request.params.name);
+      broadcast("command", { name, running: true });
+      try {
+        if (name === "framework:check") return await deploy.frameworkCheck(request.body?.requestKey);
+        if (deploy.hasUnobservedOperations() || deploy.activeJobs().some(job => !isLocalProcessKind(job.kind))) throw Object.assign(new Error("Wait for active operations before regenerating workspace files."), { status: 409 });
+        return await commands.run(name, (request.body as { confirmed?: unknown })?.confirmed === true);
+      } finally {
+        broadcast("command", { name, running: false });
+      }
+    }),
+  );
+
+  api.get("/machine/docker", (request, response) => send(response, () => deploy.dockerStatus.read(request.query.force === "1")));
+  api.use("/deploy", deployRouter(deploy));
+  api.use("/development-logs", developmentLogsRouter({
+    model: () => { const state = builder.current; if (!state) throw new Error("Studio source is not available yet."); return state.snapshot.models.dev; },
+    readRuns: () => new CombinedDevelopmentLogReader(developmentLogCacheDirectory(repositoryRoot, deploy.local.project)).runs(),
+    readEntries: query => new CombinedDevelopmentLogReader(developmentLogCacheDirectory(repositoryRoot, deploy.local.project)).entries(query),
+    readTrace: query => new CombinedDevelopmentLogReader(developmentLogCacheDirectory(repositoryRoot, deploy.local.project)).trace(query),
+  }));
+  api.get("/operations", (_request, response) => send(response, async () => ({ jobs: await deploy.listOperations() })));
+  api.post("/operations", (request, response) => send(response, () => deploy.perform(request.body)));
+  api.post("/operations/:id/cancel", (request, response) => send(response, () => deploy.cancelOperation(String(request.params.id))));
+  api.get("/operations/:id/log", (request, response) => send(response, () => {
+    const after = Number(request.query.after ?? 0);
+    if (!Number.isSafeInteger(after) || after < 0) throw Object.assign(new Error("Invalid log cursor."), { status: 400 });
+    return deploy.operationLog(String(request.params.id), after);
+  }));
+  api.use((_request, response) => {
+    response.status(404).json({ error: "This API is unavailable in the running Studio server. Restart npm run studio in this checkout and reload the page." });
+  });
+
+  app.use("/api", api);
+
+  if (isClosing()) return;
+  let pageForRequest: (url: string) => Promise<string>;
+  if (studioDistributionMetadata.frameworkIntegrity) {
+    const page = readFileSync(path.join(STUDIO_ROOT, "index.html"), "utf8");
+    pageForRequest = async () => page;
+    app.use(express.static(path.join(STUDIO_ROOT, "dist"), { index: false, redirect: false }));
+  } else {
+    const { createServer: createVite } = await import("vite");
+    const vite = await createVite({
+      root: STUDIO_ROOT,
+      // Each checkout server owns its optimizer cache.
+      cacheDir: path.join(repositoryRoot, ".cache/framework-studio/vite", String(port)),
+      configFile: path.join(STUDIO_ROOT, "vite.config.mts"),
+      appType: "custom",
+      server: {
+        middlewareMode: true,
+        ws: { server },
+        allowedHosts: ["127.0.0.1", "localhost"],
+        fs: { strict: true, allow: [STUDIO_ROOT, path.join(repositoryRoot, "node_modules")] },
+      },
+    });
+    defer(() => vite.close());
+    // Stop owned evaluators before frontend cleanup can await optimizer work.
+    defer(() => builder.dispose());
+    if (isClosing()) return;
+    pageForRequest = url => vite.transformIndexHtml(url, readFileSync(path.join(STUDIO_ROOT, "index.html"), "utf8"));
+    app.use(vite.middlewares);
+  }
+  app.use(async (request: Request, response: Response, next: NextFunction) => {
+    if (request.method !== "GET") {
+      next();
+      return;
+    }
+    try {
+      const page = await pageForRequest(request.originalUrl);
+      response
+        .status(200)
+        .type("html")
+        .setHeader("Cache-Control", "no-store")
+        .send(page.replace("</head>", `<meta name="studio-token" content="${token}" />\n<meta name="studio-protocol" content="${STUDIO_PROTOCOL_VERSION}" />\n</head>`));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  const stopWatching = watchRepository(repositoryRoot, (files) => {
+    // A file this studio just wrote, still holding exactly what it wrote, is
+    // its own change; anything else was changed by someone else.
+    const external = files.filter((file) => {
+      const owner = graphqlChain.ownWrites.has(file) ? graphqlChain.ownWrites : stateful.ownWrites.has(file) ? stateful.ownWrites : database.ownWrites.has(file) ? database.ownWrites : inputs.ownWrites.has(file) ? inputs.ownWrites : resources.ownWrites.has(file) ? resources.ownWrites : appName.ownWrites.has(file) ? appName.ownWrites : identities.ownWrites.has(file) ? identities.ownWrites : edits.ownWrites;
+      const written = owner.get(file);
+      if (written === undefined) return true;
+      try {
+        if (sha256(readFileSync(path.join(repositoryRoot, file), "utf8")) === written) {
+          owner.delete(file);
+          return false;
+        }
+      } catch (error) {
+        if (written === "absent" && (error as NodeJS.ErrnoException).code === "ENOENT") { owner.delete(file); return false; }
+      }
+      return true;
+    });
+    if (external.length > 0) void refresh(external);
+  }, 200, { onStatus: status => { sourceWatch = status; broadcast("source-watch", status); } });
+  defer(stopWatching);
+
+  // The detached importer may finish while no browser or task route is open.
+  // Observe its publication epoch independently of file-watcher coverage, and
+  // retry after a bounded write/recovery lease releases. Retain the last graph
+  // as stale while the batch is incomplete; never publish an intermediate one.
+  let publicationSignature = "";
+  const publicationTimer = setInterval(() => {
+    if (isClosing()) return;
+    const publication = builder.publicationState;
+    const signature = JSON.stringify(publication);
+    if (signature !== publicationSignature) {
+      publicationSignature = signature;
+      broadcast("source-publication", publication);
+      broadcast("snapshot", { revision: builder.current?.snapshot.revision ?? null, external: [] });
+    }
+    if (publication.status === "refresh_required" && !evaluating) void refresh([]);
+  }, 1000);
+  publicationTimer.unref();
+  defer(() => clearInterval(publicationTimer));
+
+  log("Evaluating the repository…");
+  await refresh([]);
+}

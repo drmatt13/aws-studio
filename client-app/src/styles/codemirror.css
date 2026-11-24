@@ -1,0 +1,273 @@
+/* CodeMirror owns these nodes; its theme and lexical token classes are the vendor adapter. */
+/* Match the former low-specificity form foundation without overriding CodeMirror's own classes. */
+:where([data-prisma-editor] input:not([type=checkbox]):not([type=radio])) {
+  min-width: 0; max-width: 100%; min-height: var(--control-height); padding: var(--space-1) var(--control-padding);
+  border: 1px solid var(--rule-strong); border-radius: var(--radius); background-color: var(--paper); color: var(--ink);
+  font: 400 var(--text-label)/1.5 var(--sans); transition: border-color var(--motion-fast), background-color var(--motion-fast);
+}
+:where([data-prisma-editor] input)::placeholder { color: var(--faint); opacity: 1; }
+:where([data-prisma-editor] input):hover:not(:disabled):not(:focus) { border-color: var(--graphite); }
+:where([data-prisma-editor] input):disabled { opacity: .55; cursor: not-allowed; }
+:where([data-prisma-editor] input, [data-prisma-editor] button)[aria-invalid=true] { border-color: var(--refuse); }
+:where([data-prisma-editor] input[type=checkbox], [data-prisma-editor] input[type=radio]) { width: 16px; height: 16px; margin: 0; accent-color: var(--dev); flex: none; }
+[data-prisma-editor] {
+  --prisma-keyword: light-dark(#694394, #c29be2);
+  --prisma-type: light-dark(#155c70, #7bcbd1);
+  --prisma-string: light-dark(#795019, #dfb379);
+  --prisma-comment: light-dark(#526767, #95a99d);
+}
+[data-prisma-editor] .cm-editor { container-type: inline-size; }
+[data-access-presentation="quiet"] .cm-editor { font-size: var(--text-label); }
+/* Access directives (access-decorations.ts): each token takes the colour of what it is about.
+   Amber: the signed-in user. Violet: a role in a scope. Teal: another row's access.
+   Blue: the row's state. Red: what takes access away. */
+[data-prisma-editor] .cm-access-line {
+  --access-kind: var(--graphite);
+  background-color: color-mix(in srgb, var(--access-kind) 6%, transparent);
+  box-shadow: inset 2px 0 color-mix(in srgb, var(--access-kind) 50%, transparent);
+}
+[data-prisma-editor] .cm-access-line[data-access-kind=identity] { --access-kind: var(--access-identity); }
+[data-prisma-editor] .cm-access-line[data-access-kind=role] { --access-kind: var(--access-role); }
+[data-prisma-editor] .cm-access-line[data-access-kind=path] { --access-kind: var(--access-path); }
+[data-prisma-editor] .cm-access-line[data-access-kind=state] { --access-kind: var(--access-state); }
+[data-prisma-editor] .cm-access-line[data-access-kind=limit] { --access-kind: var(--access-limit); }
+[data-prisma-editor] .cm-access-line .prisma-token-comment { color: var(--graphite); font-style: normal; }
+[data-prisma-editor] .cm-access-token { font-style: normal; }
+/* The comment highlight sits inside a token's span; the token's colour is the one to see. */
+[data-prisma-editor] .cm-access-token .prisma-token-comment { color: inherit; font-weight: inherit; font-style: inherit; }
+[data-prisma-editor] .cm-access-keyword { color: var(--graphite); }
+[data-prisma-editor] .cm-access-identity { color: var(--access-identity); }
+[data-prisma-editor] .cm-access-role { color: var(--access-role); }
+[data-prisma-editor] .cm-access-path { color: var(--access-path); }
+[data-prisma-editor] .cm-access-state { color: var(--access-state); }
+[data-prisma-editor] .cm-access-limit { color: var(--access-limit); font-weight: 600; }
+[data-prisma-editor] .cm-access-action { color: var(--ink); font-weight: 600; }
+[data-prisma-editor] .cm-access-column { color: var(--ink); text-decoration: underline dotted var(--graphite); text-underline-offset: 3px; }
+/* The rail beside a model: where access to its rows comes from, striped when it comes from several places. */
+[data-prisma-editor] .cm-line.cm-access-rail {
+  background-image: linear-gradient(to bottom, var(--access-rail-1) 0 33.4%, var(--access-rail-2) 33.4% 66.7%, var(--access-rail-3) 66.7% 100%);
+  background-repeat: no-repeat; background-size: 3px 100%; background-position: 0 0;
+}
+[data-prisma-editor] .cm-access-scope-chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: min(380px, 55cqw); height: 18px; margin-inline-start: 12px;
+  padding: 0 8px 0 6px; vertical-align: -2px; box-sizing: border-box; border: 1px solid transparent; border-radius: 999px;
+  background: var(--wash); color: var(--graphite); font: 500 10.5px/1 var(--sans); white-space: nowrap; cursor: pointer; user-select: none;
+}
+[data-prisma-editor] .cm-access-scope-chip > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 1.5; }
+[data-prisma-editor] .cm-access-scope-chip:hover { color: var(--ink); border-color: var(--rule-strong); }
+[data-prisma-editor] .cm-access-scope-chip:focus-visible { outline: 2px solid var(--dev); outline-offset: 1px; }
+[data-prisma-editor] .cm-access-scope-chip[data-exposed=false] { background: transparent; border: 1px dashed var(--rule-strong); }
+[data-prisma-editor] .cm-access-scope-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--access-dot); }
+[data-prisma-editor] .cm-access-scope-dot[data-kind=identity] { --access-dot: var(--access-identity); }
+[data-prisma-editor] .cm-access-scope-dot[data-kind=role] { --access-dot: var(--access-role); }
+[data-prisma-editor] .cm-access-scope-dot[data-kind=path] { --access-dot: var(--access-path); }
+[data-prisma-editor] .cm-access-hover { display: grid; gap: 4px; max-width: 320px; --access-tone: var(--graphite); }
+[data-prisma-editor] .cm-access-hover[data-category=identity] { --access-tone: var(--access-identity); }
+[data-prisma-editor] .cm-access-hover[data-category=role] { --access-tone: var(--access-role); }
+[data-prisma-editor] .cm-access-hover[data-category=path] { --access-tone: var(--access-path); }
+[data-prisma-editor] .cm-access-hover[data-category=state] { --access-tone: var(--access-state); }
+[data-prisma-editor] .cm-access-hover[data-category=limit] { --access-tone: var(--access-limit); }
+[data-prisma-editor] .cm-access-hover-heading { display: flex; align-items: baseline; gap: 8px; margin: 0; }
+[data-prisma-editor] .cm-access-hover-tag { color: var(--access-tone); font: 600 10px/1 var(--sans); letter-spacing: .05em; text-transform: uppercase; }
+[data-prisma-editor] .cm-access-hover-heading strong { font: 600 12px/1.4 var(--mono); color: var(--ink); }
+[data-prisma-editor] .cm-access-hover-body { margin: 0; color: var(--graphite); font: 12px/1.5 var(--sans); }
+/* Keep selection styling outside the mounted editor extension so an existing draft
+   receives theme fixes through CSS refresh, without losing its text or undo history. */
+[data-prisma-editor] .cm-editor .cm-selectionBackground,
+[data-prisma-editor] .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
+  background-color: color-mix(in srgb, var(--dev) 18%, transparent);
+}
+.prisma-token-keyword, .prisma-token-attribute { color: var(--prisma-keyword); }
+.prisma-token-type, .prisma-token-function { color: var(--prisma-type); }
+.prisma-token-definition { color: var(--ink); font-weight: 600; }
+.prisma-token-string { color: var(--prisma-string); }
+.prisma-token-number { color: var(--dev); }
+.prisma-token-comment { color: var(--prisma-comment); font-style: italic; }
+.prisma-token-invalid { text-decoration: underline wavy var(--refuse); }
+[data-prisma-editor] .cm-search { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 8px 28px 8px 10px; font-size: 12px; }
+[data-prisma-editor] .cm-search input { min-height: 28px; font: 12px var(--mono); padding: 3px 6px; }
+[data-prisma-editor] .cm-search label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+[data-prisma-editor] .cm-search input[type=checkbox] { min-height: initial; margin: 0; }
+[data-prisma-editor] .cm-search button { min-height: 26px; font: 12px var(--sans); padding: 2px 6px; }
+[data-prisma-editor] .cm-search button[name=close] { position: absolute; right: 4px; top: 5px; }
+/* Vendor colors used by the existing editor in dark mode stay in the second branch. */
+[data-prisma-editor] .cm-search .cm-textfield {
+  background-color: light-dark(var(--field), white);
+  border-color: light-dark(var(--field-rule), silver);
+}
+[data-prisma-editor] .cm-search .cm-button {
+  border-color: light-dark(var(--field-rule), #888);
+  background-image: linear-gradient(light-dark(var(--sheet), #eff1f5), light-dark(var(--sheet), #d9d9df));
+  border-radius: var(--prisma-find-button-radius, 1px);
+}
+:root[data-theme="light"] [data-prisma-editor] {
+  --prisma-find-button-radius: var(--radius-sm);
+  --prisma-lint-marker-filter: brightness(.6);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) [data-prisma-editor] {
+    --prisma-find-button-radius: var(--radius-sm);
+    --prisma-lint-marker-filter: brightness(.6);
+  }
+}
+[data-prisma-editor] .cm-search .cm-button:hover {
+  background-image: linear-gradient(light-dark(var(--wash), #eff1f5), light-dark(var(--wash), #d9d9df));
+}
+[data-prisma-editor] .cm-search .cm-button:active {
+  background-image: linear-gradient(light-dark(var(--selected), #b4b4b4), light-dark(var(--selected), #d0d3d6));
+}
+[data-prisma-editor] .cm-searchMatch {
+  background-color: light-dark(var(--caution-wash), #ffff0054);
+}
+[data-prisma-editor] .cm-searchMatch-selected {
+  background-color: light-dark(color-mix(in srgb, var(--caution) 16%, var(--sheet)), #ff6a0054);
+  box-shadow: inset 0 -1px light-dark(var(--caution), transparent);
+}
+[data-prisma-editor] .cm-editor.cm-focused .cm-matchingBracket {
+  background-color: light-dark(var(--accept-wash), #328c8252);
+}
+[data-prisma-editor] .cm-editor.cm-focused .cm-nonmatchingBracket {
+  background-color: light-dark(var(--refuse-wash), #bb555544);
+}
+[data-prisma-editor] .cm-tooltip-autocomplete { max-width: min(520px, 80vw); }
+[data-prisma-editor] .cm-tooltip-autocomplete ul { font: 12px/1.8 var(--mono); }
+[data-prisma-editor] .cm-completionInfo { padding: 9px 12px; font: 12px/1.6 var(--sans); max-width: 330px; white-space: normal; }
+[data-prisma-editor] .cm-diagnostic { font: 12px/1.6 var(--sans); }
+[data-prisma-editor] .cm-diagnostic-error { border-left-color: light-dark(var(--refuse), #d11); }
+[data-prisma-editor] .cm-diagnostic-warning { border-left-color: light-dark(var(--caution), orange); }
+[data-prisma-editor] .cm-diagnostic-info { border-left-color: light-dark(var(--dev), #999); }
+[data-prisma-editor] .cm-diagnosticSource { font: 10px var(--mono); color: var(--graphite); }
+/* The vendor's severity icons are SVG images. Keep their shapes while darkening their pastel fills. */
+[data-prisma-editor] .cm-lint-marker { filter: var(--prisma-lint-marker-filter, none); }
+[data-prisma-editor] .cm-lintRange-error { background-image: none; text-decoration: underline wavy var(--refuse); text-underline-offset: 3px; }
+[data-prisma-editor] .cm-lintRange-warning { background-image: none; text-decoration: underline wavy light-dark(var(--caution), var(--local)); text-underline-offset: 3px; }
+[data-prisma-editor] .cm-lintRange-active { background-color: light-dark(color-mix(in srgb, var(--caution) 18%, transparent), #ffdd9980); }
+/* Each valid directive gets one source-linked pill. */
+[data-prisma-editor] .cm-access-pill, [data-prisma-editor] .cm-access-hint {
+  display: inline-flex; align-items: center; gap: 4px; height: 17px; vertical-align: -1px; box-sizing: border-box;
+  border-radius: 999px; font: 500 10.5px/1 var(--mono); font-style: normal; white-space: nowrap; cursor: pointer; user-select: none;
+}
+[data-prisma-editor] .cm-access-pill, [data-prisma-editor] .cm-access-matrix-open {
+  --access-tone: var(--dev); padding: 0 8px; border: 0;
+  max-width: min(82ch, calc(100cqw - 86px)); min-height: 18px; height: auto;
+  color: color-mix(in srgb, var(--access-tone) 72%, var(--ink));
+  background: color-mix(in srgb, var(--access-tone) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--access-tone) 28%, transparent);
+  transition: color var(--motion-fast), background-color var(--motion-fast);
+}
+[data-prisma-editor] .cm-access-pill > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; font: inherit; line-height: 1.6; }
+[data-prisma-editor] .cm-access-pill[data-access-target*="."],
+[data-prisma-editor] .cm-access-matrix-open { margin-inline-start: 0.4em; }
+[data-prisma-editor] .cm-access-pill[data-access-kind=identity] { --access-tone: var(--access-identity); }
+[data-prisma-editor] .cm-access-pill[data-access-kind=role],
+[data-prisma-editor] .cm-access-matrix-open { --access-tone: var(--access-role); }
+[data-prisma-editor] .cm-access-pill[data-access-kind=path] { --access-tone: var(--access-path); }
+[data-prisma-editor] .cm-access-pill[data-access-kind=state] { --access-tone: var(--access-state); }
+[data-prisma-editor] .cm-access-pill[data-access-kind=limit] { --access-tone: var(--access-limit); }
+[data-prisma-editor] .cm-access-matrix-open {
+  display: inline-flex; align-items: center; vertical-align: middle; gap: 5px;
+  border-radius: 999px; font: 600 10.5px/1.55 var(--sans); cursor: pointer;
+}
+/* View as dims unreadable fields without appending another control per row. */
+[data-prisma-editor] .cm-lens-dim { opacity: 0.45; }
+[data-prisma-editor] :is(.cm-access-pill, .cm-access-hint, .cm-access-matrix-open, .cm-inline-role-switch):focus-visible {
+  outline: 2px solid var(--dev); outline-offset: 2px;
+}
+@media (pointer: coarse) {
+  [data-prisma-editor] :is(.cm-access-pill, .cm-access-hint, .cm-access-matrix-open) { min-height: 28px; }
+}
+[data-prisma-editor] .cm-access-pill:hover {
+  background: color-mix(in srgb, var(--access-tone) 18%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--access-tone) 44%, transparent);
+}
+[data-prisma-editor] .cm-access-hint {
+  margin-inline-start: 8px; padding: 0 6px;
+  background: var(--sheet); color: var(--graphite); border: 1px dashed var(--rule-strong);
+}
+[data-prisma-editor] .cm-access-hint:hover { color: var(--ink); border-color: var(--graphite); border-style: solid; }
+
+[data-prisma-editor] .cm-inline-role-switch {
+  display: inline-flex; align-items: center; gap: 5px; vertical-align: middle; min-height: 18px;
+  margin-inline-start: 6px; padding: 0 3px; border: 0; border-radius: 4px;
+  color: var(--graphite); background: transparent; font: 500 10.5px/1.5 var(--sans);
+  white-space: nowrap; cursor: pointer; user-select: none;
+}
+[data-prisma-editor] .cm-inline-role-switch > span {
+  display: inline-flex; align-items: center; width: 19px; height: 11px; padding: 1px;
+  box-sizing: border-box; border-radius: 999px; border: 1px solid var(--rule-strong); background: var(--wash);
+}
+[data-prisma-editor] .cm-inline-role-switch > span::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--graphite);
+}
+[data-prisma-editor] .cm-inline-role-switch:hover { color: var(--ink); }
+[data-prisma-editor] .cm-inline-role-switch[aria-checked=true] > span {
+  justify-content: flex-end; border-color: var(--access-role); background: color-mix(in srgb, var(--access-role) 16%, var(--sheet));
+}
+[data-prisma-editor] .cm-inline-role-switch[aria-checked=true] > span::before { background: var(--access-role); }
+@media (pointer: coarse) {
+  [data-prisma-editor] .cm-inline-role-switch { min-height: 28px; }
+}
+/* The inline matrix is the rendered form of its permission rows: it keeps their
+   role tint and rule, their font and line height, and stands where they stood. */
+[data-prisma-editor] .cm-inline-role-matrix {
+  --matrix-tint: color-mix(in srgb, var(--access-role) 6%, var(--sheet));
+  box-sizing: border-box; max-width: 100%; padding: 2px 18px 4px 8px;
+  contain: inline-size; white-space: normal; font-family: var(--mono); line-height: 1.8;
+  background: var(--matrix-tint); box-shadow: inset 2px 0 color-mix(in srgb, var(--access-role) 50%, transparent);
+}
+[data-prisma-editor] .cm-inline-role-matrix-panel { color: var(--ink); }
+[data-prisma-editor] .cm-inline-role-table { width: max-content; border-collapse: collapse; font: inherit; }
+[data-prisma-editor] .cm-inline-role-table :is(th, td) { height: 1.8em; padding: 0; vertical-align: middle; font-weight: 400; }
+[data-prisma-editor] .cm-inline-role-table th[scope=row] {
+  position: sticky; left: 0; z-index: 1; padding-inline-end: 2.5ch; text-align: left; white-space: nowrap;
+  background: var(--matrix-tint); color: var(--access-role);
+}
+[data-prisma-editor] .cm-inline-role-table th[scope=row][data-item=action] { color: var(--ink); font-weight: 600; }
+[data-prisma-editor] .cm-inline-role-table thead th { padding-inline: 0.75ch; text-align: center; vertical-align: bottom; }
+[data-prisma-editor] .cm-inline-role-table thead th:first-child { position: sticky; left: 0; z-index: 1; background: var(--matrix-tint); }
+[data-prisma-editor] .cm-inline-role-table thead .cm-inline-role-link {
+  color: var(--graphite); font-size: 0.875em; letter-spacing: 0.02em;
+}
+[data-prisma-editor] .cm-inline-role-table thead th[data-selected] .cm-inline-role-link { color: var(--ink); font-weight: 600; }
+[data-prisma-editor] .cm-inline-role-table td { text-align: center; }
+/* Row tracking: the hovered or focused row lifts slightly across every role column. */
+[data-prisma-editor] .cm-inline-role-table tbody tr:is(:hover, :focus-within) :is(th, td) {
+  background: color-mix(in srgb, var(--access-role) 11%, var(--sheet));
+}
+[data-prisma-editor] .cm-inline-role-link {
+  padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer;
+  text-decoration: none; text-underline-offset: 3px;
+}
+[data-prisma-editor] .cm-inline-role-link:hover { text-decoration: underline dotted; }
+[data-prisma-editor] .cm-inline-role-link:focus-visible { outline: 2px solid var(--dev); outline-offset: 1px; border-radius: 2px; }
+[data-prisma-editor] .cm-inline-role-cell {
+  display: inline-flex; align-items: center; justify-content: center; width: 100%; min-width: 3ch; height: 1.5em;
+  padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--ink); font: inherit; cursor: pointer;
+}
+[data-prisma-editor] .cm-inline-role-cell:hover { background: color-mix(in srgb, var(--access-role) 18%, transparent); }
+[data-prisma-editor] .cm-inline-role-cell:focus-visible { outline: 2px solid var(--dev); outline-offset: -1px; }
+[data-prisma-editor] .cm-inline-role-cell[aria-disabled=true] { cursor: default; }
+[data-prisma-editor] .cm-inline-role-cell [data-mark=own] { color: var(--access-role); }
+[data-prisma-editor] .cm-inline-role-note { margin: 0; font: 400 10.5px/1.8 var(--sans); color: var(--graphite); }
+[data-prisma-editor] .cm-inline-role-note[role=alert] { color: var(--refuse); }
+@media (pointer: coarse) {
+  [data-prisma-editor] .cm-inline-role-table :is(th, td) { height: 32px; }
+  [data-prisma-editor] .cm-inline-role-cell { min-width: 32px; height: 28px; }
+}
+
+/* A role value's own settings, written after the value like an inlay: aligned, quiet, still a control. */
+[data-prisma-editor] .cm-access-annotation {
+  display: inline-flex; align-items: center; vertical-align: baseline; padding: 0 4px; margin-inline-start: 0;
+  border: 0; border-radius: 4px; background: transparent; font: inherit; line-height: inherit; color: var(--graphite);
+  white-space: nowrap; cursor: pointer; user-select: none;
+}
+[data-prisma-editor] .cm-access-annotation + .cm-access-annotation { margin-inline-start: 1ch; }
+[data-prisma-editor] .cm-access-annotation > span { font-size: 0.92em; }
+[data-prisma-editor] .cm-access-annotation [data-category=role] { color: var(--access-role); }
+[data-prisma-editor] .cm-access-annotation [data-category=action] { color: var(--ink); font-weight: 600; }
+[data-prisma-editor] .cm-access-annotation [data-category=limit] { color: var(--access-limit); font-weight: 500; }
+[data-prisma-editor] .cm-access-annotation:hover { background: color-mix(in srgb, var(--access-role) 10%, transparent); }
+[data-prisma-editor] .cm-access-annotation:focus-visible { outline: 2px solid var(--dev); outline-offset: 1px; }
+@media (pointer: coarse) {
+  [data-prisma-editor] .cm-access-annotation { min-height: 28px; }
+}

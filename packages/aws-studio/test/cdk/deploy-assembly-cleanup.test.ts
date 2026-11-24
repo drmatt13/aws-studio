@@ -1,0 +1,95 @@
+import { projectCli, writeTestToolchain, testProjectRoot, testProjectScratchRoot } from "./support/test-project";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import test from "node:test";
+
+const artifacts = path.join(testProjectScratchRoot, ".framework", "artifacts");
+
+// The released deploy command selects an isolated fixture with a real framework config and an app
+// whose synthesis fails, so the run stops before identity checks or AWS calls.
+type Deploy = (...args: string[]) => ReturnType<typeof spawnSync>;
+type DeployWith = (env: NodeJS.ProcessEnv, ...args: string[]) => ReturnType<typeof spawnSync>;
+function withDeployFixture(body: (fixture: string, deploy: Deploy, deployWith: DeployWith) => void): void {
+  mkdirSync(artifacts, { recursive: true });
+  const fixture = mkdtempSync(path.join(artifacts, "deploy-assembly-"));
+  try {
+    writeTestToolchain(fixture);
+    mkdirSync(path.join(fixture, "cdk-app"));
+    writeFileSync(path.join(fixture, "cdk-app", "cdk.json"), JSON.stringify({ context: { "framework:app": "fixture", "framework:appId": "0f9c2d1e-7b3a-4c5d-9e8f-1a2b3c4d5e6f" } }));
+    writeFileSync(path.join(fixture, "framework.config.ts"), `export { default } from ${JSON.stringify(path.join(testProjectRoot, "framework.config.ts"))};\n`);
+    // Explicit profiles now validate before synthesis. Keep this pre-AWS fixture
+    // independent of the developer's real AWS files while exercising that contract.
+    const config = path.join(fixture, "aws-config"), credentials = path.join(fixture, "aws-credentials");
+    const profileNames = ["default", "fixture-profile-from-inputs", "fixture-profile-from-relative"];
+    writeFileSync(config, profileNames.map(name => `[${name === "default" ? name : `profile ${name}`}]\nregion = us-east-1\n`).join("\n"));
+    writeFileSync(credentials, profileNames.map(name => `[${name}]\naws_access_key_id = SYNTHETIC_FIXTURE_KEY\naws_secret_access_key = SYNTHETIC_FIXTURE_SECRET\n`).join("\n"));
+    writeFileSync(path.join(fixture, "failing-app.js"), "console.error(`app-profile=${process.env.AWS_PROFILE}`);\nconsole.error(`app-inputs=${process.env.FRAMEWORK_INPUTS_FILE}`);\nprocess.exit(3);\n");
+    const app = `node "${path.join(fixture, "failing-app.js")}"`;
+    const deployWith: DeployWith = (env, ...args) => spawnSync(process.execPath, [projectCli(fixture), "deploy", "--all", "--no-notices", "--app", app, ...args], {
+      cwd: fixture, encoding: "utf8", timeout: 60_000, env: { ...process.env, FRAMEWORK_REPOSITORY_ROOT: fixture, AWS_PROFILE: undefined, AWS_CONFIG_FILE: config, AWS_SHARED_CREDENTIALS_FILE: credentials, ...env },
+    });
+    body(fixture, (...args) => deployWith({}, ...args), deployWith);
+  } finally {
+    assert.ok(realpathSync(fixture).startsWith(realpathSync(artifacts) + path.sep));
+    rmSync(fixture, { recursive: true, force: true });
+  }
+}
+
+test("deploy removes the temporary assembly it synthesized into", () => {
+  withDeployFixture((fixture, deploy) => {
+    const result = deploy();
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1, `${result.stdout}${result.stderr}`);
+    assert.match(`${result.stdout}${result.stderr}`, /Deployment tooling exited with status/);
+    assert.deepEqual(readdirSync(path.join(fixture, ".cache", "deploy")), []);
+  });
+});
+
+test("deploy keeps an assembly directory named with --output", () => {
+  withDeployFixture((fixture, deploy) => {
+    mkdirSync(path.join(fixture, "cdk-app", "kept"));
+    writeFileSync(path.join(fixture, "cdk-app", "kept", "keep.txt"), "caller-owned\n");
+    const result = deploy("--output", "kept");
+    assert.equal(result.status, 1, `${result.stdout}${result.stderr}`);
+    assert.equal(existsSync(path.join(fixture, "cdk-app", "kept", "keep.txt")), true);
+  });
+});
+
+test("deploy sweeps assemblies an interrupted run left behind", () => {
+  withDeployFixture((fixture, deploy) => {
+    const cache = path.join(fixture, ".cache", "deploy");
+    mkdirSync(path.join(cache, "assembly-stale"), { recursive: true });
+    mkdirSync(path.join(cache, "assembly-recent"));
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    utimesSync(path.join(cache, "assembly-stale"), twoDaysAgo, twoDaysAgo);
+    const result = deploy();
+    assert.equal(result.status, 1, `${result.stdout}${result.stderr}`);
+    assert.deepEqual(readdirSync(cache), ["assembly-recent"]);
+  });
+});
+
+test("deploy reads its authored inputs from FRAMEWORK_INPUTS_FILE when set", () => {
+  withDeployFixture((fixture, _deploy, deployWith) => {
+    const inputs = path.join(fixture, "inputs.env");
+    writeFileSync(inputs, "AWS_PROFILE=fixture-profile-from-inputs\n");
+    const result = deployWith({ FRAMEWORK_INPUTS_FILE: inputs, AWS_PROFILE: undefined });
+    assert.equal(result.status, 1, `${result.stdout}${result.stderr}`);
+    assert.match(`${result.stdout}${result.stderr}`, /app-profile=fixture-profile-from-inputs/);
+  });
+});
+
+test("the synth child reads the same inputs file deploy read, and the development default when it is unset", () => {
+  withDeployFixture((fixture, _deploy, deployWith) => {
+    const inputs = path.join(fixture, "relative-inputs.env");
+    writeFileSync(inputs, "AWS_PROFILE=fixture-profile-from-relative\n");
+    const relative = deployWith({ FRAMEWORK_INPUTS_FILE: path.relative(fixture, inputs), AWS_PROFILE: undefined });
+    const output = `${relative.stdout}${relative.stderr}`;
+    assert.match(output, /app-profile=fixture-profile-from-relative/);
+    assert.ok(output.includes(`app-inputs=${inputs}`), output);
+    const empty = deployWith({ FRAMEWORK_INPUTS_FILE: "", AWS_PROFILE: undefined });
+    const emptyOutput = `${empty.stdout}${empty.stderr}`;
+    assert.ok(emptyOutput.includes(`app-inputs=${path.join(fixture, "cdk-app", ".env.dev")}`), emptyOutput);
+  });
+});

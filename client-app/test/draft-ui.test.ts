@@ -1,0 +1,2477 @@
+import assert from "./support/assert";
+import { createSnapshotFixture } from "./support/source-fixture";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { after, afterEach, before, beforeEach, mock, test } from "node:test";
+import { createElement as h } from "react";
+import type { BatchPlanResponse, CommentReviewOptions, DraftEdit, SnapshotResponse } from "../shared/api";
+import type { ModelEdge, Snapshot } from "../shared/model";
+import { CDK_ENVIRONMENT_ID, type DeploymentInputFileEdits } from "../shared/deployment-inputs";
+import type { ResourceIntent } from "../shared/resources";
+import { SnapshotBuilder } from "../server/snapshot";
+import { connectionDescriptionId } from "../shared/descriptions";
+import { aggregateConnections } from "../src/connections";
+import { networkSettings, unusedNetworkCidr } from "../shared/networks";
+import { withConnectionAuthorizations } from "../shared/permissions";
+import { frameworkManagedIds } from "../shared/framework-management";
+import { buildScene } from "../src/scene/build";
+import { indexModel } from "../src/lookup";
+import { hoverEnvironmentDescriptions, nodeHoverFacts } from "../src/scene/hover";
+
+let builder: SnapshotBuilder;
+let fixture: ReturnType<typeof createSnapshotFixture>;
+let baseline: Snapshot;
+let ui: typeof import("@testing-library/react");
+let router: typeof import("@tanstack/react-router");
+let query: typeof import("@tanstack/react-query");
+const clients: import("@tanstack/react-query").QueryClient[] = [];
+let studio: typeof import("../src/studio");
+let inspector: typeof import("../src/views/Inspector");
+let dialogs: typeof import("../src/views/DraftControls");
+let review: typeof import("../src/views/EditDialog");
+let addMenu: typeof import("../src/views/AddMenu");
+let apiModule: typeof import("../src/api");
+let snapshotModule: typeof import("../src/snapshot");
+let planCalls: (readonly DraftEdit[])[];
+let resourceCalls: unknown[];
+let applyCalls: number;
+let failApply: boolean;
+let failReview: boolean;
+let reviewGate: Promise<void> | undefined;
+let persisted: Snapshot;
+let dom: { window: Window & typeof globalThis };
+const target = "lambda:graphql-api";
+
+before(async () => {
+  const { JSDOM } = createRequire(import.meta.url)("jsdom");
+  dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/", pretendToBeVisual: true });
+  for (const name of ["window", "self", "document", "navigator", "HTMLElement", "HTMLDialogElement", "Node", "MutationObserver", "getComputedStyle"] as const) Object.defineProperty(globalThis, name, { configurable: true, value: dom.window[name] });
+  Object.defineProperty(globalThis, "EventSource", { configurable: true, value: class { addEventListener() {} removeEventListener() {} close() {} } });
+  Object.defineProperty(globalThis, "scrollTo", { configurable: true, value: () => {} });
+  Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, value: dom.window.requestAnimationFrame.bind(dom.window) });
+  Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, value: dom.window.cancelAnimationFrame.bind(dom.window) });
+  dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  dom.window.HTMLDialogElement.prototype.close = function () { this.open = false; };
+  dom.window.HTMLElement.prototype.showPopover = function () { this.style.display = "grid"; };
+  // Match tsx's CommonJS loading of Studio's TSX, so the providers and hooks use
+  // the same package instance rather than separate ESM/CommonJS contexts.
+  const require = createRequire(import.meta.url);
+  ui = require("@testing-library/react"); router = require("@tanstack/react-router"); query = require("@tanstack/react-query");
+  ui.configure({ getElementError: (message) => new Error(message ?? "Element not found") });
+  studio = await import("../src/studio"); inspector = await import("../src/views/Inspector"); dialogs = await import("../src/views/DraftControls"); review = await import("../src/views/EditDialog"); apiModule = await import("../src/api"); snapshotModule = await import("../src/snapshot");
+  addMenu = await import("../src/views/AddMenu");
+  fixture = createSnapshotFixture();
+  builder = new SnapshotBuilder(fixture.root); baseline = (await builder.refresh()).snapshot;
+});
+after(async () => { try { await builder?.dispose(); } finally { fixture?.dispose(); dom.window.close(); } });
+afterEach(async () => { ui.cleanup(); for (const client of clients.splice(0)) { await client.cancelQueries(); client.clear(); } mock.restoreAll(); });
+beforeEach(() => {
+  persisted = baseline; planCalls = []; resourceCalls = []; applyCalls = 0; failApply = false; failReview = false; reviewGate = undefined;
+  mock.method(apiModule.api, "planBatch", async (edits: readonly DraftEdit[]) => {
+    planCalls.push(edits);
+    resourceCalls.push(...edits.flatMap(edit => edit.kind === "resourceConfig" ? [edit.intent] : []));
+    await reviewGate;
+    if (failReview) throw new Error("Could not validate changes. Try reviewing again.");
+    return { planId: "batch", ok: true, summaries: edits.map((edit) => edit.kind === "frameworkUpgrade" ? "upgrade framework" : edit.kind === "agentGateways" ? `gateways ${edit.target}` : edit.kind === "gatewayTools" || edit.kind === "gatewayDeploy" || edit.kind === "removeGateway" ? `${edit.kind} ${edit.gateway}` : edit.kind === "privateZone" ? `private zone ${edit.id}` : edit.kind === "implementation" || edit.kind === "connection" || edit.kind === "removeWorkload" || edit.kind === "identityPolicy" || edit.kind === "iamPolicy" || edit.kind === "deploy" ? `${edit.kind} ${edit.target}` : edit.kind === "tags" ? `tags ${edit.entity}` : edit.kind === "placement" ? `placement ${edit.target}` : edit.kind === "network" ? `network ${edit.network}` : edit.kind === "removeNetwork" ? `remove ${edit.network}` : edit.kind === "databasePlacement" ? `database placement ${edit.database}` : edit.kind === "database" ? `database ${edit.database}` : edit.kind === "create" ? "create resource" : edit.kind === "clientEnvironment" ? "client mappings" : edit.kind === "field" ? `${edit.intent.field}: ${String(edit.intent.value ?? "inherit")}` : edit.kind === "triggers" ? edit.event : edit.kind === "nativeTrigger" ? edit.edge : edit.kind === "onFailure" ? edit.event : edit.kind === "rename" ? edit.name : edit.kind === "resourceConfig" ? edit.intent.resource : edit.kind === "ownership" ? edit.entity : edit.value), changes: [{ file: edits.some(edit => edit.kind === "resourceConfig") ? "framework-config/inputs/index.ts" : "framework-config/settings.ts", diff: { unified: "combined", lines: [{ kind: "add", text: "// complete proposed draft", newLine: 1 }] } }], preflight: { dev: { mode: "dev", ok: true, diagnostics: [] }, prod: { mode: "prod", ok: true, diagnostics: [] } }, impact: [] };
+  });
+  mock.method(apiModule.api, "applyBatch", async () => {
+    applyCalls++; if (failApply) throw new Error("Source changed. Your draft is preserved.");
+    const fields = (mode: "dev" | "prod") => Object.fromEntries(Object.entries(baseline.models[mode].fields).map(([target, facts]) => [target, facts.map((fact) => {
+      const edit = planCalls.at(-1)?.find((edit) => edit.kind === "field" && edit.intent.target === target && edit.intent.field === fact.field);
+      if (edit?.kind !== "field") return fact;
+      return { ...fact, authored: edit.intent.inherit ? undefined : edit.intent.value, effective: edit.intent.inherit ? fact.inherited?.value : edit.intent.value };
+    })]));
+    const descriptions = { ...baseline.descriptions.values };
+    for (const edit of planCalls.at(-1) ?? []) if (edit.kind === "description") descriptions[edit.entity] = edit.value;
+    persisted = { ...baseline, revision: "saved", descriptions: { values: descriptions }, models: { dev: { ...baseline.models.dev, fields: fields("dev") }, prod: { ...baseline.models.prod, fields: fields("prod") } } } as Snapshot;
+    return { status: "applied", message: "Applied all changes.", revision: persisted.revision };
+  });
+  mock.method(apiModule.api, "snapshot", async () => response());
+  mock.method(apiModule.api, "resourceDetails", async () => ({ configured: false }));
+});
+function response(): SnapshotResponse { return { snapshot: persisted, evaluating: false, commands: {}, busy: null }; }
+
+async function mount(selected = target, mode: "dev" | "prod" = "dev", onClient?: (client: import("@tanstack/react-query").QueryClient) => void) {
+  let setMode: ((mode: "dev" | "prod") => void) | undefined;
+  function Workbench() {
+    const context = studio.useStudio();
+    setMode = context.setMode;
+    return h("div", null,
+      h("button", { onClick: () => context.select("lambda:sign-in") }, "Open node B"),
+      h("button", { onClick: () => context.select("island:lambda") }, "Open island"),
+      h(router.Link, { to: "/other" }, "Other view"),
+      h("output", { "aria-label": "Current selection" }, context.selected ?? "none"),
+      h(inspector.Inspector),
+      h(addMenu.AddMenu),
+      context.draftState.reviewOpen ? h(review.EditDialog, { review: context.draftState.review }) : null,
+      h(dialogs.UnsavedChangesDialog));
+  }
+  function Root() {
+    const search = router.useSearch({ strict: false }) as { select?: string };
+    const navigate = router.useNavigate();
+    const current = snapshotModule.useSnapshot().data!;
+    return h(studio.StudioProvider, { response: current, selected: search.select, select: (id: string | undefined) => void navigate({ to: ".", search: { select: id } } as never), children: h(Workbench) });
+  }
+  const root = router.createRootRoute({ component: Root, validateSearch: (search) => ({ select: typeof search.select === "string" ? search.select : undefined }) });
+  const app = router.createRouter({ history: router.createMemoryHistory({ initialEntries: [`/?select=${encodeURIComponent(selected)}`] }), routeTree: root.addChildren([router.createRoute({ getParentRoute: () => root, path: "/", component: () => null }), router.createRoute({ getParentRoute: () => root, path: "/other", component: () => null })]) });
+  const client = new query.QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } }); clients.push(client); client.setQueryData(["snapshot"], response());
+  onClient?.(client);
+  ui.render(h(query.QueryClientProvider, { client }, h(router.RouterProvider, { router: app })));
+  await ui.screen.findByRole("complementary", { name: "Inspector" });
+  if (mode === "prod") await ui.act(async () => { setMode!(mode); });
+  return app;
+}
+function openSection(title: string) {
+  if (title === "Environment") title = "Configuration and inputs";
+  if (title === "Workload access") title = "Access to this resource";
+  if (title === "Build and runtime" || title === "Production placement") openSection("Settings");
+  const summary = [...document.querySelectorAll<HTMLElement>("[data-inspector-disclosure] > details > summary")].find((summary) => summary.querySelector("span")?.textContent === title)!;
+  assert.ok(summary, `section: ${title}`);
+  if (!summary.closest("details")!.open) ui.fireEvent.click(summary);
+  return summary.closest("section")!;
+}
+function descriptionField(): HTMLTextAreaElement {
+  const editor = document.querySelector<HTMLDetailsElement>("[data-slot=description-editor]");
+  if (editor && !editor.open) ui.fireEvent.click(editor.querySelector("summary")!);
+  return (editor ? ui.within(editor) : ui.screen).getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement;
+}
+const headerPill = (mode: "dev" | "prod") => document.querySelector<HTMLButtonElement>(`[data-slot=inspector-kind] [data-environment=${mode}]`)!;
+const environmentDescription = (mode: "dev" | "prod") => headerPill(mode).getAttribute("aria-label")!;
+const deployControl = () => {
+  openSection("Settings");
+  return ui.screen.getByRole("combobox", { name: "Deploy" });
+};
+const memory = () => {
+  openSection("Settings");
+  return ui.screen.getByRole("spinbutton", { name: "Memory in MB" });
+};
+const changeMemory = () => ui.fireEvent.change(memory(), { target: { value: "768" } });
+const count = () => ui.screen.getByLabelText("Pending inspector changes").textContent!;
+const waitDialog = (name: string) => ui.waitFor(() => assert.equal(document.querySelector("dialog[open] h2")?.textContent, name));
+
+test("every workload role exposes an editable Deploy control including events and tools", async () => {
+  const seen = new Set<string>();
+  for (const item of baseline.models.dev.targets) {
+    if (seen.has(item.role)) continue;
+    seen.add(item.role);
+    await mount(item.ref);
+    const control = deployControl() as HTMLSelectElement;
+    assert.equal(control.disabled, false, item.role);
+    assert.ok([...control.options].some(option => option.value === "conditional"), item.role);
+    assert.ok([...control.options].some(option => option.value === "none"), item.role);
+    ui.cleanup();
+  }
+  assert.ok(seen.has("event")); assert.ok(seen.has("tool"));
+});
+
+test("event Deploy stages Off and an input condition through shared review", async () => {
+  await mount("lambda:cognito-pre-signup-trigger");
+  const control = deployControl();
+  ui.fireEvent.change(control, { target: { value: "none" } });
+  assert.match(count(), /1 unsaved/);
+  ui.fireEvent.change(control, { target: { value: "conditional" } });
+  assert.ok(ui.screen.getByRole("combobox", { name: "Input parameter" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: /Review Changes/i }));
+  await ui.waitFor(() => assert.equal(planCalls.length, 1));
+  assert.equal(planCalls[0]![0]!.kind, "deploy");
+  assert.equal((planCalls[0]![0] as Extract<DraftEdit, { kind: "deploy" }>).target, "lambda:cognito-pre-signup-trigger");
+});
+
+test("managed resource families explain inferred deployment without a Deploy selector", async () => {
+  const model = baseline.models.dev;
+  const kinds = new Set<string>();
+  const ids = model.resources.filter(resource => {
+    const kind = resource.deploymentFile || resource.deploymentFiles ? "envfile" : resource.clientEnvironment ? "clientfile" : resource.kind;
+    if (kinds.has(kind)) return false;
+    kinds.add(kind); return true;
+  }).map(resource => resource.id);
+  ids.push("gateway:http", "gateway:websocket", "island:vpc:application", "island:inputs");
+  for (const id of ids) {
+    await mount(id);
+    assert.equal(ui.screen.queryByRole("combobox", { name: "Deploy" }), null, id);
+    const resource = model.resources.find(resource => resource.id === id);
+    const input = id === "island:inputs" || resource?.deploymentFile || resource?.deploymentFiles || resource?.clientEnvironment || ["input", "secret", "group"].includes(resource?.kind ?? "");
+    if (input) assert.equal(ui.screen.queryByRole("region", { name: "Deployment" }), null, id);
+    else {
+      ui.fireEvent.click(headerPill("prod"));
+      assert.ok(ui.screen.getByRole("dialog").textContent, id);
+      ui.fireEvent.click(ui.screen.getByRole("button", { name: "Close environment details" }));
+    }
+    if (id === "island:vpc:application") {
+      assert.equal(headerPill("dev").getAttribute("data-enabled"), "false", "local workloads do not create a development VPC");
+      const built = baseline.models.prod.networks?.find(network => network.id === "application")?.builtInProd;
+      assert.equal(headerPill("prod").getAttribute("data-enabled"), String(!!built));
+    }
+    ui.cleanup();
+  }
+});
+
+
+test("inspectors start with closed disclosures and reset scroll on selection", async () => {
+  await mount();
+  const details = (title: string) => [...document.querySelectorAll<HTMLDetailsElement>("[data-inspector-disclosure] > details")].find((item) => item.querySelector("summary > span")?.textContent === title)!;
+  for (const title of ["Permissions", "Settings", "Build and runtime", "Production placement"]) assert.equal(details(title).open, false, title);
+  openSection("Settings");
+  assert.equal(document.querySelector<HTMLDetailsElement>("[data-slot=description-editor]")!.open, false);
+  const build = details("Build and runtime");
+  assert.equal(build.open, false);
+  assert.equal(memory().closest("details"), details("Settings"), "settings controls stay inside their disclosure");
+  assert.equal(ui.screen.getByRole("switch", { name: "API user-pool authorizer" }).closest("details"), details("Settings"));
+  assert.equal(ui.screen.getByRole("textbox", { name: "HTTP route /graphql" }).closest("details"), details("Settings"));
+  for (const title of ["Build and runtime", "Production placement"]) assert.ok(details("Settings").contains(details(title)), `${title} belongs inside Settings`);
+  assert.equal(document.querySelector("[data-inspector-section] [data-slot=field] [data-slot=field-label]")?.textContent, "Deploy");
+  assert.ok(!document.querySelector("[data-inspector-context]")?.textContent?.includes("Source and identity"));
+  openSection("Build and runtime");
+  assert.ok(ui.screen.getByRole("combobox", { name: "Architecture" }));
+  const content = document.querySelector<HTMLElement>("[data-slot=inspector-content]")!;
+  const toolbar = document.querySelector("[data-slot=inspector-toolbar]")!;
+  assert.ok(!content.contains(toolbar), "close remains outside the scrolled region");
+  content.scrollTop = 240;
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Open node B" }));
+  await ui.waitFor(() => assert.ok(document.querySelector("[data-slot=inspector-content]") !== content, "selection replaces the scroll container"));
+  assert.equal(document.querySelector("[data-slot=inspector-content]")!.scrollTop, 0);
+  assert.equal(planCalls.length + applyCalls, 0, "inspecting and expanding never saves source");
+});
+
+test("tag metadata stays compact while collapsed drafts and errors remain discoverable", async () => {
+  await mount("lambda:ws-connect-route");
+  const section = document.querySelector<HTMLElement>("[data-slot=declaration-tags]")!;
+  const details = section.querySelector("details")!;
+  const summary = details.querySelector("summary")!;
+  assert.equal(details.open, false);
+  assert.equal(summary.querySelector("[data-slot=section-count]")?.textContent, "1");
+  openSection("Tags");
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Tag 1 key" }), { target: { value: "aws:reserved" } });
+  ui.fireEvent.click(summary);
+  assert.equal(details.open, false);
+  assert.equal(summary.querySelector("[data-slot=section-state]")?.textContent, "Needs attention");
+  assert.equal((ui.screen.getByRole("button", { name: "Review Changes" }) as HTMLButtonElement).disabled, true);
+  openSection("Tags");
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Tag 1 key" }), { target: { value: "Team" } });
+  ui.fireEvent.click(summary);
+  assert.equal(summary.querySelector("[data-slot=section-state]")?.textContent, "Modified");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard" }));
+  assert.equal(summary.querySelector("[data-slot=section-state]"), null);
+  assert.equal(summary.querySelector("[data-slot=section-count]")?.textContent, "1");
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("workload build booleans share switches and preserve staged inheritance through review", async () => {
+  await mount();
+  openSection("Build and runtime");
+  const fact = baseline.models.dev.fields[target]!.find(fact => fact.field === "lambda.bundling.minify")!;
+  const minify = ui.screen.getByRole("switch", { name: "Minify" });
+  assert.equal(ui.screen.queryByRole("combobox", { name: "Minify" }), null);
+  assert.ok(ui.screen.getByRole("switch", { name: "Source maps" }));
+  assert.equal(minify.getAttribute("aria-checked"), String(fact.effective));
+  ui.fireEvent.click(minify);
+  assert.equal(minify.getAttribute("aria-checked"), String(!fact.effective));
+  ui.fireEvent.click(minify);
+  assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null, "a second flip restores the declared setting");
+  ui.fireEvent.click(minify);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "field", intent: { target, field: fact.field, value: !fact.effective } }]);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal(minify.getAttribute("aria-checked"), String(!fact.effective));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard" }));
+  assert.equal(minify.getAttribute("aria-checked"), String(fact.effective));
+  assert.equal(applyCalls, 0);
+});
+
+test("numeric defaults stay visible through overrides and restoring them stages inheritance for review", async () => {
+  await mount();
+  const fact = baseline.models.dev.fields[target]!.find((fact) => fact.field === "lambda.memorySize")!;
+  const inherited = fact.inherited!.value;
+  const row = memory().closest("[data-slot=field]")!;
+  assert.equal(row.querySelector("[data-slot=numeric-default] > span")?.textContent, `Default: ${inherited} MB`);
+  changeMemory();
+  assert.equal((memory() as HTMLInputElement).value, "768");
+  assert.equal(row.querySelector("[data-slot=numeric-default] > span")?.textContent, `Default: ${inherited} MB`);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Use default memory" }));
+  assert.equal((memory() as HTMLInputElement).value, "");
+  assert.equal(memory().getAttribute("placeholder"), String(inherited));
+  assert.ok(!ui.screen.queryByRole("button", { name: "Use default memory" }));
+  assert.equal(applyCalls + planCalls.length, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.ok(planCalls[0]?.some((edit) => edit.kind === "field" && edit.intent.target === target && edit.intent.field === "lambda.memorySize" && edit.intent.inherit));
+});
+
+test("field errors and boolean help are associated with the controls they explain", async () => {
+  await mount();
+  openSection("Settings");
+  const authentication = ui.screen.getByRole("switch", { name: "API user-pool authorizer" });
+  const help = document.getElementById(authentication.getAttribute("aria-describedby")!);
+  assert.ok(help?.closest("[data-slot=field]")?.contains(authentication), "boolean help stays in its setting row");
+  assert.match(help!.textContent!, /Cognito user pool/);
+  ui.fireEvent.change(memory(), { target: { value: "1" } });
+  const descriptions = memory().getAttribute("aria-describedby")!.split(" ").map(id => document.getElementById(id));
+  assert.ok(descriptions.every(Boolean), "every description resolves to visible content");
+  assert.ok(descriptions.some(element => element!.getAttribute("role") === "alert"));
+  assert.ok(descriptions.some(element => element!.textContent?.startsWith("Default:")));
+  const route = ui.screen.getByRole("textbox", { name: "HTTP route /graphql" });
+  ui.fireEvent.change(route, { target: { value: "invalid route" } });
+  const routeDescriptions = route.getAttribute("aria-describedby")!.split(" ").map(id => document.getElementById(id));
+  assert.equal(route.getAttribute("aria-invalid"), "true");
+  assert.ok(routeDescriptions.every(Boolean));
+  assert.ok(routeDescriptions.some(element => element!.getAttribute("role") === "alert"));
+  assert.ok(routeDescriptions.some(element => element!.textContent?.startsWith("Browser path:")));
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("concurrency switches reveal validated counts and share source review and discard", async () => {
+  await mount();
+  openSection("Settings");
+  const reserved = ui.screen.getByRole("switch", { name: "Reserved Concurrency" });
+  const provisioned = ui.screen.getByRole("switch", { name: "Provisioned Concurrency" });
+  const count = () => ui.screen.getByRole("spinbutton", { name: "Reserved Concurrency executions" }) as HTMLInputElement;
+  assert.equal(reserved.getAttribute("aria-checked"), "false");
+  assert.equal(provisioned.getAttribute("aria-checked"), "false");
+  assert.equal(ui.screen.queryByRole("spinbutton", { name: "Reserved Concurrency executions" }), null);
+  ui.fireEvent.click(reserved);
+  ui.fireEvent.change(count(), { target: { value: "0" } });
+  assert.equal(count().value, "0");
+  ui.fireEvent.click(provisioned);
+  assert.ok(ui.screen.getByRole("alert").textContent?.includes("cannot exceed"));
+  assert.ok(ui.screen.getByRole("button", { name: "Review Changes" }).hasAttribute("disabled"));
+  ui.fireEvent.change(count(), { target: { value: "4" } });
+  ui.fireEvent.click(reserved);
+  assert.equal(ui.screen.queryByRole("spinbutton", { name: "Reserved Concurrency executions" }), null);
+  ui.fireEvent.click(reserved);
+  assert.equal(count().value, "4");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 2 changes");
+  assert.deepEqual(planCalls[0], [
+    { kind: "field", intent: { target, field: "lambda.provisionedConcurrentExecutions", value: 1 } },
+    { kind: "field", intent: { target, field: "lambda.reservedConcurrentExecutions", value: 4 } },
+  ]);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard" }));
+  assert.equal(reserved.getAttribute("aria-checked"), "false");
+  assert.equal(provisioned.getAttribute("aria-checked"), "false");
+  assert.equal(applyCalls, 0);
+  ui.fireEvent.click(reserved);
+  assert.equal(count().value, "1");
+  ui.fireEvent.change(count(), { target: { value: "" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard" }));
+  ui.fireEvent.click(reserved);
+  assert.equal(count().value, "1", "discarded invalid text is not restored by the switch");
+});
+
+test("route tag ownership guidance stays inside the shared Tags section", async () => {
+  const route = baseline.models.dev.routes.find(route => route.kind === "service")!;
+  await mount(route.id);
+  const section = document.querySelector<HTMLElement>("[data-slot=declaration-tags]")!;
+  assert.equal(section.previousElementSibling?.getAttribute("data-slot"), "node-description");
+  assert.match(section.querySelector("[data-slot=section-description]")!.textContent!, /Route tags follow the workload declaration/);
+  assert.equal(document.querySelector("[data-slot=inspector-content] > p"), null, "supporting copy shares the panel gutters");
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("route Settings edits its owning authorizer and previews the staged access policy", async () => {
+  const route = baseline.models.dev.routes.find((route) => route.kind === "http" && route.target === target)!;
+  const fact = baseline.models.dev.fields[target]!.find((fact) => fact.field === "http.auth")!;
+  await mount(route.id);
+  const settings = openSection("Settings");
+  const authentication = ui.within(settings).getByRole("switch", { name: "API user-pool authorizer" });
+  assert.equal(ui.screen.queryByRole("textbox", { name: `HTTP route ${route.path}` }), null, "route path editing stays with the function Settings");
+  ui.fireEvent.click(authentication);
+  assert.ok(ui.screen.getByText(fact.effective ? "Open to any caller." : /The gateway admits signed-in users only/));
+  assert.equal(settings.querySelector("summary [data-slot=section-state]")?.textContent, "Modified");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "field", intent: fact.effective
+    ? { target, field: "http.auth", inherit: true }
+    : { target, field: "http.auth", value: true } }]);
+  assert.equal(applyCalls, 0);
+});
+
+test("placement-only workloads keep placement under Settings and secret-only bindings remain discoverable", async () => {
+  const service = baseline.models.dev.targets.find(item => item.kind === "service")!;
+  const secrets = [{ name: "EXAMPLE_SECRET", resource: "resource:example", display: "resources.example.arn" }];
+  assert.ok(service);
+  persisted = { ...baseline, models: { ...baseline.models, dev: { ...baseline.models.dev,
+    fields: { ...baseline.models.dev.fields, [service.ref]: baseline.models.dev.fields[service.ref]!.filter(fact => fact.field === "deploy" || fact.field.endsWith("subnet")) },
+    targets: baseline.models.dev.targets.map(item => item.ref === service.ref ? { ...item, environment: [], secrets } : item),
+  } } };
+  await mount(service.ref);
+  const settings = openSection("Settings");
+  assert.ok(settings.querySelector("[data-inspector-disclosure]"), "placement remains inside Settings without numeric fields");
+  assert.equal(ui.within(settings).queryByRole("spinbutton", { name: "Memory in MB" }), null);
+  openSection("Environment");
+  for (const secret of secrets) assert.ok(ui.screen.getByText(secret.name, { selector: "code" }));
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("every configurable workload keeps Deploy in Settings and previews drafts in its header", async () => {
+  for (const role of new Set(baseline.models.dev.targets.map(target => target.role))) {
+    const item = baseline.models.dev.targets.find(target => target.role === role)!;
+    if (!baseline.models.dev.fields[item.ref]?.some(fact => fact.field === "deploy")) continue;
+    await mount(item.ref);
+    assert.equal(ui.screen.queryByRole("region", { name: "Deployment" }), null, role);
+    const description = document.querySelector("[data-slot=node-description]")!;
+    assert.equal(description.previousElementSibling?.tagName, "HEADER", role);
+    assert.ok(description.nextElementSibling?.matches("[data-slot=declaration-tags]"), role);
+    const mapLocations = hoverEnvironmentDescriptions(nodeHoverFacts({ entity: "target", id: item.ref }, { dev: indexModel(baseline.models.dev), prod: indexModel(baseline.models.prod) }));
+    for (const mode of ["dev", "prod"] as const) {
+      if (headerPill(mode).getAttribute("data-enabled") === "true") {
+        assert.equal(environmentDescription(mode), `${mode === "dev" ? "Development" : "Production"} · ${mapLocations[mode]}`, `${role}: ${mode} matches the map`);
+      }
+    }
+    assert.equal(document.querySelector<HTMLDetailsElement>("[data-slot=deployment-controls]")?.closest("details")?.open, false, "Settings starts closed");
+    ui.fireEvent.change(deployControl(), { target: { value: "none" } });
+    assert.equal(environmentDescription("dev"), "Development · not enabled", role);
+    assert.equal(environmentDescription("prod"), "Production · not enabled", role);
+    assert.match(openSection("Settings").querySelector("summary")!.textContent!, /Modified/);
+    assert.equal(applyCalls + planCalls.length, 0, "changing deployment only stages a draft");
+    ui.cleanup();
+  }
+});
+
+test("node descriptions stage with workload settings, review, save and reload in the inspector", async () => {
+  await mount();
+  const description = descriptionField();
+  assert.equal(description.value, baseline.descriptions.values[target]);
+  const value = "Updated GraphQL notes\nSecond paragraph.";
+  ui.fireEvent.change(description, { target: { value } });
+  changeMemory();
+  assert.equal(planCalls.length, 0);
+  assert.match(count(), /2 unsaved changes/);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 2 changes");
+  await ui.waitFor(() => assert.ok(planCalls[0]?.some((edit) => edit.kind === "description" && edit.entity === target && edit.value === value)));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Apply All" }));
+  await ui.waitFor(() => assert.ok(ui.screen.queryByLabelText("Pending inspector changes") === null));
+  assert.equal(persisted.descriptions.values[target], value);
+  assert.equal((descriptionField()).value, value);
+});
+
+test("all selectable item kinds lead with their authored description, then tags where they have them", async () => {
+  const model = baseline.models.dev;
+  // A lone connection keeps its edge's id; a bundle's rows place their descriptions inside each row.
+  const edge = model.edges.find(edge => aggregateConnections(model, Object.values(baseline.models)).some(group => group.id === edge.id))!;
+  for (const id of [target, "route:http:/graphql", "gateway:http", "resource:cognito", "resource:cognito.userPool", "resource:openaiApiKey", "framework-stack:DevLambdaReplayStack", "envfile:dev", model.resources.find(resource => resource.clientEnvironment)!.id, model.managedDatabase!.resource, "local:postgres", "island:lambda", "island:vpc:application", "prop:vpc:application:endpoint:s3", edge.id]) {
+    await mount(id);
+    const first = document.querySelector("[data-slot=inspector-content] > header")?.nextElementSibling;
+    assert.equal(first?.getAttribute("data-slot"), "node-description", id);
+    // Framework-built stacks and their gateways are tagged like any other stack.
+    if ([target, "route:http:/graphql", "gateway:http", "resource:cognito", "resource:openaiApiKey", "framework-stack:DevLambdaReplayStack", model.managedDatabase!.resource, "island:vpc:application"].includes(id)) {
+      const tags = first?.nextElementSibling;
+      assert.equal(tags?.getAttribute("data-slot"), "declaration-tags", id);
+      assert.ok(ui.within(tags as HTMLElement).queryByRole("button", { name: "Add tag" }), `${id} tags are editable`);
+    }
+    const description = descriptionField();
+    const descriptionId = id.startsWith("envfile:") ? CDK_ENVIRONMENT_ID : id === edge.id ? connectionDescriptionId(edge) : id;
+    assert.equal(description.value, baseline.descriptions.values[descriptionId] ?? "", id);
+    assert.equal(description.disabled, false, id);
+    ui.cleanup();
+  }
+});
+
+test("the shared environment description leads, and each physical file keeps its authored notes under Files", async () => {
+  persisted = { ...baseline, descriptions: { ...baseline.descriptions, values: { ...baseline.descriptions.values,
+    [CDK_ENVIRONMENT_ID]: "Shared environment notes", "envfile:dev": "Development file notes", "envfile:prod": "Production file notes" } } };
+  mock.method(apiModule.api, "inputDetails", async (mode: "dev" | "prod") => ({ file: `cdk-app/.env.${mode}`, hash: "fixture", entries: [] }));
+  for (const id of ["envfile:dev", "envfile:prod", CDK_ENVIRONMENT_ID]) {
+    await mount(id);
+    assert.equal(descriptionField().value, "Shared environment notes", id);
+    openSection("Files");
+    for (const [mode, notes] of [["dev", "Development file notes"], ["prod", "Production file notes"]] as const) {
+      const file = document.querySelector<HTMLElement>(`[data-slot=environment-file][data-environment=${mode}]`)!;
+      assert.equal(file.querySelector("[data-slot=environment-file-description]")?.textContent, notes, `${id}: ${mode} note reads first`);
+      ui.fireEvent.click(ui.within(file).getByText("Edit description"));
+      const field = ui.within(file).getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement;
+      assert.equal(field.value, notes, `${id}: ${mode}`);
+      assert.equal(field.disabled, false);
+    }
+    ui.cleanup();
+  }
+  assert.equal(planCalls.length + applyCalls, 0, "inspecting shared and per-file notes does not rewrite them");
+});
+
+test("read connection labels open compact evidence with line-numbered VS Code links", async () => {
+  await mount("lambda:sign-out");
+  openSection("Connections");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Reads: TRUSTED_FRONTEND_ORIGINS" }));
+  await ui.screen.findByRole("heading", { name: "Reads: TRUSTED_FRONTEND_ORIGINS" });
+  const configuration = ui.screen.getByText("Configuration", { selector: "summary" });
+  assert.equal(configuration.closest("details")!.open, false);
+  ui.fireEvent.click(configuration);
+  const evidence = baseline.models.dev.edges.find((edge) => edge.from === "lambda:sign-out" && edge.label === "TRUSTED_FRONTEND_ORIGINS")!.evidence!;
+  for (const item of evidence) {
+    const link = ui.screen.getByRole("link", { name: `${item.location.line} ${item.excerpt}` });
+    assert.ok(link.getAttribute("href")?.startsWith("vscode://file/"));
+    assert.ok(link.getAttribute("href")?.endsWith(`:${item.location.line}:${item.location.column}`));
+  }
+  assert.equal(planCalls.length, 0);
+  ui.cleanup();
+  const derived = baseline.models.dev.edges.find((edge) => edge.from === target && edge.label === "USER_POOL_ID")!;
+  await mount(derived.id);
+  ui.fireEvent.click(ui.screen.getByText("Configuration", { selector: "summary" }));
+  assert.ok(ui.screen.getByText("Derived from the linked declaration."));
+  assert.ok(ui.screen.getByRole("link", { name: /userPool: true/ }));
+});
+
+test("a plain connection has no filler context and optional descriptions review, save and reload", async () => {
+  const edge = { id: "plain-connection", from: target, to: "resource:cognito", relation: "env" as const, provenance: "declared" as const, label: "Mapping" };
+  persisted = { ...baseline, models: { dev: { ...baseline.models.dev, edges: [...baseline.models.dev.edges, edge] }, prod: { ...baseline.models.prod, edges: [...baseline.models.prod.edges, edge] } } };
+  await mount(edge.id);
+  assert.equal(ui.screen.queryByText("This relationship comes from the framework graph."), null);
+  assert.equal(ui.screen.queryByText("Configuration", { selector: "summary" }), null);
+  const description = ui.screen.getByRole("region", { name: "Connection description" });
+  assert.equal(ui.within(description).getByText("Add a description of this connection.").getAttribute("data-slot"), "description-preview");
+  assert.equal(description.querySelector("details")!.open, false);
+  ui.fireEvent.change(descriptionField(), { target: { value: "Used for account identity." } });
+  assert.equal(planCalls.length, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "description", entity: connectionDescriptionId(edge), value: "Used for account identity." }]);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Apply All" }));
+  await ui.waitFor(() => assert.equal(applyCalls, 1));
+  await ui.waitFor(() => assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null));
+  // The mock reloads the original graph; put this synthetic connection back for a fresh inspector.
+  ui.cleanup();
+  persisted = { ...persisted, models: { ...persisted.models, dev: { ...persisted.models.dev, edges: [...persisted.models.dev.edges, edge] } } };
+  await mount(edge.id);
+  ui.fireEvent.click(ui.screen.getByText("Description", { selector: "summary" }));
+  assert.equal((descriptionField()).value, "Used for account identity.");
+});
+
+test("grouped relationships have separate description drafts and unique accessible fields", async () => {
+  const group = aggregateConnections(baseline.models.dev, Object.values(baseline.models)).find((group) => group.members.length > 1)!;
+  assert.ok(group);
+  await mount(group.id);
+  const members = [...document.querySelectorAll<HTMLDetailsElement>("[data-slot=connection-map-member]")].slice(0, 2);
+  for (const [index, member] of members.entries()) {
+    ui.fireEvent.click(member.querySelector("summary")!);
+    ui.fireEvent.click(ui.within(member).getByText("Add description", { selector: "summary" }));
+    ui.fireEvent.change(ui.within(member).getByRole("textbox", { name: "Description" }), { target: { value: `Relationship ${index + 1}` } });
+  }
+  const fields = ui.screen.getAllByRole("textbox", { name: "Description" });
+  assert.equal(new Set(fields.map((field) => field.id)).size, 2);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 2 changes");
+  assert.deepEqual(planCalls[0], group.members.slice(0, 2).map((member, index) => ({ kind: "description", entity: connectionDescriptionId(member.edge), value: `Relationship ${index + 1}` })));
+});
+
+test("event and public-field trigger flows stage through the shared review and keep native hooks occupied", async () => {
+  for (const selected of ["lambda:cognito-pre-signup-trigger", "resource:cognito.userPool"]) {
+    await mount(selected);
+    const summary = document.querySelector<HTMLElement>("[data-slot=trigger-editor] > details > summary")!;
+    assert.equal(summary.closest("details")!.open, false);
+    ui.fireEvent.click(summary);
+    ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add trigger" }));
+    if (selected.startsWith("lambda:")) {
+      ui.fireEvent.click(ui.screen.getByRole("button", { name: /^Cognito: \d+ compatible$/ }));
+      ui.fireEvent.click(ui.screen.getByRole("button", { name: "Use userPool" }));
+    } else {
+      const selector = ui.screen.getByRole("combobox", { name: "Trigger event Lambda" });
+      assert.equal(selector.querySelectorAll("option").length, baseline.models.dev.targets.filter((item) => item.role === "event").length + 1);
+      ui.fireEvent.change(selector, { target: { value: "invocation-test-step" } });
+    }
+    const hooks = ui.screen.getByRole("combobox", { name: "Trigger Hook" });
+    assert.equal((ui.within(hooks).getByRole("option", { name: "preSignUp · occupied" }) as HTMLOptionElement).disabled, true);
+    assert.equal((hooks as HTMLSelectElement).value, "preAuthentication", "the first free hook is pre-selected");
+    ui.fireEvent.click(ui.screen.getByRole("button", { name: "Next" }));
+    const add = ui.screen.getByRole("button", { name: "Add trigger" }) as HTMLButtonElement;
+    assert.equal(add.disabled, true, "the handler contract still needs acknowledging");
+    ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Acknowledge trigger handler contract" }));
+    assert.equal(add.disabled, false);
+    assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null, "nothing stages before the trigger is added");
+    ui.fireEvent.click(add);
+    assert.equal(planCalls.length, 0);
+    assert.match(count(), /1 unsaved change/);
+    ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+    await waitDialog("Review 1 change");
+    await ui.waitFor(() => assert.equal(planCalls.at(-1)?.[0]?.kind, "triggers"));
+    const edit = planCalls.at(-1)![0]!;
+    assert.ok(edit.kind === "triggers");
+    assert.equal(edit.bindings[0]!.resource, "resource:cognito.userPool");
+    assert.equal(edit.bindings[0]!.accepts, "cognito");
+    assert.equal(applyCalls, 0);
+    ui.cleanup(); planCalls = [];
+  }
+});
+
+test("a native hook stages removal, can be restored, and reviews as one CDK source edit", async () => {
+  await mount("lambda:cognito-pre-signup-trigger");
+  ui.fireEvent.click(document.querySelector<HTMLElement>("[data-slot=trigger-editor] > details > summary")!);
+  const edge = baseline.models.dev.edges.find((item) => item.relation === "trigger" && item.provenance === "source" && item.label === "preSignUp")!;
+  assert.equal(edge.removal && "kind" in edge.removal ? edge.removal.kind : undefined, "property");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Remove native trigger preSignUp" }));
+  assert.match(count(), /1 unsaved change/);
+  assert.ok(ui.screen.getByText("Will be removed"));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Restore native trigger preSignUp" }));
+  assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Remove native trigger preSignUp" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  await ui.waitFor(() => assert.deepEqual(planCalls.at(-1), [{ kind: "nativeTrigger", edge: edge.id }]));
+  assert.equal(applyCalls, 0);
+});
+
+test("a declared trigger shows its pending removal until restored, and the edit form can remove it", async () => {
+  const binding = { event: "invocation-test-step", id: "before-auth", key: "cognito.userPool/before-auth", adapter: "cognito", resource: "resource:cognito.userPool", accepts: "cognito", options: { operation: "preAuthentication" } };
+  persisted = { ...baseline, models: { dev: { ...baseline.models.dev, triggers: [binding] }, prod: { ...baseline.models.prod, triggers: [binding] } } } as Snapshot;
+  await mount("lambda:invocation-test-step");
+  ui.fireEvent.click(document.querySelector<HTMLElement>("[data-slot=trigger-editor] > details > summary")!);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Remove trigger before-auth" }));
+  assert.ok(ui.screen.getByText("Will be removed"));
+  assert.match(count(), /1 unsaved change/);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Restore trigger before-auth" }));
+  assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Edit trigger before-auth" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Remove trigger" }));
+  assert.ok(ui.screen.getByRole("button", { name: "Restore trigger before-auth" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  await ui.waitFor(() => assert.deepEqual(planCalls.at(-1), [{ kind: "triggers", event: "invocation-test-step", bindings: [] }]));
+});
+
+const openAddTrigger = async (selected: string) => {
+  await mount(selected);
+  ui.fireEvent.click(document.querySelector<HTMLElement>("[data-slot=trigger-editor] > details > summary")!);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add trigger" }));
+};
+
+test("step one lists every service, explains requirements and starts settings from a compatible field", async () => {
+  await openAddTrigger("lambda:invocation-test-step");
+  for (const label of ["Cognito", "EventBridge", "SQS", "SNS", "DynamoDB stream", "S3"]) assert.ok(ui.screen.getByRole("button", { name: new RegExp(`^${label}: \\d+ compatible$`) }), label);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: /^SQS:/ }));
+  assert.ok(ui.screen.getByRole("heading", { name: "Triggered by SQS" }));
+  assert.ok(ui.screen.getByText(/invocation-test-step times out after \d+s/));
+  assert.equal(ui.screen.queryByText("Stack is not added to the CDK app."), null, "a stack not yet in the CDK app still offers its fields");
+  assert.ok(ui.screen.getByRole("button", { name: "Use processingQueue" }), "reference example queue can be used");
+  assert.ok(ui.screen.getByText("processingQueue").closest("li")!.textContent!.includes("Stack not added to the CDK app yet"));
+  ui.fireEvent.click(ui.screen.getByText("Add another SQS resource"));
+  assert.ok(ui.screen.getByRole("button", { name: "Copy SQS field snippet" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "All services" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: /^Cognito:/ }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Use userPool" }));
+  assert.equal(ui.screen.queryByRole("region", { name: /Triggered by/ }), null);
+  assert.match(document.querySelector("[data-slot=trigger-route]")!.textContent!, /^Cognito · .*userPool.*→ invocation-test-step/);
+  assert.ok(ui.screen.getByRole("combobox", { name: "Trigger Hook" }));
+  assert.equal(planCalls.length, 0);
+});
+
+test("the checklist lists every remaining problem at once and the button enables only when none are left", async () => {
+  await openAddTrigger("lambda:invocation-test-step");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: /^SQS:/ }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Use processingQueue" }));
+  assert.equal(ui.screen.getByText("Nothing to set", { exact: false }).tagName, "P", "an SQS trigger needs no settings");
+  ui.fireEvent.click(ui.screen.getByText("Advanced options"));
+  ui.fireEvent.change(ui.screen.getByRole("spinbutton", { name: "Trigger Batch size" }), { target: { value: "50" } });
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Trigger attachment id" }), { target: { value: "Bad Id" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Next" }));
+  const checklist = ui.screen.getByRole("list", { name: "Trigger checklist" });
+  assert.match(checklist.textContent!, /batch window of at least one second/);
+  assert.match(checklist.textContent!, /kebab-case attachment id/);
+  assert.match(checklist.textContent!, /not added to the CDK app yet; synth fails until it is/, "an unattached stack warns without blocking");
+  ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Acknowledge trigger handler contract" }));
+  assert.equal((ui.screen.getByRole("button", { name: "Add trigger" }) as HTMLButtonElement).disabled, true);
+  assert.ok(ui.screen.getByText(/^2 items left before this trigger can be added/));
+  ui.fireEvent.click(ui.within(checklist).getAllByRole("button", { name: "Fix" })[0]!);
+  ui.fireEvent.change(ui.screen.getByRole("spinbutton", { name: "Trigger Batch size" }), { target: { value: "" } });
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Trigger attachment id" }), { target: { value: "orders" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Next" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add trigger" }));
+  assert.match(count(), /1 unsaved change/);
+  const added = ui.screen.getByText("referenceExamples.processingQueue").closest("[data-slot=trigger-row]")!;
+  assert.match(added.textContent!, /referenceExamples\.processingQueue.*sqs/);
+});
+
+test("a schedule needs no resource and builds its expression from a repeat interval", async () => {
+  await openAddTrigger("lambda:invocation-test-step");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Schedule: no resource needed" }));
+  assert.match(document.querySelector("[data-slot=trigger-route]")!.textContent!, /^Schedule → invocation-test-step/);
+  ui.fireEvent.change(ui.screen.getByRole("spinbutton", { name: "Trigger every" }), { target: { value: "15" } });
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Trigger unit" }), { target: { value: "minutes" } });
+  assert.ok(ui.screen.getByText("rate(15 minutes)"));
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Trigger repeat" }), { target: { value: "daily" } });
+  ui.fireEvent.change(ui.screen.getByLabelText("Trigger time"), { target: { value: "06:30" } });
+  assert.ok(ui.screen.getByText("cron(30 6 * * ? *)"));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Next" }));
+  ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Acknowledge trigger handler contract" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add trigger" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await ui.waitFor(() => assert.equal(planCalls.at(-1)?.[0]?.kind, "triggers"));
+  const edit = planCalls.at(-1)![0]!;
+  assert.ok(edit.kind === "triggers");
+  assert.deepEqual(edit.bindings, [{ event: "invocation-test-step", resource: "", adapter: "schedule", id: "schedule-trigger", key: "schedule/schedule-trigger", accepts: "schedule", options: { expression: "cron(30 6 * * ? *)" } }]);
+});
+
+test("an asynchronous trigger points to the failure destination, which stages and reviews as its own change", async () => {
+  await openAddTrigger("lambda:invocation-test-step");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: /^SNS:/ }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Use notificationsTopic" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Next" }));
+  assert.match(ui.screen.getByRole("list", { name: "Trigger checklist" }).textContent!, /Failed runs are dropped after Lambda's two retries/);
+  ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Acknowledge trigger handler contract" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add trigger" }));
+  assert.ok(ui.screen.getByText("Dropped after Lambda's two retries."));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Set failure destination" }));
+  const save = ui.screen.getByRole("button", { name: "Save destination" }) as HTMLButtonElement;
+  assert.equal(save.disabled, true);
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Failure destination" }), { target: { value: "resource:referenceExamples.deadLetterQueue" } });
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Failure retry attempts" }), { target: { value: "1" } });
+  ui.fireEvent.change(ui.screen.getByRole("spinbutton", { name: "Failure maximum event age" }), { target: { value: "30" } });
+  assert.ok(ui.screen.getByText(/from 60 to 21600 seconds/));
+  ui.fireEvent.change(ui.screen.getByRole("spinbutton", { name: "Failure maximum event age" }), { target: { value: "" } });
+  ui.fireEvent.click(save);
+  const destination = ui.screen.getByRole("button", { name: "referenceExamples.deadLetterQueue" }).closest("[data-slot=failure-destination]")!;
+  assert.match(destination.textContent!, /Amazon SQS · after 1 retry$/);
+  assert.match(count(), /2 unsaved changes/);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await ui.waitFor(() => assert.equal(planCalls.at(-1)?.length, 2));
+  assert.deepEqual(planCalls.at(-1)!.find((edit) => edit.kind === "onFailure"), { kind: "onFailure", event: "invocation-test-step", value: { destination: "resource:referenceExamples.deadLetterQueue", retryAttempts: 1 } });
+});
+
+test("a local-replay Lambda rules out sources that wait for its response, and only replayable hooks stay selectable", async () => {
+  await openAddTrigger("lambda:cognito-post-confirmation-trigger");
+  const sqs = ui.screen.getByRole("button", { name: "SQS: unavailable" });
+  assert.match(sqs.title, /uses local replay/);
+  ui.fireEvent.click(sqs);
+  assert.match(ui.screen.getByRole("note").textContent!, /Turn off local replay/);
+  assert.equal(ui.screen.queryByRole("button", { name: "Use processingQueue" }), null);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "All services" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: /^Cognito:/ }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Use userPool" }));
+  // postConfirmation is the only replayable hook, and native wiring already holds it.
+  const hooks = ui.screen.getByRole("combobox", { name: "Trigger Hook" });
+  assert.ok(ui.within(hooks).getAllByRole("option").filter((option) => !(option as HTMLOptionElement).disabled && (option as HTMLOptionElement).value).length === 0);
+});
+
+test("description edits use navigation guards and discard restores the authored text", async () => {
+  await mount();
+  ui.fireEvent.change(descriptionField(), { target: { value: "Unsaved notes" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Open node B" }));
+  await waitDialog("Unsaved changes");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Keep Editing" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard" }));
+  assert.equal((descriptionField()).value, baseline.descriptions.values[target]);
+  assert.equal(planCalls.length, 0);
+});
+
+test("stack inspectors surface unattached status and the database's framework ownership in their headers", async () => {
+  await mount("resource:referenceExamples");
+  const panel = ui.screen.getByRole("complementary", { name: "Inspector" });
+  assert.ok(ui.within(panel.querySelector("header")!).getAllByText("Not created in application.ts").length >= 1);
+  ui.cleanup();
+  await mount("resource:rds");
+  assert.ok(ui.within(ui.screen.getByRole("complementary", { name: "Inspector" }).querySelector("header")!).getByText("Framework managed"));
+});
+
+test("inspector headers carry their Dev | Prod pair at the right of the type label, including input groups", async () => {
+  const header = () => ui.screen.getByRole("complementary", { name: "Inspector" }).querySelector("header")!;
+  const pair = () => [...header().querySelectorAll("[data-slot=\"inspector-kind\"] [data-environment]")].map(pill => `${pill.getAttribute("data-environment")}:${pill.getAttribute("data-enabled")}`);
+  for (const [id, expected] of [
+    ["lambda:sign-in", ["dev:true", "prod:true"]],
+    ["resource:rds", ["dev:false", "prod:true"]],
+    ["resource:referenceExamples", ["dev:false", "prod:false"]],
+    ["resource:openaiApiKey", ["dev:true", "prod:true"]],
+    ["envfile:dev", ["dev:true", "prod:true"]],
+    [CDK_ENVIRONMENT_ID, ["dev:true", "prod:true"]],
+  ] as const) {
+    await mount(id);
+    assert.deepEqual(pair(), expected, id);
+    assert.equal(header().querySelectorAll("[data-slot=\"environment-pills\"]").length, 1, `${id}: one pair, on the type row`);
+    ui.cleanup();
+  }
+  await mount("resource:referenceExamples");
+  assert.equal(ui.screen.queryByRole("region", { name: "Deployment" }), null, "availability appears only in the header");
+  ui.cleanup();
+  await mount("envfile:dev");
+  assert.equal(header().querySelector("[data-slot=\"inspector-kind\"] > span")?.textContent, "Environment files", "the header describes both files, whichever one was selected");
+  assert.deepEqual([...header().querySelectorAll("[data-slot=cdk-environment-files] code")].map(code => code.textContent), ["cdk-app/.env.dev", "cdk-app/.env.prod"]);
+  ui.cleanup();
+  await mount("resource:client");
+  assert.equal(header().querySelectorAll("[data-slot=\"environment-pills\"]").length, 1, "an input group summarizes its entries");
+  assert.match(environmentDescription("dev"), /entries declared/);
+});
+
+test("stack resource rows expose every native member with AWS badges and navigate to its permissions", async () => {
+  await mount("resource:referenceExamples");
+  const rows = [...document.querySelectorAll('[data-slot="stack-resource"]')];
+  assert.deepEqual(rows.map(row => row.querySelector("button")?.textContent), ["documentsBucket", "recordsTable", "notificationsTopic", "processingQueue", "deadLetterQueue"]);
+  assert.deepEqual(rows.map(row => row.querySelector("img")?.getAttribute("src")), ["s3", "dynamodb", "sns", "sqs", "sqs"].map(service => `/icons/aws/${service}.svg`));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "processingQueue" }));
+  await ui.waitFor(() => assert.ok(ui.screen.getByRole("heading", { name: "processingQueue" })));
+  openSection("Access to this resource");
+  assert.ok(ui.screen.getByRole("button", { name: "Grant access" }));
+  assert.ok(ui.screen.getByRole("button", { name: "ReferenceExampleStack" }));
+});
+
+test("an exported framework stack shows its native resources and exports", async () => {
+  await mount("framework-stack:DevLambdaReplayStack");
+  assert.ok(ui.screen.getByRole("heading", { name: "DevLambdaReplayStack" }));
+  // No stack() declaration names it, so Studio states that its ownership is unresolved.
+  assert.ok(ui.screen.getAllByText("Ownership unresolved").length >= 1);
+  assert.equal(ui.screen.queryByText("Framework managed"), null);
+  assert.ok(ui.screen.getByText("Not declared in the stack catalog"));
+  assert.ok(ui.screen.getByText("Exports", { selector: "summary > span" }));
+  assert.ok(ui.screen.getByText((_text, element) => element?.tagName === "CODE" && element.textContent === "queue.queueArn"));
+  assert.ok(ui.screen.getByText("DEV_LAMBDA_REPLAY_QUEUE_ARN", { selector: "code" }));
+  assert.equal(ui.screen.queryByText("ReplayDeadLetterQueueUrl"), null);
+  assert.equal(ui.screen.queryByRole("button", { name: "Inspect stack infrastructure" }), null);
+  assert.equal(ui.screen.queryByRole("heading", { name: "Infrastructure" }), null);
+  const rows = [...document.querySelectorAll('[data-slot="stack-resource"]')];
+  assert.deepEqual(rows.map(row => row.querySelector("button")?.textContent).sort(), ["bucket", "deadLetterQueue", "queue"]);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "bucket" }));
+  await ui.waitFor(() => assert.ok(ui.screen.getByRole("heading", { name: "bucket" })));
+  openSection("Access to this resource");
+  assert.ok(ui.screen.getByRole("button", { name: "cognito-post-confirmation-trigger" }));
+  assert.equal(ui.screen.queryByRole("button", { name: "Grant access" }), null, "uncataloged resources do not acquire a fabricated writable reference");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "cognito-post-confirmation-trigger" }));
+  await ui.waitFor(() => assert.ok(ui.screen.getByRole("heading", { name: "cognito-post-confirmation-trigger" })));
+  openSection("Permissions"); openSection("Resource permissions");
+  const permission = [...document.querySelectorAll('[data-slot="access-summary"]')].find(row => row.querySelector("strong")?.textContent === "DevLambdaReplayStack.bucket");
+  assert.ok(permission, "the capture permission names the public bucket, not its stack");
+  assert.equal(permission.querySelector("img")?.getAttribute("src"), "/icons/aws/s3.svg");
+  ui.fireEvent.click(permission.querySelector("summary")!);
+  assert.match(permission.textContent!, /framework-stack:DevLambdaReplayStack\.bucket/);
+  ui.fireEvent.click(ui.within(permission as HTMLElement).getByRole("button", { name: "Inspect resource" }));
+  await ui.waitFor(() => assert.ok(ui.screen.getByRole("heading", { name: "bucket" })));
+});
+
+test("the stacks island distinguishes missing catalog declarations from missing CDK constructors", async () => {
+  await mount("island:stacks");
+  openSection("Island entries");
+  for (const name of ["FrontendWebsiteS3Stack", "DevLambdaReplayStack"]) {
+    const row = ui.screen.getByRole("button", { name }).closest("li")!;
+    assert.ok(ui.within(row).getByText("Ownership unresolved"), name);
+    assert.ok(ui.within(row).getByText("Not declared in the stack catalog"));
+    assert.equal(ui.within(row).queryByText("Not created in application.ts"), null);
+  }
+  for (const name of ["CognitoStack", "RdsStack", "ReferenceExampleStack"]) {
+    const row = ui.screen.getByRole("button", { name }).closest("li")!;
+    assert.equal(ui.within(row).queryByText("Not declared in the stack catalog"), null);
+    if (name === "ReferenceExampleStack") assert.ok(ui.within(row).getByText("Not created in application.ts"));
+  }
+});
+
+test("API routes show their target's environment pills, owner and owning config", async () => {
+  for (const kind of ["http", "service", "webSocket", "agent"] as const) {
+    const route = baseline.models.dev.routes.find((route) => route.kind === kind)!;
+    assert.ok(route, `the repository has a ${kind} route`);
+    await mount(route.id);
+    const header = ui.screen.getByRole("complementary", { name: "Inspector" }).querySelector("header")!;
+    // A route is part of its workload's declaration, so it carries that workload's owner.
+    const owned = baseline.models.dev.ownership?.[route.target]?.managedBy === "framework";
+    assert.equal(baseline.models.dev.ownership?.[route.id]?.from, route.target);
+    assert.equal(ui.within(header).queryAllByText("Framework managed").length, owned ? 1 : 0, route.id);
+    assert.ok(ui.within(header).getByText(route.origin));
+    const target = baseline.models.dev.targets.find((target) => target.ref === route.target)!;
+    const productionTarget = baseline.models.prod.targets.find((item) => item.ref === route.target)!;
+    assert.equal(headerPill("dev").getAttribute("data-enabled"), String(target.lanes.local || target.lanes.dev));
+    assert.equal(headerPill("prod").getAttribute("data-enabled"), String(productionTarget.lanes.prod));
+    if (target.lanes.local || target.lanes.dev) assert.match(environmentDescription("dev"), /Your machine|API Gateway|Amazon ECS|AgentCore/);
+    ui.fireEvent.change(deployControl(), { target: { value: "none" } });
+    assert.equal(environmentDescription("dev"), "Development · not enabled");
+    assert.equal(environmentDescription("prod"), "Production · not enabled");
+    await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); });
+    await waitDialog("Review 1 change");
+    assert.deepEqual(planCalls.at(-1), [{ kind: "deploy", target: target.ref, value: "none" }], "route and target share the same deployment declaration");
+    ui.cleanup();
+  }
+  await mount("island:apis");
+  openSection("Island entries");
+  for (const title of ["HTTP API", "WebSocket API"]) assert.ok(ui.screen.getByRole("button", { name: title }));
+});
+
+test("resource headers preserve ownership details and navigation without deployment sections", async () => {
+  const tool = baseline.models.dev.targets.find(target => target.role === "tool")!;
+  const local = baseline.models.dev.localServices?.[0]?.id;
+  for (const id of ["resource:cognito", "resource:cognito.userPool", "resource:openaiApiKey", "prop:vpc:application:endpoint:s3", "lambda:cognito-post-confirmation-trigger", tool.ref, ...(local ? [local] : [])]) {
+    persisted = id === local ? { ...baseline, models: { dev: { ...baseline.models.dev, managedDatabase: undefined }, prod: { ...baseline.models.prod, managedDatabase: undefined } } } : baseline;
+    await mount(id);
+    assert.equal(ui.screen.queryByRole("region", { name: "Deployment" }), null, id);
+    const description = document.querySelector("[data-slot=node-description]")!;
+    assert.equal(description.previousElementSibling?.tagName, "HEADER", id);
+    if (baseline.models.dev.tagging?.[id]) {
+      assert.ok(description.nextElementSibling?.matches("[data-slot=declaration-tags]"), id);
+    }
+    assert.ok(headerPill("dev"), id);
+    assert.ok(headerPill("prod"), id);
+    if (baseline.models.dev.targets.some(item => item.ref === id)) assert.equal(deployControl().hasAttribute("disabled"), false);
+    else assert.equal(ui.screen.queryByRole("combobox", { name: "Deploy" }), null);
+    assert.equal(applyCalls + planCalls.length, 0);
+    if (id === "resource:cognito.userPool") {
+      ui.fireEvent.click(headerPill("prod"));
+      const details = ui.screen.getByRole("dialog");
+      assert.match(details.textContent!, /created with its owning stack/);
+      ui.fireEvent.click(ui.within(details).getByRole("button", { name: "Configure CognitoStack" }));
+      await ui.waitFor(() => assert.equal(ui.screen.getByLabelText("Current selection").textContent, "resource:cognito"));
+      assert.equal(ui.screen.queryByRole("dialog"), null, "navigation closes the old details");
+    }
+    ui.cleanup();
+  }
+});
+
+test("route pills retain disabled environments and show AWS-only development placement", async () => {
+  const route = baseline.models.dev.routes.find((route) => route.kind === "webSocket")!;
+  for (const enabled of [true, false]) {
+    persisted = { ...baseline, models: { ...baseline.models, dev: { ...baseline.models.dev,
+      targets: baseline.models.dev.targets.map((target) => target.ref === route.target ? { ...target, lanes: { ...target.lanes, local: false, dev: enabled, prod: false } } : target),
+    }, prod: { ...baseline.models.prod, targets: baseline.models.prod.targets.map(target => target.ref === route.target ? { ...target, lanes: { ...target.lanes, prod: false } } : target) } } };
+    await mount(route.id);
+    assert.equal(environmentDescription("dev"), enabled ? "Development · API Gateway WebSocket API" : "Development · not enabled");
+    assert.equal(environmentDescription("prod"), "Production · not enabled");
+    assert.equal(ui.screen.queryByRole("button", { name: "Review Changes" }), null, "opening a managed route stages no edits");
+    ui.cleanup();
+  }
+});
+
+test("WebSocket cloud deployment choice previews production-only AWS execution", async () => {
+  const target = baseline.models.dev.targets.find((target) => target.role === "webSocket")!;
+  persisted = { ...baseline, models: {
+    dev: { ...baseline.models.dev, },
+    prod: { ...baseline.models.prod, },
+  } };
+  await mount(target.ref);
+  const control = deployControl();
+  assert.equal(ui.within(control).getByRole("option", { name: "Prod only" }).getAttribute("value"), "cloud-only");
+  ui.fireEvent.change(control, { target: { value: "cloud-only" } });
+  assert.equal(environmentDescription("dev"), "Development · not enabled");
+  assert.equal(environmentDescription("prod"), "Production · AWS Lambda · outside the VPC");
+  assert.equal(applyCalls + planCalls.length, 0);
+});
+
+test("event Lambda local replay switches stage true or property removal through the shared draft", async () => {
+  for (const [id, enabled] of [["cognito-custom-message", false], ["cognito-post-confirmation-trigger", true]] as const) {
+    await mount(`lambda:${id}`);
+    openSection("Settings");
+    const control = ui.screen.getByRole("switch", { name: "Local replay" });
+    assert.equal(control.getAttribute("aria-checked"), String(enabled));
+    assert.equal(ui.screen.queryByRole("switch", { name: "API user-pool authorizer" }), null);
+    const development = () => environmentDescription("dev").replace("Development · ", "");
+    const locations = hoverEnvironmentDescriptions(nodeHoverFacts({ entity: "target", id: `lambda:${id}` }, { dev: indexModel(baseline.models.dev), prod: indexModel(baseline.models.prod) }));
+    assert.equal(development(), locations.dev);
+    assert.equal(environmentDescription("prod"), `Production · ${locations.prod}`);
+    ui.fireEvent.click(control);
+    assert.equal(control.getAttribute("aria-checked"), String(!enabled));
+    assert.equal(development(), locations.dev, "the pill retains the map location while replay changes are staged");
+    assert.match(count(), /1 unsaved change/);
+    ui.fireEvent.click(control);
+    assert.equal(development(), locations.dev, "restoring replay retains the map location");
+    assert.equal(ui.screen.queryByRole("button", { name: "Review Changes" }), null);
+    ui.fireEvent.click(control);
+    await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); });
+    await waitDialog("Review 1 change");
+    assert.deepEqual(planCalls.at(-1), [{ kind: "field", intent: enabled
+      ? { target: `lambda:${id}`, field: "events.localReplay", inherit: true }
+      : { target: `lambda:${id}`, field: "events.localReplay", value: true } }]);
+    ui.cleanup();
+  }
+  await mount();
+  assert.equal(ui.screen.queryByRole("switch", { name: "Local replay" }), null);
+});
+
+test("a missing required value links from its connection straight to its open, focused row in CDK environment", async () => {
+  const resource = baseline.models.dev.resources.find((item) => item.kind === "input" && item.fromEnv)!;
+  const requirement = { resource: resource.id, name: resource.fromEnv!, mode: "dev" as const, file: "cdk-app/.env.dev", required: true, status: "missing" as const, reasons: ["Marked required in the resource declaration."] };
+  const fileResource = baseline.models.dev.resources.find((item) => item.id === "envfile:dev")!;
+  const entry = { name: resource.fromEnv!, status: "missing" as const, counterpart: "missing" as const, sensitive: false, defaulted: false, targets: [resource.id], requirements: [requirement] };
+  const edge = { id: "required-fixture", from: "envfile:dev", to: resource.id, relation: "supplies" as const, provenance: "source" as const, label: resource.fromEnv!, inputRequirement: requirement };
+  persisted = { ...baseline, models: { ...baseline.models, dev: { ...baseline.models.dev,
+    resources: baseline.models.dev.resources.map((item) => item.id === resource.id ? { ...item, required: true, default: undefined, inputRequirement: requirement } : item.id === fileResource.id ? { ...item, deploymentFile: { ...fileResource.deploymentFile!, exists: true, entries: [entry] } } : item), edges: [...baseline.models.dev.edges, edge] } } };
+  mock.method(apiModule.api, "inputDetails", async (mode: "dev" | "prod") => ({ file: `cdk-app/.env.${mode}`, hash: "fixture", entries: [] }));
+  await mount(edge.id);
+  assert.ok(ui.within(document.querySelector("[data-slot=connection-header]")! as HTMLElement).getByText("Required value missing"));
+  const member = [...document.querySelectorAll<HTMLDetailsElement>("[data-slot=connection-map-member]")]
+    .find(item => item.querySelector("[data-slot=connection-map-label]")?.textContent?.includes(resource.fromEnv!));
+  if (member && !member.open) ui.fireEvent.click(member.querySelector("summary")!);
+  ui.fireEvent.click((member ? ui.within(member) : ui.screen).getByRole("button", { name: "Edit .env.dev" }));
+  await ui.screen.findByRole("heading", { name: "CDK environment" });
+  const readiness = () => document.querySelector("[data-slot=environment-readiness-row][data-environment=dev]");
+  await ui.waitFor(() => assert.match(readiness()!.textContent, /1 required value missing/));
+  const row = document.querySelector<HTMLDetailsElement>(`[data-slot=environment-variable][data-variable="${resource.fromEnv}"]`)!;
+  assert.equal(row.open, true, "the link opens its variable");
+  assert.ok(row.querySelector("summary [data-environment=dev][data-attention]"), "its Dev pill asks for the value");
+  const field = await ui.screen.findByRole("textbox", { name: `Value for ${resource.fromEnv} in Development` }) as HTMLTextAreaElement;
+  await ui.waitFor(() => assert.equal(document.activeElement, field, "and focuses the environment that needs it"));
+  assert.equal(field.placeholder, "Required");
+  ui.fireEvent.change(field, { target: { value: "8080" } });
+  assert.equal(readiness(), null, "a staged value clears the resolved readiness warning");
+  assert.equal(row.querySelector("summary [data-environment=dev][data-attention]"), null);
+  ui.fireEvent.change(field, { target: { value: "" } });
+  assert.match(readiness()!.textContent, /1 required value missing/, "clearing a row without a line drops its edit");
+  assert.equal(planCalls.length + resourceCalls.length, 0, "guided editing does not force review");
+});
+
+test("a file's secrets arrive withheld: they count as set, reveal one at a time, and are never blanked unseen", async () => {
+  const secret = baseline.models.dev.resources.find((item) => item.kind === "secret" && item.fromEnv)!;
+  const reveals: string[] = [];
+  mock.method(apiModule.api, "inputDetails", async () => ({ file: "cdk-app/.env.dev", hash: "withheld", entries: [{ name: secret.fromEnv!, value: "", sensitive: true, hidden: true }] }));
+  mock.method(apiModule.api, "revealInput", async (_mode: "dev" | "prod", name: string) => { reveals.push(name); return { name, value: "revealed-sentinel" }; });
+  await mount("envfile:dev");
+  const label = `Value for ${secret.fromEnv} in Development`;
+  const field = await ui.screen.findByLabelText(label) as HTMLInputElement;
+  await ui.waitFor(() => assert.equal(field.disabled, false));
+  assert.equal(field.value, "");
+  assert.equal(field.placeholder, "Set · hidden");
+  ui.fireEvent.change(field, { target: { value: "x" } });
+  ui.fireEvent.change(field, { target: { value: "" } });
+  assert.ok(!ui.screen.queryByLabelText("Pending inspector changes"), "clearing an unrevealed secret keeps it instead of blanking it");
+  await ui.waitFor(() => assert.equal((ui.screen.getByLabelText(label) as HTMLInputElement).disabled, false));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: `Reveal ${secret.fromEnv} in Development` }));
+  await ui.waitFor(() => assert.equal((ui.screen.getByLabelText(label) as HTMLTextAreaElement).value, "revealed-sentinel"));
+  assert.deepEqual(reveals, [secret.fromEnv], "only the revealed variable is fetched");
+  assert.equal(planCalls.length + resourceCalls.length, 0);
+});
+
+test("new source remasks file secrets and cancels a late reveal while preserving a dirty value draft", async () => {
+  persisted = { ...baseline, models: { ...baseline.models, dev: { ...baseline.models.dev,
+    resources: baseline.models.dev.resources.map(resource => resource.deploymentFile?.mode === "dev" ? { ...resource, deploymentFile: { ...resource.deploymentFile, exists: true } } : resource) } } };
+  const reads: ("dev" | "prod")[] = [];
+  let client!: import("@tanstack/react-query").QueryClient;
+  let pendingSignal: AbortSignal | undefined;
+  let complete!: (value: { name: string; value: string }) => void;
+  const pending = new Promise<{ name: string; value: string }>(resolve => { complete = resolve; });
+  mock.method(apiModule.api, "inputDetails", async (mode: "dev" | "prod") => {
+    reads.push(mode);
+    return { file: `cdk-app/.env.${mode}`, hash: "before-external-edit", entries: [
+      { name: "REVIEW_SECRET", value: "", sensitive: true, hidden: true },
+      { name: "PENDING_SECRET", value: "", sensitive: true, hidden: true },
+      { name: "DRAFT_VALUE", value: "saved", sensitive: false },
+    ] };
+  });
+  mock.method(apiModule.api, "revealInput", async (_mode: "dev" | "prod", name: string, signal?: AbortSignal) => {
+    if (name === "REVIEW_SECRET") return { name, value: "previously-revealed-private-sentinel" };
+    pendingSignal = signal;
+    return pending;
+  });
+  await mount("envfile:dev", "dev", value => { client = value; });
+  const value = (name: string) => ui.screen.getByLabelText(`Value for ${name} in Development`) as HTMLTextAreaElement;
+  await ui.screen.findByLabelText("Value for DRAFT_VALUE in Development");
+  await ui.waitFor(() => assert.equal(value("DRAFT_VALUE").disabled, false));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Reveal REVIEW_SECRET in Development" }));
+  await ui.waitFor(() => assert.equal(value("REVIEW_SECRET").value, "previously-revealed-private-sentinel"));
+  ui.fireEvent.change(value("DRAFT_VALUE"), { target: { value: "preserved draft" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Reveal PENDING_SECRET in Development" }));
+  assert.ok(pendingSignal);
+  persisted = { ...persisted, revision: "external-input-file-edit" };
+  await ui.act(async () => { client.setQueryData(["snapshot"], response()); });
+  await ui.waitFor(() => assert.equal(pendingSignal!.aborted, true));
+  await ui.act(async () => { complete({ name: "PENDING_SECRET", value: "late-private-sentinel" }); await pending; });
+  for (const name of ["REVIEW_SECRET", "PENDING_SECRET"]) {
+    const field = value(name) as unknown as HTMLInputElement;
+    assert.equal(field.type, "password");
+    assert.equal(field.value, "");
+    assert.equal(field.disabled, true);
+  }
+  assert.equal(value("DRAFT_VALUE").value, "preserved draft");
+  assert.match(count(), /1 unsaved/);
+  assert.equal(reads.filter(mode => mode === "dev").length, 1, "a source conflict preserves the file's existing details and draft");
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("local values edit inline, revert, review privately and reload after apply without reading the whole file", async () => {
+  const resource = baseline.models.dev.resources.find((item) => item.kind === "input" && item.fromEnv && !item.values)!;
+  let stored = "";
+  const inputPlans: { mode: string; edits: unknown; hash: string }[] = [];
+  mock.method(apiModule.api, "resourceDetails", async () => ({ file: "cdk-app/.env.dev", inputFile: { exists: true, hash: "selected-hash" }, configured: true, value: stored }));
+  mock.method(apiModule.api, "inputDetails", async () => { throw new Error("Inline editing must read only the selected variable."); });
+  mock.method(apiModule.api, "inputPlan", async (files: readonly DeploymentInputFileEdits[]) => {
+    inputPlans.push(...files.map(({ mode, edits, hash }) => ({ mode, edits, hash })));
+    return { planId: "local-value", ok: true, summaries: [`Update ${resource.fromEnv}`], changes: [{ file: "cdk-app/.env.dev", diff: { unified: "redacted", lines: [{ kind: "add" as const, newLine: 1, text: `${resource.fromEnv}=<updated value hidden>` }] } }] };
+  });
+  mock.method(apiModule.api, "inputApply", async () => {
+    stored = "local-value-test";
+    persisted = { ...baseline, revision: "local-value-saved" };
+    return { status: "applied" as const, message: "Local value saved.", revision: persisted.revision };
+  });
+  await mount(resource.id);
+  const field = await ui.screen.findByLabelText(`Value for ${resource.fromEnv}`) as HTMLTextAreaElement;
+  await ui.waitFor(() => assert.equal(field.disabled, false));
+  assert.equal(field.value, "");
+  ui.fireEvent.change(field, { target: { value: "local-value-test" } });
+  assert.equal(ui.screen.getByLabelText("Current selection").textContent, resource.id);
+  assert.match(count(), /1 unsaved change/);
+  assert.ok(ui.screen.getByRole("switch", { name: "Secret" }).matches(":disabled"));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Revert value" }));
+  assert.equal(field.value, "");
+  assert.ok(!ui.screen.queryByLabelText("Pending inspector changes"));
+  ui.fireEvent.change(field, { target: { value: "local-value-test" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(inputPlans, [{ mode: "dev", hash: "selected-hash", edits: [{ name: resource.fromEnv, value: "local-value-test" }] }]);
+  assert.ok(!document.querySelector("dialog")!.textContent!.includes("local-value-test"));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Apply All" }));
+  await ui.waitFor(() => assert.ok(!ui.screen.queryByLabelText("Pending inspector changes")));
+  await ui.waitFor(() => assert.equal((ui.screen.getByLabelText(`Value for ${resource.fromEnv}`) as HTMLTextAreaElement).value, "local-value-test"));
+  assert.equal(planCalls.length + resourceCalls.length, 0);
+});
+
+test("blank local values show the effective default and constrained values offer a direct choice", async () => {
+  const resource = baseline.models.dev.resources.find((item) => item.kind === "input" && item.fromEnv)!;
+  persisted = { ...baseline, models: { ...baseline.models, dev: { ...baseline.models.dev, resources: baseline.models.dev.resources.map((item) => item.id === resource.id ? { ...item, default: "bedrock", values: ["bedrock", "openai"], inputRequirement: undefined } : item) } } };
+  mock.method(apiModule.api, "resourceDetails", async () => ({ file: "cdk-app/.env.dev", inputFile: { exists: true, hash: "enum-hash" }, configured: false }));
+  await mount(resource.id);
+  const field = await ui.screen.findByRole("combobox", { name: `Value for ${resource.fromEnv}` });
+  const local = ui.screen.getByRole("region", { name: "Local value" });
+  assert.ok(ui.within(local).getByText("Using default"));
+  assert.equal((field as HTMLSelectElement).selectedOptions[0]?.textContent, "Use default · bedrock");
+  assert.ok(!local.textContent?.includes("Default: bedrock"), "the empty select already states the default it uses");
+  ui.fireEvent.change(field, { target: { value: "openai" } });
+  assert.match(count(), /1 unsaved change/);
+  assert.ok(local.textContent?.includes("Default: bedrock"), "a chosen value keeps the default it replaces in view");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Use default" }));
+  assert.equal((field as HTMLSelectElement).value, "");
+  assert.ok(!ui.screen.queryByLabelText("Pending inspector changes"));
+  ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Required in development" }));
+  assert.equal((field as HTMLSelectElement).disabled, true, "configuration and local file values review separately");
+});
+
+test("inline secrets stay masked and local value read errors can be retried", async () => {
+  const resource = baseline.models.dev.resources.find((item) => item.kind === "secret")!;
+  let reads = 0;
+  mock.method(apiModule.api, "resourceDetails", async () => {
+    if (++reads === 1) throw new Error("Could not read the local file.");
+    return { file: "cdk-app/.env.dev", inputFile: { exists: true, hash: "secret-hash" }, configured: true, value: "private-selected-sentinel" };
+  });
+  await mount(resource.id);
+  await ui.screen.findByText("Could not read the local file.");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Retry value read" }));
+  const field = await ui.screen.findByLabelText(`Value for ${resource.fromEnv}`) as HTMLInputElement;
+  assert.equal(field.type, "password");
+  assert.ok(!document.querySelector("[data-slot=local-input]")!.textContent!.includes("private-selected-sentinel"));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: `Reveal ${resource.fromEnv}` }));
+  assert.equal((ui.screen.getByLabelText(`Value for ${resource.fromEnv}`) as HTMLTextAreaElement).value, "private-selected-sentinel");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: `Hide ${resource.fromEnv}` }));
+  assert.equal((ui.screen.getByLabelText(`Value for ${resource.fromEnv}`) as HTMLInputElement).type, "password");
+  assert.equal(planCalls.length + resourceCalls.length, 0);
+});
+
+test("a missing environment file offers setup rather than an unusable value editor", async () => {
+  const resource = baseline.models.dev.resources.find((item) => item.kind === "input" && item.fromEnv)!;
+  mock.method(apiModule.api, "resourceDetails", async () => ({ file: "cdk-app/.env.dev", inputFile: { exists: false, hash: "missing" }, configured: false }));
+  await mount(resource.id);
+  await ui.screen.findByRole("button", { name: "Set up .env.dev" });
+  assert.ok(!ui.screen.queryByLabelText(`Value for ${resource.fromEnv}`));
+  assert.equal(planCalls.length + resourceCalls.length, 0);
+});
+
+test("per-environment input settings participate in the unified resource draft", async () => {
+  const resource = baseline.models.dev.resources.find((item) => item.kind === "input" && item.fromEnv && !item.absent && item.default !== undefined && item.modes?.dev.present && item.modes.prod.present && !item.modes.prod.required)!;
+  await mount(resource.id);
+  ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Required in production" }));
+  assert.equal(resourceCalls.length, 0);
+  assert.match(count(), /1 unsaved change/);
+  ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Available in development" }));
+  assert.ok(ui.screen.getByRole("checkbox", { name: "Required in development" }).matches(":disabled"), "an environment without the input has nothing to require");
+  assert.match(count(), /3 unsaved changes/, "leaving development also drops its default");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await ui.waitFor(() => assert.equal(resourceCalls.length, 1));
+  const { modes } = resourceCalls[0] as { modes: Record<"dev" | "prod", { present: boolean; required: boolean; default: string | null }> };
+  assert.deepEqual([modes.dev.present, modes.dev.required, modes.dev.default], [false, false, null], "a graph without the input keeps nothing for it");
+  assert.deepEqual([modes.prod.present, modes.prod.required], [true, true]);
+});
+
+// Keep source-value editor coverage independent of the application's environment-linked flag.
+function useStandaloneFlagFixture() {
+  const graph = (mode: "dev" | "prod") => ({ ...baseline.models[mode], resources: baseline.models[mode].resources.map(resource => {
+    if (resource.id !== "resource:enableWebSocketApi") return resource;
+    const { fromEnv: _env, default: _default, inputSources: _sources, inputRequirement: _requirement, ...plain } = resource;
+    return { ...plain, authoredValue: "true", required: false, modes: { dev: { present: true, required: false, value: "true" }, prod: { present: true, required: false, value: "true" } } };
+  }) });
+  persisted = { ...baseline, models: { dev: graph("dev"), prod: graph("prod") } };
+}
+
+test("source parameters edit values without reading or presenting an environment file", async () => {
+  useStandaloneFlagFixture();
+  let reads = 0;
+  mock.method(apiModule.api, "resourceDetails", async () => { reads++; return { configured: false }; });
+  await mount("resource:enableWebSocketApi");
+  assert.equal(reads, 0);
+  assert.equal(ui.screen.getByRole("switch", { name: "Link to .env file" }).getAttribute("aria-checked"), "false");
+  assert.equal(ui.screen.queryByRole("region", { name: "Local value" }), null);
+  assert.equal(ui.screen.queryByRole("combobox", { name: "Default in development" }), null);
+  assert.equal((ui.screen.getByRole("combobox", { name: "Value in development" }) as HTMLSelectElement).value, "true");
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Value in development" }), { target: { value: "false" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await ui.waitFor(() => assert.equal(resourceCalls.length, 1));
+  const intent = resourceCalls[0] as ResourceIntent;
+  assert.equal(intent.fromEnv, null);
+  assert.deepEqual(intent.modes.dev, { present: true, required: false, default: null, value: "false" });
+  assert.equal(intent.modes.prod.value, "true");
+  assert.equal(applyCalls, 0);
+});
+
+test("source linking switches values to optional defaults and back without losing edits", async () => {
+  useStandaloneFlagFixture();
+  await mount("resource:enableWebSocketApi");
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Link to .env file" }));
+  assert.equal((ui.screen.getByRole("textbox", { name: "Environment variable" }) as HTMLInputElement).value, "ENABLE_WEB_SOCKET_API");
+  assert.equal((ui.screen.getByRole("combobox", { name: "Default in development" }) as HTMLSelectElement).value, "true");
+  assert.equal(ui.screen.queryByRole("combobox", { name: "Value in development" }), null);
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Environment variable" }), { target: { value: "CUSTOM_WEB_SOCKET_API" } });
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Default in development" }), { target: { value: "false" } });
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Link to .env file" }));
+  assert.equal((ui.screen.getByRole("combobox", { name: "Value in development" }) as HTMLSelectElement).value, "false");
+  assert.equal(ui.screen.queryByRole("textbox", { name: "Environment variable" }), null);
+  assert.equal(ui.screen.queryByRole("region", { name: "Local value" }), null);
+  assert.match(count(), /1 unsaved change/);
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Link to .env file" }));
+  assert.equal((ui.screen.getByRole("textbox", { name: "Environment variable" }) as HTMLInputElement).value, "CUSTOM_WEB_SOCKET_API");
+  assert.equal((ui.screen.getByRole("combobox", { name: "Default in development" }) as HTMLSelectElement).value, "false");
+});
+
+test("unlinking a parameter carries its declared default rather than copying private local values", async () => {
+  mock.method(apiModule.api, "resourceDetails", async () => ({ file: "cdk-app/.env.dev", inputFile: { exists: true, hash: "fixture" }, configured: true, value: "private-local-value" }));
+  await mount("resource:langgraph.modelProvider");
+  await ui.screen.findByRole("combobox", { name: "Value for LANGGRAPH_MODEL_PROVIDER" });
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Link to .env file" }));
+  assert.equal((ui.screen.getByRole("combobox", { name: "Value in development" }) as HTMLSelectElement).value, "bedrock-mantle");
+  assert.ok(!document.querySelector('[data-slot="resource-editor"]')!.textContent!.includes("private-local-value"));
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Link to .env file" }));
+  assert.equal((ui.screen.getByRole("combobox", { name: "Default in development" }) as HTMLSelectElement).value, "bedrock-mantle");
+  assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null);
+});
+
+test("input creation toggles between a value and optional default through the same reviewed draft", async () => {
+  await mount("island:inputs");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Create input parameter or secret" }));
+  await waitDialog("Create input parameter or secret");
+  const wizard = ui.within(ui.screen.getByRole("dialog", { name: "Create input parameter or secret" }));
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Stable identifier" }), { target: { value: "sourceFlag" } });
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Default value (optional)" }), { target: { value: "enabled" } });
+  ui.fireEvent.click(wizard.getByRole("switch", { name: "Link to .env file" }));
+  assert.equal(wizard.queryByRole("textbox", { name: "Environment variable" }), null);
+  assert.equal(wizard.queryByRole("textbox", { name: "Default value (optional)" }), null);
+  assert.equal((wizard.getByRole("textbox", { name: "Value" }) as HTMLInputElement).value, "enabled");
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Value" }), { target: { value: "disabled" } });
+  ui.fireEvent.click(wizard.getByRole("switch", { name: "Link to .env file" }));
+  assert.equal((wizard.getByRole("textbox", { name: "Default value (optional)" }) as HTMLInputElement).value, "disabled");
+  ui.fireEvent.click(wizard.getByRole("switch", { name: "Link to .env file" }));
+  ui.fireEvent.click(wizard.getByRole("button", { name: "Review generated changes" }));
+  await waitDialog("Review 1 change");
+  const edit = planCalls[0]![0]!;
+  assert.ok(edit.kind === "create" && edit.request.kind === "input");
+  assert.equal(edit.request.linkedToEnv, false);
+  assert.equal(edit.request.value, "disabled");
+  assert.equal(edit.request.defaultValue, "");
+  assert.equal(edit.request.envName, "");
+  assert.equal(applyCalls, 0);
+});
+
+test("actual switches stage immediately, five controls share one review, and Apply All commits once", async () => {
+  await mount();
+  openSection("Settings");
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "API user-pool authorizer" }));
+  assert.ok(document.querySelector("dialog[open]") === null); assert.equal(planCalls.length, 0);
+  changeMemory(); ui.fireEvent.change(ui.screen.getByRole("spinbutton", { name: "Timeout in s" }), { target: { value: "25" } });
+  openSection("Build and runtime");
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Architecture" }), { target: { value: "x86_64" } });
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Log retention" }), { target: { value: "14" } });
+  assert.match(count(), /5 unsaved changes/); assert.equal(planCalls.length, 0);
+  await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); });
+  await waitDialog("Review 5 changes"); assert.equal(planCalls[0].length, 5);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal((memory() as HTMLInputElement).value, "768"); assert.match(count(), /5 unsaved changes/);
+  await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); });
+  await waitDialog("Review 5 changes"); ui.fireEvent.click(ui.screen.getByRole("button", { name: "Apply All" }));
+  await ui.waitFor(() => assert.ok(ui.screen.queryByLabelText("Pending inspector changes") === null));
+  assert.equal(applyCalls, 1); assert.equal((memory() as HTMLInputElement).value, "768");
+});
+
+test("actual router node selection is guarded; Keep Editing and Discard and Continue work", async () => {
+  await mount(); changeMemory(); ui.fireEvent.click(ui.screen.getByRole("button", { name: "Open node B" }));
+  await waitDialog("Unsaved changes");
+  assert.equal(ui.screen.getByLabelText("Current selection").textContent, target);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Keep Editing" }));
+  await ui.waitFor(() => assert.ok(document.querySelector("dialog[open]") === null)); assert.equal((memory() as HTMLInputElement).value, "768");
+  assert.equal(planCalls.length, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Open node B" })); await waitDialog("Unsaved changes");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard and Continue" }));
+  await ui.waitFor(() => assert.equal(ui.screen.getByLabelText("Current selection").textContent, "lambda:sign-in"));
+  assert.ok(ui.screen.queryByLabelText("Pending inspector changes") === null);
+});
+
+test("closing, changing views and island selection all use the same navigation warning", async () => {
+  const app = await mount(); changeMemory();
+  for (const name of ["Close the inspector", "Open island", "Other view"]) {
+    ui.fireEvent.click(ui.screen.getByRole(name === "Other view" ? "link" : "button", { name }));
+    await waitDialog("Unsaved changes");
+    assert.equal(ui.screen.getByLabelText("Current selection").textContent, target);
+    ui.fireEvent.click(ui.screen.getByRole("button", { name: "Keep Editing" }));
+    await ui.waitFor(() => assert.ok(document.querySelector("dialog[open]") === null));
+  }
+  assert.equal(app.state.location.pathname, "/"); assert.equal((memory() as HTMLInputElement).value, "768");
+});
+
+test("Review Changes from the navigation warning opens immediately while validation is pending", async () => {
+  let finish!: () => void;
+  reviewGate = new Promise<void>((resolve) => { finish = resolve; });
+  await mount(); changeMemory(); ui.fireEvent.change(ui.screen.getByRole("spinbutton", { name: "Timeout in s" }), { target: { value: "25" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Open island" })); await waitDialog("Unsaved changes");
+  ui.fireEvent.click(ui.within(document.querySelector("dialog[open]")! as HTMLElement).getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 2 changes"); assert.equal(planCalls[0].length, 2);
+  assert.equal(document.querySelectorAll("dialog[open]").length, 1);
+  assert.match(document.querySelector("dialog[open]")!.textContent!, /Checking all changes/);
+  assert.ok((ui.screen.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled);
+  await ui.act(async () => finish());
+  assert.ok(ui.screen.getByLabelText("Changes to framework-config/settings.ts"));
+  assert.equal(ui.screen.getByLabelText("Current selection").textContent, target);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" })); assert.equal((memory() as HTMLInputElement).value, "768");
+});
+
+test("an input or secret lists its consumers only under Connections, and each workload edits its own requirements", async () => {
+  const condition = baseline.models.dev.resources.find(resource => resource.kind === "input" && !resource.absent && !resource.frameworkInput)!;
+  const secret = baseline.models.dev.resources.find(resource => resource.kind === "secret" && !resource.frameworkInput && baseline.models.dev.targets.some(target => target.environment.some(entry => entry.value.kind === "reference" && entry.value.resource === resource.id)))!;
+  const consumer = baseline.models.dev.targets.find(target => target.environment.some(entry => entry.value.kind === "reference" && entry.value.resource === secret.id))!;
+  assert.ok(condition && secret && consumer);
+  const rules = [{ when: { resource: condition.id, equals: condition.values?.[0] ?? "enabled" }, require: [secret.id] }];
+  const modes = { dev: { present: true, required: false }, prod: { present: true, required: false } };
+  const graph = (mode: "dev" | "prod") => ({ ...baseline.models[mode],
+    resources: baseline.models[mode].resources.map(resource => resource.id === secret.id ? { ...resource, required: false, modes } : resource),
+    targets: baseline.models[mode].targets.map(target => target.ref === consumer.ref ? { ...target, requirementRules: rules, authoredRequirementRules: rules } : target),
+  });
+  persisted = { ...baseline, models: { dev: graph("dev"), prod: graph("prod") } };
+  for (const id of [secret.id]) {
+    await mount(id);
+    for (const name of ["Connected workloads", "Workload access"]) assert.equal(ui.screen.queryByRole("region", { name }), null, `${id}: ${name}`);
+    for (const name of ["Connect workload", "Grant access"]) assert.equal(ui.screen.queryByRole("button", { name }), null, `${id}: ${name}`);
+    assert.equal(ui.screen.queryByText("Workload requirements"), null);
+    openSection("Connections");
+    const connections = [...document.querySelectorAll<HTMLElement>("[data-inspector-disclosure]")].find(section => section.querySelector("summary span")?.textContent === "Connections")!.textContent!;
+    assert.ok(connections.includes(consumer.title), connections);
+    ui.cleanup();
+  }
+  await mount(consumer.ref);
+  openSection("Configuration and inputs");
+  const controls = document.querySelector<HTMLDetailsElement>(`[data-slot="input-requirement-controls"][data-resource="${secret.id}"]`)!;
+  assert.ok(controls, "requirement controls belong beside the configured input");
+  ui.fireEvent.click(controls.querySelector("summary")!);
+  const required = ui.within(controls).getByRole("group", { name: `${secret.path.join(".")} requirements` });
+  const select = ui.within(required).getByRole("combobox", { name: `${secret.path.join(".")} requirement in Development` }) as HTMLSelectElement;
+  const prod = ui.within(required).getByRole("combobox", { name: `${secret.path.join(".")} requirement in Production` }) as HTMLSelectElement;
+  assert.equal(select.value, "conditional");
+  assert.equal(prod.value, "conditional");
+  assert.match(required.textContent!, /When .+ equals ".+"\./);
+  ui.fireEvent.change(select, { target: { value: "required" } });
+  assert.equal(prod.value, "conditional", "editing development preserves production");
+  ui.fireEvent.change(prod, { target: { value: "optional" } });
+  assert.equal(select.value, "required", "editing production preserves the staged development change");
+  ui.fireEvent.change(prod, { target: { value: "conditional" } });
+  assert.ok(ui.screen.getByLabelText("Pending inspector changes"));
+  ui.fireEvent.change(select, { target: { value: "conditional" } });
+  assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null, "returning to the declared rule leaves nothing staged");
+  ui.fireEvent.change(select, { target: { value: "required" } });
+  await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); }); await waitDialog("Review 1 change");
+  assert.deepEqual((resourceCalls[0] as ResourceIntent).requirements, { [consumer.ref]: { dev: "required" } });
+  assert.equal(applyCalls, 0);
+});
+
+test("input declaration requirements are inherited independently in each workload environment", async () => {
+  const secret = baseline.models.dev.resources.find(resource => resource.kind === "secret" && !resource.frameworkInput && baseline.models.dev.targets.some(target => target.environment.some(entry => entry.value.kind === "reference" && entry.value.resource === resource.id)))!;
+  const consumer = baseline.models.dev.targets.find(target => target.environment.some(entry => entry.value.kind === "reference" && entry.value.resource === secret.id))!;
+  const modes = { dev: { present: true, required: false }, prod: { present: true, required: true } };
+  const graph = (mode: "dev" | "prod") => ({ ...baseline.models[mode],
+    resources: baseline.models[mode].resources.map(resource => resource.id === secret.id ? { ...resource, required: mode === "prod", modes } : resource),
+    targets: baseline.models[mode].targets.map(target => target.ref === consumer.ref ? { ...target, requirementRules: [], authoredRequirementRules: [] } : target),
+  });
+  persisted = { ...baseline, models: { dev: graph("dev"), prod: graph("prod") } };
+  await mount(consumer.ref);
+  openSection("Configuration and inputs");
+  const controls = document.querySelector<HTMLDetailsElement>(`[data-slot="input-requirement-controls"][data-resource="${secret.id}"]`)!;
+  ui.fireEvent.click(controls.querySelector("summary")!);
+  const dev = ui.within(controls).getByRole("combobox", { name: `${secret.path.join(".")} requirement in Development` }) as HTMLSelectElement;
+  const prod = ui.within(controls).getByRole("combobox", { name: `${secret.path.join(".")} requirement in Production` }) as HTMLSelectElement;
+  assert.equal(dev.disabled, false);
+  assert.equal(dev.value, "optional");
+  assert.equal(prod.disabled, true);
+  assert.equal(prod.value, "required");
+  assert.match(prod.selectedOptions[0]!.textContent!, /Required by input/);
+});
+
+test("resource review also opens immediately from the warning before TypeScript validation finishes", async () => {
+  let finish!: () => void;
+  reviewGate = new Promise<void>((resolve) => { finish = resolve; });
+  const resource = baseline.models.dev.resources.find((resource) => resource.kind === "input" && !resource.absent)!;
+  await mount(resource.id);
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Resource group" }), { target: { value: "draftGroup" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Close the inspector" })); await waitDialog("Unsaved changes");
+  ui.fireEvent.click(ui.within(document.querySelector("dialog[open]")! as HTMLElement).getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.match(document.querySelector("dialog[open]")!.textContent!, /Checking all changes/);
+  assert.equal(resourceCalls.length, 1);
+  await ui.act(async () => finish());
+  assert.ok(ui.screen.getByLabelText("Changes to framework-config/inputs/index.ts"));
+  assert.equal((ui.screen.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled, false);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal((ui.screen.getByRole("combobox", { name: "Resource group" }) as HTMLInputElement).value, "draftGroup");
+});
+
+test("review errors stay in the review dialog and can be retried without losing the draft", async () => {
+  failReview = true;
+  await mount(); changeMemory();
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Open node B" })); await waitDialog("Unsaved changes");
+  await ui.act(async () => { ui.fireEvent.click(ui.within(document.querySelector("dialog[open]")! as HTMLElement).getByRole("button", { name: "Review Changes" })); });
+  await waitDialog("Review 1 change");
+  assert.match(document.querySelector("dialog[open]")!.textContent!, /Could not validate changes/);
+  assert.ok((ui.screen.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled);
+  failReview = false;
+  await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Retry Review" })); });
+  assert.ok(ui.screen.getByLabelText("Changes to framework-config/settings.ts"));
+  assert.equal(planCalls.length, 2);
+  assert.equal((memory() as HTMLInputElement).value, "768");
+});
+
+const reviewComment = {
+  id: "migration-comment", file: "framework-config/workloads/http.ts", line: 12, column: 3,
+  text: "// Keep additional capacity during the migration.", resolution: "keep" as const,
+  vscodeUrl: "vscode://file/workspace/framework-config/workloads/http.ts:12:3",
+};
+
+test("comment review shows the diff, keeps comments by default and reviews an explicit removal", async () => {
+  const plan = apiModule.api.planBatch;
+  const choices: (CommentReviewOptions | undefined)[] = [];
+  let release!: () => void;
+  mock.method(apiModule.api, "planBatch", async (edits: readonly DraftEdit[], revision: string, options?: CommentReviewOptions): Promise<BatchPlanResponse> => {
+    choices.push(options);
+    const response = await plan(edits, revision, options);
+    if (choices.length === 2) await new Promise<void>(resolve => { release = resolve; });
+    return { ...response, comments: [{ ...reviewComment, resolution: options?.comments?.[reviewComment.id] ?? "keep" }] };
+  });
+  await mount(); changeMemory();
+  await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); });
+  const dialog = ui.within(ui.screen.getByRole("dialog", { name: "Review 1 change" }));
+  assert.ok(dialog.getByLabelText("Changes to framework-config/settings.ts"));
+  assert.ok(dialog.getByText(reviewComment.text));
+  const link = dialog.getByRole("link", { name: /Open in VS Code/i });
+  assert.equal(link.getAttribute("href"), reviewComment.vscodeUrl);
+  const toggle = dialog.getByRole("checkbox", { name: /Remove this comment/i }) as HTMLInputElement;
+  assert.equal(toggle.checked, false);
+  assert.equal((dialog.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled, false);
+  ui.fireEvent.click(toggle);
+  await ui.waitFor(() => assert.equal(choices.length, 2));
+  assert.equal((dialog.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled, true);
+  assert.deepEqual(choices[1]?.comments, { [reviewComment.id]: "remove" });
+  assert.equal(applyCalls, 0);
+  await ui.act(async () => release());
+  assert.equal((dialog.getByRole("checkbox", { name: /Remove this comment/i }) as HTMLInputElement).checked, true);
+  assert.equal((dialog.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled, false);
+  ui.fireEvent.click(dialog.getByRole("button", { name: "Back to Editing" }));
+  assert.equal((memory() as HTMLInputElement).value, "768");
+});
+
+test("manual comment resolution links to source and retries against the saved file without losing input", async () => {
+  const plan = apiModule.api.planBatch;
+  const revisions: string[] = [];
+  let resolved = false;
+  mock.method(apiModule.api, "planBatch", async (edits: readonly DraftEdit[], revision: string, options?: CommentReviewOptions): Promise<BatchPlanResponse> => {
+    revisions.push(revision);
+    const response = await plan(edits, revision, options);
+    return resolved ? response : { ...response, ok: false, comments: [{ ...reviewComment, text: "// @ts-expect-error migration compatibility", manualReason: "This compiler directive needs an editor decision." }] };
+  });
+  mock.method(apiModule.api, "refreshSource", async () => ({ revision: persisted.revision }));
+  await mount(); changeMemory();
+  await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); });
+  const dialog = ui.within(ui.screen.getByRole("dialog", { name: "Review 1 change" }));
+  assert.ok(dialog.getByLabelText("Changes to framework-config/settings.ts"));
+  assert.ok(dialog.getByText("This compiler directive needs an editor decision."));
+  assert.equal(dialog.getByRole("link", { name: /Open in VS Code/i }).getAttribute("href"), reviewComment.vscodeUrl);
+  assert.equal((dialog.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled, true);
+  const toggle = dialog.queryByRole("checkbox", { name: /Remove this comment/i }) as HTMLInputElement | null;
+  assert.ok(toggle === null || toggle.disabled, "compiler directives stay an explicit editor task");
+  persisted = { ...baseline, revision: "editor-saved" }; resolved = true;
+  await ui.act(async () => { ui.fireEvent.click(dialog.getByRole("button", { name: /Refresh source and retry/i })); });
+  assert.deepEqual(revisions, [baseline.revision, "editor-saved"]);
+  assert.equal((dialog.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled, false);
+  assert.equal((memory() as HTMLInputElement).value, "768");
+  assert.equal(applyCalls, 0);
+});
+
+test("invalid values are inline, failed applies preserve drafts, and beforeunload only protects dirty sessions", async () => {
+  await mount();
+  const exit = () => { const event = new dom.window.Event("beforeunload", { cancelable: true }); dom.window.dispatchEvent(event); return event.defaultPrevented; };
+  assert.equal(exit(), false);
+  ui.fireEvent.change(memory(), { target: { value: "1" } }); assert.equal(memory().getAttribute("aria-invalid"), "true");
+  assert.ok((ui.screen.getByRole("button", { name: "Review Changes" }) as HTMLButtonElement).disabled);
+  changeMemory(); assert.equal(exit(), true); failApply = true;
+  await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); }); await waitDialog("Review 1 change");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Apply All" }));
+  await ui.waitFor(() => assert.ok(document.querySelector("dialog[open]") === null));
+  assert.equal((memory() as HTMLInputElement).value, "768"); assert.match(count(), /1 unsaved change/); assert.match(count(), /Source changed/);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard" })); assert.equal(exit(), false);
+});
+
+test("resource controls and island service groups participate in the same shared session", async () => {
+  const resource = baseline.models.dev.resources.find((resource) => resource.kind === "input" && !resource.absent)!;
+  await mount(resource.id);
+  await ui.waitFor(() => assert.ok(ui.screen.queryByText("Reading the inputs file…") === null));
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Resource group" }), { target: { value: "draftGroup" } });
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Secret" }));
+  assert.equal(resourceCalls.length, 0); assert.ok(ui.screen.getByLabelText("Pending inspector changes"));
+  await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); }); await ui.screen.findByRole("button", { name: "Apply All" }); assert.equal(resourceCalls.length, 1);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard All" })); ui.cleanup();
+  await mount("island:lambda");
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Minify" }));
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Default service type" }), { target: { value: "defaults:webSocket" } });
+  ui.fireEvent.change(ui.screen.getByRole("spinbutton", { name: "Timeout in s" }), { target: { value: "5" } });
+  assert.match(count(), /2 unsaved changes/);
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Default service type" }), { target: { value: "defaults:lambda" } });
+  assert.equal(ui.screen.getByRole("switch", { name: "Minify" }).getAttribute("aria-checked"), "false");
+  await ui.act(async () => { ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); }); await waitDialog("Review 2 changes"); assert.equal(planCalls.at(-1)!.length, 2);
+});
+
+
+test("the creation chooser enters the guarded wizard; review/back retains form and cancel writes nothing", async () => {
+  await mount();
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add to application" }));
+  const menu = ui.screen.getByRole("dialog", { name: "Add to application" });
+  for (const label of ["Function", "Stack", "VPC", "Workflow", "Container service", "Container task", "API", "Agent", "Input parameter or secret"]) assert.equal((ui.within(menu).getByRole("button", { name: label }) as HTMLButtonElement).disabled, false);
+  assert.equal(ui.within(menu).queryByRole("button", { name: "Secret" }), null, "one shared creator covers both catalog input kinds");
+  ui.fireEvent.click(ui.within(menu).getByRole("button", { name: "Input parameter or secret" }));
+  await waitDialog("Create input parameter or secret");
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Stable identifier" }), { target: { value: "reviewedInput" } });
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Environment variable" }), { target: { value: "REVIEWED_INPUT" } });
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Default value (optional)" }), { target: { value: "kept" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review generated changes" }));
+  await waitDialog("Review 1 change");
+  await ui.waitFor(() => assert.equal(planCalls.length, 1));
+  assert.equal(planCalls[0]![0]!.kind, "create");
+  assert.equal(applyCalls, 0, "review is not approval to write");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  await waitDialog("Create input parameter or secret");
+  assert.equal((ui.screen.getByRole("textbox", { name: "Default value (optional)" }) as HTMLInputElement).value, "kept");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to resource types" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Input parameter or secret" }));
+  await waitDialog("Create input parameter or secret");
+  assert.equal((ui.screen.getByRole("textbox", { name: "Stable identifier" }) as HTMLInputElement).value, "reviewedInput");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Cancel creation" }));
+  assert.equal(applyCalls, 0);
+  assert.ok(!document.querySelector("[data-slot=creation-wizard]"));
+});
+
+test("input and secret creation share a switch and preserve compatible settings through review", async () => {
+  await mount("island:inputs");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Create input parameter or secret" }));
+  await waitDialog("Create input parameter or secret");
+  const wizard = ui.within(ui.screen.getByRole("dialog", { name: "Create input parameter or secret" }));
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Stable identifier" }), { target: { value: "sharedInput" } });
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Default value (optional)" }), { target: { value: "enabled" } });
+  ui.fireEvent.click(wizard.getByRole("switch", { name: "Secret" }));
+  assert.equal(wizard.getByRole("switch", { name: "Secret" }).getAttribute("aria-checked"), "true");
+  assert.equal(wizard.queryByRole("textbox", { name: "Default value (optional)" }), null);
+  assert.equal(wizard.queryByLabelText(/secret value/i), null, "creation never authors a secret value");
+  assert.equal((wizard.getByRole("textbox", { name: "Stable identifier" }) as HTMLInputElement).value, "sharedInput");
+  ui.fireEvent.click(wizard.getByRole("switch", { name: "Secret" }));
+  assert.equal((wizard.getByRole("textbox", { name: "Default value (optional)" }) as HTMLInputElement).value, "enabled");
+  ui.fireEvent.click(wizard.getByRole("switch", { name: "Secret" }));
+  ui.fireEvent.click(wizard.getByRole("button", { name: "Review generated changes" }));
+  await waitDialog("Review 1 change");
+  const edit = planCalls[0]![0]!;
+  assert.ok(edit.kind === "create" && edit.request.kind === "secret");
+  assert.equal("defaultValue" in edit.request, false, "input-only fields never reach the strict secret request");
+  assert.equal("choices" in edit.request, false);
+  assert.equal(applyCalls, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  await waitDialog("Create input parameter or secret");
+  assert.equal(ui.screen.getByRole("switch", { name: "Secret" }).getAttribute("aria-checked"), "true");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Cancel creation" }));
+  assert.equal(applyCalls, 0);
+});
+
+test("creation tags use reviewed pairs and duplicate keys remain invalid after editing another field", async () => {
+  await mount();
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add to application" }));
+  ui.fireEvent.click(ui.within(ui.screen.getByRole("dialog", { name: "Add to application" })).getByRole("button", { name: "Input parameter or secret" }));
+  await waitDialog("Create input parameter or secret");
+  const wizard = ui.within(ui.screen.getByRole("dialog", { name: "Create input parameter or secret" }));
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Stable identifier" }), { target: { value: "taggedInput" } });
+  ui.fireEvent.click(wizard.getByRole("button", { name: "Add tag" }));
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Tag 1 key" }), { target: { value: "Team" } });
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Tag 1 value" }), { target: { value: "orders" } });
+  ui.fireEvent.click(wizard.getByRole("button", { name: "Add tag" }));
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Tag 2 key" }), { target: { value: "Team" } });
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Description" }), { target: { value: "Metadata belongs in source" } });
+  assert.equal((wizard.getByRole("button", { name: "Review generated changes" }) as HTMLButtonElement).disabled, true);
+  assert.equal(planCalls.length, 0);
+  ui.fireEvent.change(wizard.getByRole("textbox", { name: "Tag 2 key" }), { target: { value: "Cost" } });
+  ui.fireEvent.click(wizard.getByRole("button", { name: "Review generated changes" }));
+  await waitDialog("Review 1 change");
+  const edit = planCalls[0]![0]!;
+  assert.equal(edit.kind, "create");
+  if (edit.kind === "create") assert.deepEqual(edit.request.tags, { Cost: "", Team: "orders" });
+  assert.equal(applyCalls, 0);
+});
+
+test("inspector tag rows focus additions, show delete controls, and stage edits for review", async () => {
+  await mount("lambda:ws-connect-route");
+  openSection("Tags");
+  const tags = ui.within(document.querySelector<HTMLElement>("[data-slot=declaration-tags]")!);
+  assert.ok(tags.getByText("Key")); assert.ok(tags.getByText("Value"));
+  assert.equal((tags.getByRole("textbox", { name: "Tag 1 value" }) as HTMLInputElement).value, "realtime");
+  ui.fireEvent.click(tags.getByRole("button", { name: "Add tag" }));
+  const key = tags.getByRole("textbox", { name: "Tag 2 key" });
+  assert.equal(document.activeElement, key);
+  assert.equal(tags.queryByRole("status"), null, "a fresh blank row is ready for typing without an immediate error");
+  assert.equal((ui.screen.getByRole("button", { name: "Review Changes" }) as HTMLButtonElement).disabled, true);
+  ui.fireEvent.change(key, { target: { value: "Team" } });
+  ui.fireEvent.change(tags.getByRole("textbox", { name: "Tag 2 value" }), { target: { value: "realtime-ui" } });
+  const remove = tags.getByRole("button", { name: "Remove tag Team" });
+  assert.ok(remove.textContent?.includes("Delete"));
+  ui.fireEvent.click(remove);
+  assert.equal(tags.queryByRole("textbox", { name: "Tag 2 key" }), null);
+  assert.equal(document.activeElement, tags.getByRole("textbox", { name: "Tag 1 key" }), "deletion restores focus to a remaining key");
+  ui.fireEvent.change(tags.getByRole("textbox", { name: "Tag 1 value" }), { target: { value: "updated" } });
+  assert.equal(planCalls.length + applyCalls, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "tags", entity: "lambda:ws-connect-route", tags: { area: "updated" } }]);
+});
+
+test("tag validation identifies invalid fields and removing the final row returns focus to Add tag", async () => {
+  await mount("lambda:ws-connect-route");
+  openSection("Tags");
+  const tags = ui.within(document.querySelector<HTMLElement>("[data-slot=declaration-tags]")!);
+  const key = tags.getByRole("textbox", { name: "Tag 1 key" });
+  const value = tags.getByRole("textbox", { name: "Tag 1 value" });
+  ui.fireEvent.change(key, { target: { value: "aws:reserved" } });
+  assert.equal(key.getAttribute("aria-invalid"), "true");
+  assert.equal(value.getAttribute("aria-invalid"), "false");
+  assert.equal(document.getElementById(key.getAttribute("aria-describedby")!), tags.getByRole("status"));
+  ui.fireEvent.change(key, { target: { value: "Team" } });
+  assert.equal(key.getAttribute("aria-invalid"), "false");
+  assert.equal(key.getAttribute("aria-describedby"), null);
+  ui.fireEvent.change(value, { target: { value: "<>" } });
+  assert.equal(value.getAttribute("aria-invalid"), "true");
+  assert.equal(key.getAttribute("aria-invalid"), "false");
+  ui.fireEvent.click(tags.getByRole("button", { name: "Remove tag Team" }));
+  assert.equal(document.activeElement, tags.getByRole("button", { name: "Add tag" }));
+  assert.equal(tags.queryByRole("status"), null);
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("refreshing an older inspector snapshot restores inline WebSocket tag editing", async () => {
+  const entity = "lambda:ws-connect-route";
+  const { tags: _tags, ...fields } = baseline.source.editability[entity]!;
+  persisted = { ...baseline, revision: "old-source-index", source: { ...baseline.source, editability: { ...baseline.source.editability, [entity]: fields } } };
+  await mount(entity);
+  openSection("Tags");
+  assert.equal((ui.screen.getByRole("textbox", { name: "Tag 1 value" }) as HTMLInputElement).disabled, true);
+  persisted = baseline;
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Refresh editor" }));
+  await ui.waitFor(() => assert.equal((ui.screen.getByRole("textbox", { name: "Tag 1 value" }) as HTMLInputElement).disabled, false));
+  assert.equal(ui.screen.queryByRole("button", { name: "Refresh editor" }), null);
+  assert.equal((ui.screen.getByRole("textbox", { name: "Tag 1 value" }) as HTMLInputElement).value, "realtime");
+  assert.equal(planCalls.length + applyCalls, 0, "refresh never writes declarations");
+});
+
+test("starting creation respects existing inspector changes and creation guards navigation", async () => {
+  await mount(); changeMemory();
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add to application" }));
+  await waitDialog("Unsaved changes");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Keep Editing" }));
+  assert.ok(count().includes("1 unsaved change"));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add to application" }));
+  await waitDialog("Unsaved changes");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard and Continue" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Input parameter or secret" }));
+  await waitDialog("Create input parameter or secret");
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Secret" }));
+  assert.equal(ui.screen.queryByLabelText(/secret value/i), null);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to resource types" }));
+  ui.fireEvent.click(ui.screen.getByRole("link", { name: "Other view" }));
+  await waitDialog("Unsaved changes");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Keep Editing" }));
+  assert.equal(applyCalls + planCalls.length, 0);
+});
+
+test("VPC creator catches duplicate IDs and CIDR overlap without making a review request", async () => {
+  await mount();
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add to application" }));
+  ui.fireEvent.click(ui.within(ui.screen.getByRole("dialog", { name: "Add to application" })).getByRole("button", { name: "VPC" }));
+  const id = ui.screen.getByRole("textbox", { name: "Stable identifier" });
+  const cidr = ui.screen.getByRole("textbox", { name: "Private IPv4 /16" });
+  const review = ui.screen.getByRole("button", { name: "Review generated changes" }) as HTMLButtonElement;
+  ui.fireEvent.change(id, { target: { value: "application" } });
+  assert.ok(review.disabled);
+  assert.equal(id.getAttribute("aria-invalid"), "true");
+  assert.ok(ui.screen.getByText(/This VPC identifier already exists/));
+  ui.fireEvent.change(id, { target: { value: "analytics" } });
+  ui.fireEvent.change(cidr, { target: { value: "10.0.0.0/16" } });
+  assert.ok(review.disabled);
+  assert.equal(cidr.getAttribute("aria-invalid"), "true");
+  assert.ok(ui.screen.getByText(/This range overlaps VPC "application"/));
+  ui.fireEvent.change(cidr, { target: { value: unusedNetworkCidr(baseline.models.dev.networks!)! } });
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Display name" }), { target: { value: "Analytics workspace" } });
+  assert.equal(review.disabled, false, ui.screen.queryAllByRole("status").map(node => node.textContent).join("\n"));
+  assert.equal(planCalls.length, 0);
+  ui.fireEvent.click(review);
+  await ui.waitFor(() => assert.equal(planCalls.length, 1));
+  const edit = planCalls[0]![0]!;
+  assert.ok(edit.kind === "create" && edit.request.kind === "vpc" && edit.request.name === "Analytics workspace");
+});
+
+test("VPC endpoint service icons search, toggle and retain a typed selection through review", async () => {
+  await mount("island:vpc:application");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Choose interface endpoint services" }));
+  const search = ui.screen.getByRole("searchbox", { name: "Search interface endpoint services" });
+  assert.equal(document.activeElement, search);
+  const options = ui.screen.getByRole("list", { name: "Interface endpoint services" });
+  assert.equal(ui.within(options).getAllByRole("button").length, baseline.models.dev.interfaceEndpointServices!.length);
+  assert.equal(ui.within(options).queryByRole("button", { name: / · s3$/ }), null, "free gateway services keep their separate controls");
+  ui.fireEvent.change(search, { target: { value: "cloudwatch logs" } });
+  const logs = ui.screen.getByRole("button", { name: "CloudWatch Logs · logs" });
+  assert.ok(logs.querySelector("img")!.getAttribute("src")!.endsWith("cloudwatch.svg"));
+  ui.fireEvent.click(logs);
+  assert.equal(logs.getAttribute("aria-pressed"), "true");
+  ui.fireEvent.click(logs);
+  assert.equal(logs.getAttribute("aria-pressed"), "false");
+  ui.fireEvent.click(logs);
+  ui.fireEvent.change(search, { target: { value: "ecr.api" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "ECR · API · ecr.api" }));
+  assert.ok(ui.screen.getByRole("button", { name: "Remove logs endpoint" }));
+  assert.ok(ui.screen.getByRole("button", { name: "Remove ecr.api endpoint" }));
+  assert.equal(planCalls.length + applyCalls, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Done" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0]!.find(edit => edit.kind === "network"), {
+    kind: "network", network: "application", settings: { ...networkSettings(baseline.models.dev.networks!.find(network => network.id === "application")!), endpoints: ["logs", "ecr.api"] },
+  });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.ok(ui.screen.getByRole("button", { name: "Remove logs endpoint" }));
+  assert.ok(ui.screen.getByRole("button", { name: "Remove ecr.api endpoint" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Remove logs endpoint" }));
+  assert.equal(ui.screen.queryByRole("button", { name: "Remove logs endpoint" }), null);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard" }));
+  assert.equal(ui.screen.queryByRole("button", { name: "Remove ecr.api endpoint" }), null);
+  assert.equal(applyCalls, 0);
+});
+
+test("VPC settings use named switches and review only the selected network without global defaults", async () => {
+  await mount("island:vpc:application");
+  assert.equal(ui.screen.queryByRole("heading", { name: "Shared defaults" }), null);
+  assert.equal(ui.screen.queryByRole("combobox", { name: "Default service type" }), null);
+  assert.equal(ui.screen.queryByRole("switch", { name: "Minify" }), null);
+  assert.equal(ui.screen.queryByRole("checkbox"), null);
+  const settings = networkSettings(baseline.models.dev.networks!.find(network => network.id === "application")!);
+  const expected = { ...settings };
+  for (const [label, key] of [
+    ["One NAT gateway (billed hourly and per GB)", "nat"],
+    ["IPv6 egress-only gateway", "ipv6"],
+    ["S3 gateway endpoint", "s3"],
+    ["DynamoDB gateway endpoint", "dynamodb"],
+  ] as const) {
+    const control = ui.screen.getByRole("switch", { name: label });
+    assert.equal(control.getAttribute("aria-checked"), String(settings[key]));
+    assert.equal(control.textContent, settings[key] ? "On" : "Off");
+    assert.equal(control.getAttribute("type"), "button");
+    ui.fireEvent.click(ui.screen.getByLabelText(label));
+    expected[key] = !settings[key];
+    assert.equal(control.getAttribute("aria-checked"), String(expected[key]));
+  }
+  assert.equal(planCalls.length + applyCalls, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "network", network: "application", settings: expected }]);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal(ui.screen.getByRole("switch", { name: "S3 gateway endpoint" }).getAttribute("aria-checked"), String(expected.s3));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard" }));
+  assert.equal(ui.screen.getByRole("switch", { name: "S3 gateway endpoint" }).getAttribute("aria-checked"), String(settings.s3));
+  assert.equal(applyCalls, 0);
+});
+
+test("VPC settings freeze every control while a review is being prepared", async () => {
+  await mount("island:vpc:application");
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "S3 gateway endpoint" }));
+  let finish!: () => void;
+  reviewGate = new Promise<void>(resolve => { finish = resolve; });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  const controls = document.querySelectorAll<HTMLInputElement | HTMLButtonElement>("[data-inspector-context] [data-slot=fields] input, [data-inspector-context] [data-slot=fields] button");
+  assert.ok(controls.length > 4);
+  try { for (const control of controls) assert.equal(control.disabled, true, control.getAttribute("aria-label") ?? control.id); }
+  finally { await ui.act(async () => { finish(); await reviewGate; }); }
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal(ui.screen.getByRole("switch", { name: "S3 gateway endpoint" }).hasAttribute("disabled"), false);
+});
+
+test("stale configuration freezes VPC settings and workload placement", async () => {
+  persisted = { ...baseline, models: { ...baseline.models, dev: { ...baseline.models.dev, stale: true } } };
+  await mount("island:vpc:application");
+  const settings = document.querySelectorAll<HTMLInputElement | HTMLButtonElement>("[data-inspector-context] [data-slot=fields] input, [data-inspector-context] [data-slot=fields] button");
+  assert.ok(settings.length > 4);
+  for (const control of settings) assert.equal(control.disabled, true);
+  ui.cleanup();
+  await mount(target);
+  openSection("Production placement");
+  assert.equal((ui.screen.getByRole("combobox", { name: "Workload VPC" }) as HTMLSelectElement).disabled, true);
+  assert.equal((ui.screen.getByRole("combobox", { name: "Workload subnet" }) as HTMLSelectElement).disabled, true);
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("VPC creation switches preserve boolean choices through review without submitting the form", async () => {
+  await mount();
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add to application" }));
+  ui.fireEvent.click(ui.within(ui.screen.getByRole("dialog", { name: "Add to application" })).getByRole("button", { name: "VPC" }));
+  await waitDialog("Create VPC");
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Stable identifier" }), { target: { value: "switch-review" } });
+  const control = ui.screen.getByRole("switch", { name: "One NAT gateway (billed hourly and per GB)" });
+  assert.equal(control.getAttribute("aria-checked"), "false");
+  ui.fireEvent.click(control);
+  assert.equal(control.getAttribute("aria-checked"), "true");
+  assert.equal(planCalls.length, 0);
+  ui.fireEvent.click([...document.querySelectorAll("[data-slot=creation-wizard] summary")].find(summary => summary.textContent === "Advanced settings")!);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Choose interface endpoint services" }));
+  ui.fireEvent.change(ui.screen.getByRole("searchbox", { name: "Search interface endpoint services" }), { target: { value: "secretsmanager" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Secrets Manager · secretsmanager" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Done" }));
+  assert.equal(planCalls.length, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review generated changes" }));
+  await waitDialog("Review 1 change");
+  const edit = planCalls[0]![0]!;
+  assert.ok(edit.kind === "create" && edit.request.kind === "vpc" && edit.request.nat === true);
+  assert.deepEqual(edit.request.endpoints, ["secretsmanager"]);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal(ui.screen.getByRole("switch", { name: "One NAT gateway (billed hourly and per GB)" }).getAttribute("aria-checked"), "true");
+  assert.ok(ui.screen.getByRole("button", { name: "Remove secretsmanager endpoint" }));
+  assert.equal(applyCalls, 0);
+});
+
+test("local PostgreSQL and RDS open the same application database workflow without writing source", async () => {
+  for (const id of ["local:postgres", "resource:rds.database"]) {
+    await mount(id);
+    assert.ok(ui.screen.getByRole("heading", { name: "Application PostgreSQL" }));
+    assert.deepEqual([...document.querySelectorAll("[data-slot=database-environment] strong")].map(node => node.textContent), ["Development", "Production"]);
+    assert.ok(ui.screen.getByText(/data is not synchronized/));
+    assert.ok(ui.screen.getByRole("heading", { name: "Database home" }));
+    assert.equal(ui.screen.queryByRole("combobox", { name: "Deploy" }), null);
+    ui.fireEvent.click(headerPill("prod"));
+    assert.ok(ui.screen.getByText(/production RDS follows its owning stack/));
+    ui.fireEvent.click(ui.screen.getByRole("button", { name: "Close environment details" }));
+    openSection("Connected workloads");
+    assert.ok(document.querySelector("[data-slot=database-consumers]")?.textContent?.includes("Direct writer"));
+    assert.ok(document.querySelector("[data-slot=database-consumers]")?.textContent?.includes("task:db-migrate"));
+    assert.equal(planCalls.length + applyCalls, 0);
+    ui.cleanup();
+  }
+});
+
+test("database placement stages a coordinated review, guards navigation, and restores the current home", async () => {
+  const database = baseline.models.dev.managedDatabase!;
+  const spare = { ...baseline.models.dev.networks![0]!, id: "database-destination", name: "Database destination", cidr: "10.99.0.0/16" };
+  persisted = { ...baseline, models: {
+    dev: { ...baseline.models.dev, networks: [...baseline.models.dev.networks!, spare] },
+    prod: { ...baseline.models.prod, networks: [...baseline.models.prod.networks!, spare] },
+  } };
+  await mount("resource:rds.database");
+  ui.fireEvent.click(ui.screen.getByText("Change placement"));
+  const vpc = () => ui.screen.getByRole("combobox", { name: "Database VPC" }) as HTMLSelectElement;
+  const subnet = () => ui.screen.getByRole("combobox", { name: "Database subnets" }) as HTMLSelectElement;
+  assert.ok(![...vpc().options].some(option => option.value === "none" || !option.value));
+  assert.deepEqual([...subnet().options].map(option => option.value), ["isolated", "private"]);
+  ui.fireEvent.change(vpc(), { target: { value: spare.id } });
+  ui.fireEvent.change(subnet(), { target: { value: "private" } });
+  assert.ok(ui.screen.getByText("Coordinated placement review"));
+  assert.match(document.querySelector("[data-slot=database-placement-impact]")!.textContent!, /task:db-migrate/);
+  assert.equal(planCalls.length + applyCalls, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "databasePlacement", database: database.id, vpc: spare.id, subnet: "private" }]);
+  assert.equal(applyCalls, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal(vpc().value, spare.id);
+  assert.equal(subnet().value, "private");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Open node B" }));
+  await waitDialog("Unsaved changes");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Keep Editing" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Restore current placement" }));
+  assert.equal(vpc().value, database.networkId);
+  assert.equal(subnet().value, database.subnet);
+  assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null);
+  assert.equal(applyCalls, 0);
+});
+
+test("managed PostgreSQL policy stays editable in development and retains its complete draft through review", async () => {
+  assert.equal(baseline.models.dev.resources.find(resource => resource.id === "resource:rds")?.absent, true, "development uses local PostgreSQL while RDS stays declared");
+  const database = baseline.models.dev.managedDatabase!;
+  assert.ok(database, "the native RDS resource has a first-class declaration");
+  await mount("resource:rds.database");
+  assert.ok(ui.screen.getByRole("heading", { name: "Application PostgreSQL" }));
+  assert.ok(ui.screen.getByRole("heading", { name: "Production RDS" }));
+  assert.ok([...document.querySelectorAll("summary")].some(summary => summary.textContent === "Connection pool defaults"));
+  assert.equal(ui.screen.queryByRole("combobox", { name: "Default service type" }), null, "database defaults need no service-type menu");
+  assert.ok(ui.screen.getByText(/Independent data in development and production/));
+  openSection("Availability and backups");
+  const standby = () => ui.screen.getByRole("switch", { name: "Multi-AZ standby" });
+  const replicas = () => ui.screen.getByRole("spinbutton", { name: "Read replicas" }) as HTMLInputElement;
+  const retention = () => ui.screen.getByRole("spinbutton", { name: "Backup retention (days)" }) as HTMLInputElement;
+  ui.fireEvent.click(standby());
+  ui.fireEvent.change(replicas(), { target: { value: "2" } });
+  assert.equal(standby().getAttribute("aria-checked"), "true");
+  assert.equal(replicas().value, "2");
+  assert.ok(ui.screen.getByText(/Multi-AZ upgrade staged/));
+  assert.equal(planCalls.length + applyCalls, 0, "editing policy never writes or applies changes");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "database", database: database.id, settings: { ...database.authored, multiAz: true, readReplicaCount: 2 } }]);
+  assert.equal(applyCalls, 0, "review requires a separate explicit apply");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal(standby().getAttribute("aria-checked"), "true");
+  assert.equal(replicas().value, "2");
+  ui.fireEvent.change(retention(), { target: { value: "0" } });
+  assert.match(ui.screen.getByRole("alert").textContent ?? "", /settings\.readReplicaCount requires positive settings\.backupRetentionDays/);
+  assert.equal((ui.screen.getByRole("button", { name: "Review Changes" }) as HTMLButtonElement).disabled, true);
+  assert.equal(planCalls.length, 1, "invalid replica policy is caught before a server review");
+  assert.equal(applyCalls, 0);
+  ui.fireEvent.change(retention(), { target: { value: "7" } });
+  assert.equal((ui.screen.getByRole("button", { name: "Review Changes" }) as HTMLButtonElement).disabled, false);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[1], [{ kind: "database", database: database.id, settings: { ...database.authored, multiAz: true, readReplicaCount: 2, backupRetentionDays: 7 } }]);
+  assert.equal(applyCalls, 0);
+});
+
+test("database callers' global pool defaults remain reviewable beside the database policy", async () => {
+  await mount("resource:rds.database");
+  openSection("Connection pool defaults");
+  const input = ui.screen.getByRole("spinbutton", { name: "Maximum connections in connections" });
+  const fact = baseline.models.dev.fields["defaults:database"]!.find(fact => fact.field === "defaults.database.pool.maxConnections")!;
+  const value = Number(fact.effective) + 1;
+  ui.fireEvent.change(input, { target: { value: String(value) } });
+  assert.equal(planCalls.length + applyCalls, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "field", intent: { target: "defaults:database", field: fact.field, value } }]);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal((ui.screen.getByRole("spinbutton", { name: "Maximum connections in connections" }) as HTMLInputElement).value, String(value));
+  assert.equal(applyCalls, 0);
+});
+
+test("VPC removal is unavailable while used and stages an unused declaration through review", async () => {
+  const spare = { ...baseline.models.dev.networks![0]!, id: "spare", name: "Spare network", constructId: "SpareNetworkStack", cidr: "10.99.0.0/16", builtInProd: false };
+  persisted = { ...baseline, models: {
+    dev: { ...baseline.models.dev, networks: [...baseline.models.dev.networks!, spare] },
+    prod: { ...baseline.models.prod, networks: [...baseline.models.prod.networks!, spare] },
+  } };
+  const openRemoval = () => {
+    const summary = [...document.querySelectorAll("summary")].find(summary => summary.textContent === "Remove VPC")!;
+    assert.ok(summary);
+    if (!summary.parentElement!.hasAttribute("open")) ui.fireEvent.click(summary);
+    return ui.screen.getByRole("button", { name: "Review VPC removal" }) as HTMLButtonElement;
+  };
+  await mount("island:vpc:application");
+  assert.equal(openRemoval().disabled, true);
+  assert.ok(ui.screen.getByText(/Reassign workloads, the database, and native resource references before removal/));
+  assert.equal(planCalls.length, 0);
+  ui.cleanup();
+  await mount("island:vpc:spare");
+  const removal = openRemoval();
+  assert.equal(removal.disabled, false);
+  ui.fireEvent.click(removal);
+  await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls, [[{ kind: "removeNetwork", network: "spare" }]]);
+  assert.equal(applyCalls, 0, "reviewing removal never applies it");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal(openRemoval().disabled, true, "a pending removal cannot be staged twice");
+  assert.equal(planCalls.length, 1);
+  assert.equal(applyCalls, 0);
+});
+
+function nativeAccessFixture() {
+  const capabilities = baseline.source.triggerCapabilities ?? [];
+  const queue = capabilities.find(item => item.canonicalTypes.some(type => /^aws-sqs:I?Queue$/.test(type)) && baseline.models.dev.resources.some(resource => resource.id === item.resource))!;
+  const bucket = capabilities.find(item => item.canonicalTypes.some(type => /^aws-s3:I?Bucket$/.test(type)) && baseline.models.dev.resources.some(resource => resource.id === item.resource))!;
+  assert.ok(queue); assert.ok(bucket);
+  const active = (mode: "dev" | "prod") => ({ ...baseline.models[mode], resources: baseline.models[mode].resources.map(resource => resource.id === queue.stack || resource.id === bucket.stack ? { ...resource, stackUsage: { status: "referenced" as const, sites: [] } } : resource) });
+  persisted = { ...baseline, models: { dev: active("dev"), prod: active("prod") } };
+  return { queue, bucket };
+}
+function chooseAccess(resource: string, search: string) {
+  openSection("Permissions");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add access" }));
+  const picker = ui.screen.getByRole("group", { name: "Configured resources" });
+  ui.fireEvent.change(ui.within(picker).getByRole("searchbox", { name: "Search configured resources" }), { target: { value: search } });
+  const option = ui.within(picker).getAllByRole("button").find(button => button.getAttribute("aria-label")?.startsWith(resource.replace(/^resource:/, "") + " ·"))!;
+  assert.ok(option, resource);
+  assert.ok(option.querySelector("img"), "service choices include their resource icon");
+  ui.fireEvent.click(option);
+}
+function withNativeAccess(destination: string, scopes: readonly string[]) {
+  const edges: ModelEdge[] = scopes.map((scope, index) => ({ id: `test:native-access:${index}`, from: target, to: destination, relation: "grant", provenance: "declared", label: `Read ${scope}`, permissionContext: { kind: "native", method: "grantRead", arguments: [scope] } }));
+  persisted = { ...persisted, models: {
+    dev: withConnectionAuthorizations({ ...persisted.models.dev, edges: [...persisted.models.dev.edges, ...edges] }),
+    prod: withConnectionAuthorizations({ ...persisted.models.prod, edges: [...persisted.models.prod.edges, ...edges] }),
+  } };
+}
+
+test("Permissions chooses configured resources with icons, matching grants and scoped review", async () => {
+  const { queue, bucket } = nativeAccessFixture();
+  await mount();
+  chooseAccess(queue.resource, "SQS");
+  ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Send messages" }));
+  assert.equal(ui.screen.queryByRole("checkbox", { name: "Read objects" }), null);
+  assert.equal(ui.screen.queryByRole("textbox", { name: "Prefix" }), null);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Stage access" }));
+  assert.ok(ui.screen.getByText("Staged for review"));
+  chooseAccess(bucket.resource, "S3");
+  ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Read objects" }));
+  openSection("Limit access");
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Limit to object prefix" }));
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Prefix" }), { target: { value: "uploads/" } });
+  assert.equal(ui.screen.queryByRole("checkbox", { name: "Send messages" }), null);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Stage access" }));
+  assert.equal(planCalls.length + applyCalls, 0);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); await waitDialog("Review 2 changes");
+  assert.deepEqual(planCalls[0], [
+    { kind: "connection", target, connection: "resourceAccess", destination: queue.resource, actions: ["send"], enabled: true },
+    { kind: "connection", target, connection: "resourceAccess", destination: bucket.resource, actions: ["read"], limits: { objectPrefix: "uploads/", requireHttps: true }, enabled: true },
+  ]);
+  assert.equal(applyCalls, 0);
+});
+
+test("empty Permissions offers Add access and separates incoming API Gateway invocation", async () => {
+  await mount("lambda:python-example");
+  const permissions = openSection("Permissions");
+  assert.ok(ui.within(permissions).getByRole("button", { name: "Add access" }));
+  assert.ok(ui.within(permissions).getByText("No outgoing access configured."));
+  const incoming = permissions.querySelector<HTMLDetailsElement>("[data-slot=incoming-access] > details")!;
+  assert.ok(incoming); assert.equal(incoming.open, false);
+  assert.match(incoming.querySelector("summary")!.textContent!, /Access to this resource/);
+  assert.equal(permissions.querySelectorAll("[data-slot=resource-permissions] [data-slot=access-summary]").length, 0);
+  ui.fireEvent.click(incoming.querySelector("summary")!);
+  assert.ok(ui.within(incoming).getByText("HTTP API"));
+  assert.ok(ui.within(incoming).getByText(/^Invoke function/));
+  assert.equal(ui.within(incoming).queryByRole("button", { name: "Remove access" }), null, "framework-managed incoming grants have no consumer-side removal");
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("Permissions picker supports keyboard navigation, empty search and Escape back to Add access", async () => {
+  nativeAccessFixture();
+  await mount();
+  openSection("Permissions");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Add access" }));
+  const search = ui.screen.getByRole("searchbox", { name: "Search configured resources" });
+  assert.equal(document.activeElement, search);
+  ui.fireEvent.change(search, { target: { value: "no-such-configured-resource" } });
+  assert.ok(ui.screen.getByText("No resources match “no-such-configured-resource”."));
+  ui.fireEvent.change(search, { target: { value: "SQS" } });
+  ui.fireEvent.keyDown(search, { key: "ArrowDown" });
+  const picker = ui.screen.getByRole("group", { name: "Configured resources" });
+  assert.equal(document.activeElement, picker.querySelector("[data-slot=endpoint-option]"));
+  ui.fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  assert.equal(ui.screen.queryByRole("searchbox", { name: "Search configured resources" }), null);
+  await ui.waitFor(() => assert.equal(document.activeElement, ui.screen.getByRole("button", { name: "Add access" })));
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("Permissions prevents duplicate and pending scoped grants while allowing another prefix", async () => {
+  const { bucket } = nativeAccessFixture();
+  const declared: ModelEdge = { id: "test:application-access", from: target, to: bucket.resource, relation: "grant", provenance: "declared", label: "Read uploads", permissionContext: { kind: "resourceAccess", actions: ["read"], limits: { objectPrefix: "uploads/", requireHttps: true } } };
+  persisted = { ...persisted, models: { dev: withConnectionAuthorizations({ ...persisted.models.dev, edges: [...persisted.models.dev.edges, declared] }), prod: withConnectionAuthorizations({ ...persisted.models.prod, edges: [...persisted.models.prod.edges, declared] }) } };
+  await mount();
+  chooseAccess(bucket.resource, "S3");
+  ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Read objects" }));
+  openSection("Limit access");
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Limit to object prefix" }));
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Prefix" }), { target: { value: "uploads/" } });
+  assert.equal((ui.screen.getByRole("button", { name: "Stage access" }) as HTMLButtonElement).disabled, true);
+  assert.ok(ui.screen.getByText("This access is already configured."));
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Prefix" }), { target: { value: "reports/" } });
+  assert.equal((ui.screen.getByRole("button", { name: "Stage access" }) as HTMLButtonElement).disabled, false);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Stage access" }));
+  chooseAccess(bucket.resource, "S3");
+  ui.fireEvent.click(ui.screen.getByRole("checkbox", { name: "Read objects" }));
+  openSection("Limit access");
+  ui.fireEvent.click(ui.screen.getByRole("switch", { name: "Limit to object prefix" }));
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Prefix" }), { target: { value: "reports/" } });
+  assert.ok(ui.screen.getByText("This change is already staged."));
+  assert.equal((ui.screen.getByRole("button", { name: "Stage access" }) as HTMLButtonElement).disabled, true);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Cancel" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "connection", target, connection: "resourceAccess", destination: bucket.resource, actions: ["read"], limits: { objectPrefix: "reports/", requireHttps: true }, enabled: true }]);
+});
+
+test("Permissions removes the exact scoped grant and can undo before review", async () => {
+  const { bucket } = nativeAccessFixture();
+  withNativeAccess(bucket.resource, ["uploads/*", "reports/*"]);
+  await mount();
+  const permissions = openSection("Permissions");
+  const row = [...permissions.querySelectorAll<HTMLDetailsElement>("[data-slot=access-summary]")].find(item => item.textContent?.includes('grantRead("reports/*")'))!;
+  assert.ok(row);
+  ui.fireEvent.click(row.querySelector("summary")!);
+  ui.fireEvent.click(ui.within(row).getByRole("button", { name: "Remove access" }));
+  assert.ok(ui.within(row).getByText("Removal staged"));
+  ui.fireEvent.click(ui.within(row).getByRole("button", { name: "Undo change" }));
+  assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null);
+  ui.fireEvent.click(ui.within(row).getByRole("button", { name: "Remove access" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "connection", target, connection: "grant", destination: bucket.resource, grant: "grantRead", grantArguments: ["reports/*"], enabled: false }]);
+  assert.equal(applyCalls, 0);
+});
+
+test("Permissions retains different Dev and Prod object scopes for the same connection", async () => {
+  const { bucket } = nativeAccessFixture();
+  withNativeAccess(bucket.resource, ["uploads/*"]);
+  persisted = { ...persisted, models: { ...persisted.models, prod: withConnectionAuthorizations({ ...persisted.models.prod,
+    edges: persisted.models.prod.edges.map(edge => edge.id === "test:native-access:0" ? { ...edge, permissionContext: { kind: "native" as const, method: "grantRead", arguments: ["reports/*"] } } : edge),
+  }) } };
+  await mount();
+  const permissions = openSection("Permissions");
+  const rows = [...permissions.querySelectorAll<HTMLDetailsElement>("[data-slot=access-summary]")];
+  const dev = rows.find(row => row.querySelector("summary")?.textContent?.includes("uploads/*"));
+  const prod = rows.find(row => row.querySelector("summary")?.textContent?.includes("reports/*"));
+  assert.ok(dev); assert.ok(prod); assert.notEqual(dev, prod);
+  assert.match(dev.querySelector("summary")!.textContent!, /uploads\/\* · Dev/);
+  assert.match(prod.querySelector("summary")!.textContent!, /reports\/\* · Prod/);
+  ui.fireEvent.click(prod.querySelector("summary")!);
+  ui.fireEvent.click(ui.within(prod).getByRole("button", { name: "Remove access" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "connection", target, connection: "grant", destination: bucket.resource, grant: "grantRead", grantArguments: ["reports/*"], enabled: false }]);
+  assert.equal(applyCalls, 0);
+});
+
+test("resource Grant access searches consumers and stages permission for the chosen workload", async () => {
+  const { queue } = nativeAccessFixture();
+  await mount(queue.resource);
+  const section = openSection("Workload access");
+  ui.fireEvent.click(ui.within(section).getByRole("button", { name: "Grant access" }));
+  ui.fireEvent.change(ui.within(section).getByRole("searchbox", { name: "Search workloads" }), { target: { value: "graphql" } });
+  const candidate = ui.within(section).getByRole("button", { name: /\/graphql · AWS Lambda/ });
+  assert.ok(candidate.querySelector("img"));
+  ui.fireEvent.click(candidate);
+  assert.equal(ui.screen.queryByRole("searchbox", { name: "Search configured resources" }), null, "resource-side editing keeps its destination");
+  ui.fireEvent.click(ui.within(section).getByRole("checkbox", { name: "Send messages" }));
+  ui.fireEvent.click(ui.within(section).getByRole("button", { name: "Stage access" }));
+  assert.ok(ui.within(section).getByText("Staged for review"));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "connection", target, connection: "resourceAccess", destination: queue.resource, actions: ["send"], enabled: true }]);
+  assert.equal(applyCalls, 0);
+});
+
+test("workflow Add caller configures its invocation from a compatible function", async () => {
+  const workflow = baseline.models.dev.targets.find(item => item.kind === "workflow")!;
+  assert.ok(workflow);
+  await mount(workflow.ref);
+  const permissions = openSection("Permissions");
+  assert.equal(ui.within(permissions).queryByRole("button", { name: "Add access" }), null, "workflow role access stays defined by its steps");
+  ui.fireEvent.click(permissions.querySelector("[data-slot=incoming-access] > details > summary")!);
+  ui.fireEvent.click(ui.within(permissions).getByRole("button", { name: "Add caller" }));
+  ui.fireEvent.change(ui.within(permissions).getByRole("searchbox", { name: "Search workloads" }), { target: { value: "graphql" } });
+  ui.fireEvent.click(ui.within(permissions).getByRole("button", { name: /\/graphql · AWS Lambda/ }));
+  const editor = ui.within(permissions).getByRole("group", { name: `Access to ${workflow.title}` });
+  assert.ok(ui.within(editor).getByText("Start workflow"));
+  assert.ok(ui.within(editor).getByText(`startWorkflow(${JSON.stringify(workflow.id)}, input)`));
+  ui.fireEvent.click(ui.within(permissions).getByRole("button", { name: "Stage access" }));
+  assert.ok(ui.within(permissions).getByText("Staged for review"));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "connection", target, connection: "startsWorkflow", destination: workflow.ref, enabled: true }]);
+  assert.equal(applyCalls, 0);
+});
+
+test("Environment keeps input mapping removal and undo separate from IAM permissions", async () => {
+  const input = baseline.models.dev.resources.find(resource => resource.kind === "input")!;
+  assert.ok(input);
+  const name = "TEST_INPUT_MAPPING";
+  const change = (mode: "dev" | "prod") => ({ ...baseline.models[mode],
+    targets: baseline.models[mode].targets.map(item => item.ref === target ? { ...item, environment: [...item.environment, { name, value: { kind: "reference" as const, resource: input.id, display: `resources.${input.path.join(".")}` } }] } : item),
+    edges: [...baseline.models[mode].edges, { id: "test:input-mapping", from: target, to: input.id, relation: "env" as const, provenance: "declared" as const, label: name }],
+  });
+  persisted = { ...baseline, models: { dev: change("dev"), prod: change("prod") } };
+  await mount(); openSection("Environment");
+  const permissions = openSection("Permissions");
+  assert.equal(ui.within(permissions).queryByText(name), null);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: `Remove ${name} mapping` }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: `Undo removal of ${name}` }));
+  assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: `Remove ${name} mapping` }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "connection", target, connection: "resource", destination: input.id, variable: name, enabled: false }]);
+  assert.equal(applyCalls, 0);
+});
+
+test("indexed literal userPool binding has one grouped removal for both identifiers", async () => {
+  const ref = "lambda:test-start-workflow";
+  const edges = baseline.models.dev.edges.filter(edge => edge.from === ref && edge.bindingSetting?.field === "userPool");
+  assert.ok(edges.length >= 2, "real source indexing captures the comma-terminated userPool: true property");
+  await mount(ref); openSection("Environment");
+  assert.equal(ui.screen.getAllByText("User-pool identifiers").length, 1);
+  const identifiers = ui.screen.getByText("User-pool identifiers").closest("[data-slot=env-row]")!;
+  assert.ok(ui.within(identifiers as HTMLElement).getByText("USER_POOL_ID")); assert.ok(ui.within(identifiers as HTMLElement).getByText("USER_POOL_CLIENT_ID"));
+  assert.equal(ui.screen.getAllByRole("button", { name: "Remove user-pool identifiers" }).length, 1);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Remove user-pool identifiers" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" })); await waitDialog("Review 1 change");
+  assert.deepEqual(planCalls[0], [{ kind: "connection", target: ref, connection: "userPool", enabled: false }]);
+  assert.equal(applyCalls, 0);
+});
+
+test("userPool identifiers without direct literal ownership link to their declaration", async () => {
+  const ref = "lambda:test-start-workflow";
+  const change = (mode: "dev" | "prod") => ({ ...baseline.models[mode], edges: baseline.models[mode].edges.map(edge => edge.from === ref && edge.bindingSetting?.field === "userPool" ? { ...edge, bindingSetting: undefined } : edge) });
+  persisted = { ...baseline, models: { dev: change("dev"), prod: change("prod") } };
+  await mount(ref); openSection("Environment");
+  assert.equal(ui.screen.queryByRole("button", { name: "Remove user-pool identifiers" }), null);
+  const group = ui.screen.getByText("User-pool identifiers").closest("[data-slot=env-row]")!;
+  assert.ok(ui.within(group as HTMLElement).getByRole("link", { name: "Open declaration" }));
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("every resource family uses one framed ownership status directly below its inspector title", async () => {
+  await mount("resource:rds");
+  const reference = document.querySelector("[data-slot=inspector-content] > header [data-resource-status=managed]")!;
+  assert.ok(reference);
+  const referenceClasses = reference.className;
+  ui.cleanup();
+  for (const mode of ["dev", "prod"] as const) {
+    const model = baseline.models[mode];
+    const expected = frameworkManagedIds(model);
+    const scene = buildScene(model);
+    const ids = new Set([...model.resources.map(item => item.id), ...model.targets.map(item => item.ref),
+      ...model.routes.map(item => item.id), ...scene.nodes.map(item => item.id),
+      ...scene.props.map(item => item.id), ...scene.islands.map(item => item.id),
+      ...baseline.schema.tables.map(item => item.id), ...baseline.schema.relations.map(item => item.id)]);
+    for (const id of ids) {
+      await mount(id, mode);
+      const header = document.querySelector("[data-slot=inspector-content] > header")!;
+      assert.ok(header, `${mode}: ${id} has an inspector header`);
+      assert.equal(header.querySelectorAll("[data-resource-status=managed]").length, expected.has(id) ? 1 : 0, `${mode}: ${id}`);
+      if (expected.has(id)) {
+        const badge = ui.within(header as HTMLElement).getByText("Framework managed");
+        assert.equal(badge.className, referenceClasses);
+        assert.ok(badge.querySelector("svg"));
+        assert.equal((header.querySelector("[data-slot=entity-name]") ?? header.querySelector("h2"))!.nextElementSibling, badge, `${mode}: ${id} ownership follows its title`);
+      }
+      ui.cleanup();
+    }
+  }
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("an identity header pairs its name with its identifier and lists its facts in one label column", async () => {
+  const header = () => document.querySelector<HTMLElement>("[data-slot=inspector-content] > header")!;
+  const identity = () => header().querySelector<HTMLElement>("[data-slot=entity-name]")!;
+  const facts = () => [...header().querySelectorAll("dl dt")].map(term => [term.textContent, term.nextElementSibling!.textContent] as const);
+  const labels = () => facts().map(([label]) => label);
+  const open = async (id: string) => { ui.cleanup(); await mount(id); };
+
+  // A workload: artwork, name and target ref form one block; both source lines follow as facts.
+  await open("lambda:graphql-api");
+  assert.equal(header().querySelectorAll("h2").length, 1);
+  assert.equal(identity().querySelector("h2")!.textContent, "/graphql");
+  assert.equal(identity().querySelector("[data-slot=ref]")!.textContent, "lambda:graphql-api");
+  assert.equal(header().querySelectorAll("[data-slot=ref]").length, 1, "the identifier is stated once, beneath the name");
+  assert.equal(identity().querySelectorAll("img[data-entity-icon]").length, 1);
+  assert.equal(identity().querySelector("h2 img"), null, "artwork sits beside the name, so wrapped lines never run beneath it");
+  assert.deepEqual(labels(), ["Declared in", "Implementation"]);
+  assert.match(facts()[0]![1]!, /^http\.ts:\d+$/);
+  assert.equal(facts()[1]![1], "index.ts:1");
+  const inspected = ui.within(header());
+  assert.ok(inspected.getByRole("link", { name: /http\.ts:\d+ in VS Code$/ }));
+  assert.ok(inspected.getByRole("link", { name: /graphql-api\/index\.ts:1 in VS Code$/ }));
+
+  // A workflow has no implementation directory: one fact, in the same list.
+  await open("workflow:invocation-test-workflow");
+  assert.equal(identity().querySelector("[data-slot=ref]")!.textContent, "workflow:invocation-test-workflow");
+  assert.deepEqual(labels(), ["Declared in"]);
+
+  // A member states its type, and an entry its group, as facts beside the source line.
+  await open("resource:cognito.userPool");
+  assert.equal(identity().querySelector("[data-slot=ref]")!.textContent, "stacks.cognito.userPool");
+  assert.deepEqual(labels(), ["Type", "Stack", "Declared in"]);
+  assert.equal(facts()[0]![1], "cognito.IUserPool");
+  assert.equal(facts()[1]![1], "CognitoStack");
+  await open("resource:langgraph.modelProvider");
+  assert.deepEqual(labels(), ["Input group", "Declared in"]);
+  ui.fireEvent.click(ui.within(header()).getByRole("button", { name: "langgraph" }));
+  await ui.waitFor(() => assert.equal(ui.screen.getByLabelText("Current selection").textContent, "resource:langgraph"));
+
+  // A gateway has no identifier and an island no artwork; the name stands on its own in both.
+  await open("gateway:http");
+  assert.equal(identity().querySelector("[data-slot=ref]"), null);
+  assert.equal(identity().querySelectorAll("img[data-entity-icon]").length, 1);
+  assert.deepEqual(labels(), ["Defined in"]);
+  await open("island:lambda");
+  assert.equal(identity().querySelector("img"), null);
+  assert.equal(identity().querySelector("[data-slot=ref]"), null);
+  assert.equal(header().querySelector("dl"), null);
+
+  // An unlocated declaration keeps the identity and says so where its source line would be.
+  const { "workflow:invocation-test-workflow": _workflow, ...located } = baseline.source.entities;
+  // A long unbroken name offers breaks at its humps and separators without changing its text.
+  const name = "AnExtremelyLongUnbrokenResourceName/with.separators_andMore";
+  const rename = (mode: "dev" | "prod") => ({ ...baseline.models[mode], targets: baseline.models[mode].targets.map(item => item.ref === target ? { ...item, title: name } : item) });
+  persisted = { ...baseline, source: { ...baseline.source, entities: located }, models: { dev: rename("dev"), prod: rename("prod") } };
+  await open("workflow:invocation-test-workflow");
+  assert.equal(identity().querySelector("[data-slot=ref]")!.textContent, "workflow:invocation-test-workflow");
+  assert.equal(header().querySelector("dl"), null);
+  assert.ok(ui.within(header()).getByText("Its declaration could not be located in source."));
+  await open(target);
+  const title = identity().querySelector("h2")!;
+  assert.equal(title.textContent, name);
+  assert.equal(title.querySelectorAll("wbr").length, 8, "after each separator, and at each hump of the one word too long for a narrow line");
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("conditional Deploy groups readable input fields and keeps review, back and discard in one draft", async () => {
+  const input = baseline.models.dev.resources.find(item => item.kind === "input" && item.fromEnv && item.values && item.values.length > 1 && !item.absent)!;
+  assert.ok(input);
+  await mount();
+  ui.fireEvent.change(deployControl(), { target: { value: "conditional" } });
+  const group = document.querySelector<HTMLElement>("[data-slot=deploy-condition]")!;
+  ui.fireEvent.click(group.querySelector("summary")!);
+  const parameter = ui.within(group).getByRole("combobox", { name: "Input parameter" }) as HTMLSelectElement;
+  ui.fireEvent.change(parameter, { target: { value: input.id } });
+  const equals = ui.within(group).getByRole("combobox", { name: "Equals" }) as HTMLSelectElement;
+  assert.equal(ui.within(parameter).getByRole("option", { name: input.path.join(".") }).textContent, input.path.join("."));
+  assert.ok(parameter.title.includes(input.fromEnv!));
+  const parameterHelp = document.getElementById(parameter.getAttribute("aria-describedby")!.split(" ")[0]!);
+  assert.ok(parameterHelp?.textContent?.includes(input.fromEnv!));
+  const equalsHelp = document.getElementById(equals.getAttribute("aria-describedby")!.split(" ")[0]!);
+  assert.match(equalsHelp?.textContent ?? "", /exactly matches/);
+  ui.fireEvent.change(equals, { target: { value: input.values![1]! } });
+  let finishReview!: () => void;
+  reviewGate = new Promise<void>(resolve => { finishReview = resolve; });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await waitDialog("Review 1 change");
+  for (const control of [parameter, equals, deployControl()]) assert.equal(control.hasAttribute("disabled"), true);
+  await ui.act(async () => { finishReview(); await reviewGate; });
+  await ui.waitFor(() => assert.equal((ui.screen.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled, false));
+  assert.deepEqual(planCalls[0], [{ kind: "deploy", target, value: { when: { resource: input.id, equals: input.values![1]! } } }]);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Back to Editing" }));
+  assert.equal(parameter.value, input.id);
+  assert.equal(equals.value, input.values![1]);
+  assert.equal(parameter.disabled, false);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard" }));
+  assert.equal(document.querySelector("[data-slot=deploy-condition]"), null);
+  assert.equal(ui.screen.queryByLabelText("Pending inspector changes"), null);
+  assert.equal(applyCalls, 0);
+});
+
+test("conditional Deploy offers only inputs present in both graphs from either source mode", async () => {
+  const template = baseline.models.dev.resources.find(item => item.kind === "input" && item.fromEnv && !item.absent)!;
+  assert.ok(template);
+  const shared = { ...template, id: "resource:sharedCondition", path: ["sharedCondition"], fromEnv: "SHARED_CONDITION" };
+  const devOnly = { ...template, id: "resource:devOnlyCondition", path: ["devOnlyCondition"], fromEnv: "DEV_ONLY_CONDITION" };
+  const prodOnly = { ...template, id: "resource:prodOnlyCondition", path: ["prodOnlyCondition"], fromEnv: "PROD_ONLY_CONDITION" };
+  persisted = { ...baseline, models: {
+    dev: { ...baseline.models.dev, resources: [...baseline.models.dev.resources, shared, devOnly, { ...prodOnly, absent: true }] },
+    prod: { ...baseline.models.prod, resources: [...baseline.models.prod.resources, shared, { ...devOnly, absent: true }, prodOnly] },
+  } };
+  const choices: string[][] = [];
+  for (const mode of ["dev", "prod"] as const) {
+    await mount(target, mode);
+    ui.fireEvent.change(deployControl(), { target: { value: "conditional" } });
+    const parameter = ui.screen.getByRole("combobox", { name: "Input parameter" });
+    assert.ok(ui.within(parameter).getByRole("option", { name: "sharedCondition" }), mode);
+    assert.equal(ui.within(parameter).queryByRole("option", { name: "devOnlyCondition" }), null, mode);
+    assert.equal(ui.within(parameter).queryByRole("option", { name: "prodOnlyCondition" }), null, mode);
+    choices.push([...parameter.querySelectorAll("option")].map(option => option.value));
+    ui.cleanup();
+  }
+  assert.deepEqual(choices[0], choices[1]);
+  assert.equal(planCalls.length + applyCalls, 0);
+});
+
+test("header rename stages beside input settings and Escape restores only its opening names", async () => {
+  useStandaloneFlagFixture();
+  await mount("resource:enableWebSocketApi");
+  ui.fireEvent.change(descriptionField(), { target: { value: "Keep these notes." } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Rename enableWebSocketApi" }));
+  const code = ui.screen.getByRole("textbox", { name: "Code name" });
+  assert.equal(document.activeElement, code);
+  ui.fireEvent.change(code, { target: { value: "allowWebSockets" } });
+  assert.ok(ui.screen.getByRole("heading", { name: "enableWebSocketApi", level: 2 }));
+  assert.equal(ui.screen.getByRole("combobox", { name: "Value in development" }).matches(":disabled"), false);
+  assert.equal(planCalls.length, 0);
+  ui.fireEvent.keyDown(code, { key: "Escape" });
+  assert.equal(ui.screen.queryByRole("textbox", { name: "Code name" }), null);
+  assert.match(count(), /1 unsaved change/);
+  assert.equal(descriptionField().value, "Keep these notes.");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Rename enableWebSocketApi" }));
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Code name" }), { target: { value: "allowWebSockets" } });
+  ui.fireEvent.change(ui.screen.getByRole("combobox", { name: "Value in development" }), { target: { value: "false" } });
+  ui.fireEvent.submit(ui.screen.getByRole("form", { name: "Rename enableWebSocketApi" }));
+  assert.equal(ui.screen.queryByRole("textbox", { name: "Code name" }), null);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await ui.waitFor(() => assert.equal(planCalls.length, 1));
+  assert.deepEqual(planCalls[0].map(edit => edit.kind), ["description", "rename", "resourceConfig"]);
+});
+
+test("managed resource names edit display text and explain the code owner beside canonical references", async () => {
+  await mount("resource:cognito");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Rename CognitoStack" }));
+  assert.equal(ui.screen.queryByRole("textbox", { name: "Code name" }), null);
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Display name" }), { target: { value: "Customer identity" } });
+  assert.ok(ui.screen.getByRole("link", { name: "Open code declaration in VS Code" }).getAttribute("href")!.includes("stacks/cognito.ts"));
+  assert.ok(document.querySelector('[data-slot="entity-name"]')!.textContent!.includes(baseline.namingCapabilities!["resource:cognito"]!.reason!));
+  assert.ok(ui.screen.getByRole("heading", { name: "CognitoStack", level: 2 }));
+  assert.ok(ui.screen.getByText("stacks.cognito"));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Done" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await ui.waitFor(() => assert.equal(planCalls.length, 1));
+  assert.deepEqual(planCalls[0], [{ kind: "displayName", entity: "resource:cognito", value: "Customer identity" }]);
+});
+
+test("rename replaces the current URL, restores earlier visits and allows a fresh URL to reuse the old id", async () => {
+  const from = "resource:enableWebSocketApi", to = "resource:allowWebSockets";
+  const source = baseline.models.dev.resources.find(resource => resource.id === from)!;
+  mock.method(apiModule.api, "applyBatch", async () => {
+    const renamed = (mode: "dev" | "prod") => ({ ...baseline.models[mode], resources: baseline.models[mode].resources.map(resource => resource.id === from ? { ...resource, id: to, path: ["allowWebSockets"] } : resource) });
+    persisted = { ...baseline, revision: "rename-saved", models: { dev: renamed("dev"), prod: renamed("prod") }, namingCapabilities: { ...baseline.namingCapabilities, [to]: { code: true, codeName: "allowWebSockets", display: true } } };
+    return { status: "applied", message: "Renamed source.", revision: persisted.revision, select: to, entityRemap: { [from]: to } };
+  });
+  const app = await mount(from);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Open node B" }));
+  await ui.waitFor(() => assert.equal(ui.screen.getByLabelText("Current selection").textContent, "lambda:sign-in"));
+  await ui.act(async () => { await app.navigate({ to: ".", search: { select: from } } as never); });
+  ui.fireEvent.click(await ui.screen.findByRole("button", { name: "Rename enableWebSocketApi" }));
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Code name" }), { target: { value: "allowWebSockets" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Done" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  await ui.screen.findByRole("button", { name: "Apply All" });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Apply All" }));
+  await ui.waitFor(() => assert.equal(app.state.location.search.select, to));
+  assert.equal(app.history.location.state.__TSR_index, 2);
+  await ui.act(async () => app.history.back());
+  await ui.waitFor(() => assert.equal(ui.screen.getByLabelText("Current selection").textContent, "lambda:sign-in"));
+  await ui.act(async () => app.history.back());
+  await ui.waitFor(() => assert.equal(ui.screen.getByLabelText("Current selection").textContent, to));
+  assert.equal(app.state.location.search.select, to);
+  persisted = { ...persisted, revision: "reused", models: { dev: { ...persisted.models.dev, resources: [...persisted.models.dev.resources, source] }, prod: { ...persisted.models.prod, resources: [...persisted.models.prod.resources, source] } } };
+  await ui.act(async () => { await app.navigate({ to: ".", search: { select: from } } as never); });
+  await ui.waitFor(() => assert.equal(ui.screen.getByLabelText("Current selection").textContent, from));
+});
+
+test("clearing an existing display alias keeps its disclosure open and Discard closes the naming editor", async () => {
+  const entity = "resource:enableWebSocketApi";
+  persisted = { ...baseline, displayNames: { values: { [entity]: "WebSocket feature" } } };
+  await mount(entity);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Rename enableWebSocketApi" }));
+  const label = ui.screen.getByRole("textbox", { name: "Display name" });
+  assert.equal(label.closest("details")!.open, true);
+  ui.fireEvent.change(label, { target: { value: "" } });
+  assert.equal(label.closest("details")!.open, true);
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Discard" }));
+  await ui.waitFor(() => assert.equal(ui.screen.queryByRole("textbox", { name: "Code name" }), null));
+  assert.ok(ui.screen.getByRole("heading", { level: 2, name: "WebSocket feature" }));
+  assert.equal(planCalls.length, 0);
+});
+
+test("blocked rename retains its diff and offers exact editor links and a draft-preserving source retry", async () => {
+  const plan = apiModule.api.planBatch;
+  let blocked = true;
+  mock.method(apiModule.api, "refreshSource", async () => { persisted = { ...baseline, revision: "manual-fix" }; });
+  mock.method(apiModule.api, "planBatch", async (...args: Parameters<typeof plan>) => ({ ...await plan(...args), ok: !blocked,
+    rename: { from: "enableWebSocketApi", to: "allowWebSockets", referenceCount: 5, fileCount: 3 },
+    renameIssues: blocked ? [{ message: "Make the computed access explicit as resources.enableWebSocketApi.", source: { file: "framework-config/websockets.ts", line: 19, column: 7, start: 0, end: 10 } }] : [],
+  }));
+  await mount("resource:enableWebSocketApi");
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Rename enableWebSocketApi" }));
+  ui.fireEvent.change(ui.screen.getByRole("textbox", { name: "Code name" }), { target: { value: "allowWebSockets" } });
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Done" }));
+  ui.fireEvent.click(ui.screen.getByRole("button", { name: "Review Changes" }));
+  const issues = await ui.screen.findByRole("region", { name: "Resolve rename in source" });
+  assert.equal((ui.screen.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled, true);
+  assert.ok(ui.screen.getByLabelText("Changes to framework-config/settings.ts"));
+  assert.match(ui.within(issues).getByRole("link").getAttribute("href")!, /websockets\.ts:19:7$/);
+  assert.match(issues.textContent!, /current saved code name/);
+  blocked = false;
+  ui.fireEvent.click(ui.within(issues).getByRole("button", { name: "Refresh source and retry" }));
+  await ui.waitFor(() => assert.equal((ui.screen.getByRole("button", { name: "Apply All" }) as HTMLButtonElement).disabled, false));
+  assert.deepEqual(planCalls[1], [{ kind: "rename", entity: "resource:enableWebSocketApi", name: "allowWebSockets" }]);
+});

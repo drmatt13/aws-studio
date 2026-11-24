@@ -1,0 +1,113 @@
+import { installFixtureRelease } from "./support/project-cli";
+import { testProjectRoot } from "../../scripts/test-project";
+import assert from "./support/assert";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import path from "node:path";
+import { test } from "node:test";
+import { OperationsClient } from "../server/operations/client";
+import { privateEndpoint } from "../server/operations/ipc";
+import { PlanStore } from "../server/deploy/plans";
+import { OperationStore } from "../server/operations/store";
+import { ACCOUNT, fakeAccount, frameworkStack, READ_VERB, REGION } from "../../packages/aws-studio/test/cdk/support/fake-aws-state";
+import type { JobView } from "../shared/operations";
+
+const repository = path.resolve(__dirname, "../..");
+const deployment = "runner-fixture-prod";
+
+async function finish(client: OperationsClient, id: string): Promise<JobView> {
+  const deadline = Date.now() + 40_000;
+  while (Date.now() < deadline) {
+    const record = await client.get(id);
+    if (record && record.view.status !== "running") return record.view;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error("Fixture deployment did not finish.");
+}
+
+test("independent deployment uses the real reviewed CLI, preserves approvals and consumes its review", { timeout: 180_000 }, async () => {
+  const account = fakeAccount({ allowWrites: true });
+  const root = path.join(account.directory, "checkout"), state = path.join(account.directory, "studio");
+  mkdirSync(path.join(root, "cdk-app"), { recursive: true });
+  mkdirSync(path.join(root, "framework-config"));
+  cpSync(path.join(testProjectRoot, "framework-config/defaults.ts"), path.join(root, "framework-config/defaults.ts"));
+  writeFileSync(path.join(root, "package.json"), '{"private":true}');
+  installFixtureRelease(root);
+  writeFileSync(path.join(root, "cdk-app/cdk.json"), JSON.stringify({ context: {
+    "framework:app": "runner-fixture", "framework:appId": "0f9c2d1e-7b3a-4c5d-9e8f-1a2b3c4d5e6f",
+    "framework:targets": { prod: { mode: "prod", account: ACCOUNT, region: REGION } },
+  } }));
+  writeFileSync(path.join(root, "framework.config.ts"), `import { defaults } from "./framework-config/defaults"; export default { defaults, http:{}, webSocket:{}, events:{}, services:{} };`);
+  const stack = frameworkStack(deployment, "Current", "prod", { template: { Resources: Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`Bucket${index}`, { Type: "AWS::S3::Bucket" }])) } });
+  writeFileSync(path.join(root, "cdk-app/.env.prod"), "PRIVATE_SHORT_VALUE=6\n");
+  const manifest = { artifacts: { Current: { type: "aws:cloudformation:stack", environment: `aws://${ACCOUNT}/${REGION}`, properties: { stackName: stack.StackName, templateFile: "Current.template.json" } } } };
+  const mini = path.join(root, "mini-cdk.mjs");
+  writeFileSync(mini, `import {mkdirSync,writeFileSync,appendFileSync} from 'node:fs'; import {spawnSync} from 'node:child_process';
+const args=process.argv.slice(2);
+if(args[0]==='synth') { appendFileSync(${JSON.stringify(path.join(root, "synth-calls"))}, 'synth\\n'); const directory=args[args.indexOf('--output')+1]; mkdirSync(directory,{recursive:true});
+writeFileSync(directory+'/manifest.json',${JSON.stringify(JSON.stringify(manifest))});
+writeFileSync(directory+'/Current.template.json',${JSON.stringify(JSON.stringify(stack.Template))});
+} else { const result=spawnSync(process.execPath,[${JSON.stringify(path.join(repository, "packages/aws-studio/test/cdk/support/fake-cdk.mjs"))},...args],{env:process.env,stdio:'inherit'}); process.exit(result.status??1); }
+`);
+  const env = { ...account.env, FRAMEWORK_CDK_CLI: mini, FRAMEWORK_POLL_MS: "20" };
+  const client = new OperationsClient(root, state, env);
+  try {
+    const planned = await client.submit({ kind: "deploy-plan", params: { deployment, profile: "dev", review: "template" }, requestKey: "real-cli-plan-request" });
+    const done = await finish(client, planned.id);
+    const planLog = (await client.log(done.id)).lines.map(line => line.text).join("\n");
+    assert.equal(done.status, "succeeded", planLog);
+    assert.equal(done.summary, `Synthesis ready: 65 resource changes to review; applying needs the name ${deployment}.`, "private input substrings never corrupt computed resource counts");
+    assert.doesNotMatch(planLog, /\[redacted\]/, "a one-character value cannot shred ordinary output");
+    const plans = new PlanStore(state, root, env);
+    const reviewed = plans.read(done.planId!)!;
+    assert.equal(reviewed.confirmation.level, "name");
+    assert.equal(reviewed.result, undefined);
+    assert.equal(reviewed.synthesis?.current, true, `standalone synthesis prepares a reusable assembly: ${reviewed.synthesis?.reason ?? ""}`);
+    const journal = new OperationStore(path.join(state, "operations"));
+    try {
+      const masked = `Synthesis ready: [redacted]5 resource changes to review; applying needs the name ${deployment}.`;
+      journal.update(done.id, { summary: masked });
+      assert.equal((await client.list()).find(job => job.id === done.id)?.summary, done.summary);
+      assert.equal((await client.get(done.id))?.view.summary, done.summary);
+      const historical = await client.log(done.id);
+      assert.equal(historical.job.summary, done.summary);
+      assert.equal(historical.lines.map(line => line.text).join("\n"), planLog, "historical raw logs are never rewritten");
+      assert.equal(journal.get(done.id)?.view.summary, masked, "read projection leaves the stored operation untouched");
+    } finally { journal.close(); }
+    assert.deepEqual(account.calls().filter(call => !READ_VERB.test(call.key)), [], "template planning makes no cloud mutation, even in the fake account");
+    await assert.rejects(client.submit({ kind: "deploy-apply", params: { plan: done.planId, profile: "dev" }, requestKey: "missing-approval-request" }), /Type runner-fixture-prod/);
+    const source = path.join(root, "framework.config.ts"), originalSource = readFileSync(source, "utf8");
+    writeFileSync(source, originalSource + "\n// deployment sources changed after synthesis\n");
+    await assert.rejects(client.submit({ kind: "deploy-apply", params: { plan: done.planId, profile: "dev", confirm: deployment, currentSource: true }, requestKey: "stale-synthesis-request" }), /sources or connection changed/);
+    writeFileSync(source, originalSource);
+    const applyRequest = { kind: "deploy-apply" as const, params: { plan: done.planId, profile: "dev", confirm: deployment, currentSource: true }, requestKey: "real-cli-apply-request" };
+    const applying = await client.submit(applyRequest);
+    const applied = await finish(client, applying.id);
+    assert.equal(applied.status, "succeeded", (await client.log(applied.id)).lines.map(line => line.text).join("\n"));
+    assert.equal(applied.outcome, "confirmed");
+    assert.equal(readFileSync(path.join(root, "synth-calls"), "utf8"), "synth\n", "deployment reuses the reviewed assembly without another synthesis");
+    const directory = plans.path(done.planId!);
+    assert.ok(existsSync(path.join(directory, "operation.json")), "the CLI's own operation journal remains authoritative");
+    assert.equal(JSON.parse(readFileSync(path.join(directory, "result.json"), "utf8")).verification.verified, true);
+    assert.equal((await client.submit(applyRequest)).id, applying.id);
+    await assert.rejects(client.submit({ ...applyRequest, requestKey: "second-apply-request" }), /already|attempt/);
+    assert.ok(account.read().regions[REGION].stacks.some((entry: { StackName: string }) => entry.StackName === stack.StackName));
+    assert.doesNotMatch(JSON.stringify(await client.log(applying.id)), /sentinel-secret-never-print|AKIASENTINELNEVERPRINT/);
+    assert.equal(existsSync(path.join(root, ".cache/deploy", `${deployment}.lock`)), false, "successful CLI cleanup releases its deployment lock");
+    const lock = path.join(root, ".cache/deploy", `${deployment}.lock`);
+    const externalOwner = JSON.stringify({ pid: process.pid, token: "external-cli-owner", startedAt: new Date().toISOString() });
+    writeFileSync(lock, externalOwner);
+    const writes = account.calls().filter(call => !READ_VERB.test(call.key)).length;
+    const blocked = await client.submit({ kind: "deploy-plan", params: { deployment, profile: "dev", review: "template" }, requestKey: "cli-lock-refusal-request" });
+    assert.equal((await finish(client, blocked.id)).status, "failed");
+    assert.match((await client.log(blocked.id)).lines.map(line => line.text).join("\n"), /deployment.*running|deployment lock/i);
+    assert.equal(readFileSync(lock, "utf8"), externalOwner, "runner never reclaims another CLI owner's lock");
+    assert.equal(account.calls().filter(call => !READ_VERB.test(call.key)).length, writes, "existing CLI lock prevents new external effects");
+  } finally {
+    try {
+      for (const job of await client.list()) if (job.status === "running") { await client.cancel(job.id); await finish(client, job.id); }
+      const coordinator = await client.ping(); process.kill(coordinator.pid, "SIGTERM");
+      for (let attempt = 0; attempt < 100; attempt++) { try { process.kill(coordinator.pid, 0); await new Promise(resolve => setTimeout(resolve, 25)); } catch { break; } }
+    } finally { client.close(); await rm(privateEndpoint(root, state).directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); account.dispose(); }
+  }
+});

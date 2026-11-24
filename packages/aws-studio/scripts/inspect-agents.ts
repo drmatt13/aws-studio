@@ -1,0 +1,81 @@
+import {
+  formatResourceReference,
+  getAgentLifecycle,
+  getAgentGateways,
+  getAgentTools,
+  getFrameworkTargets,
+  isTargetDeployed, isTargetEnabled,
+  userPoolDelivery,
+  type FrameworkConfig,
+} from "aws-studio/config";
+import { loadFrameworkConfig } from "../src/config/source";
+
+// The project this runs for, loaded by root: see loadFrameworkConfig.
+const framework = loadFrameworkConfig();
+
+/**
+ * What each agent is, printed: where it runs, who can call it, and the
+ * Gateways it selects with their resolved tools.
+ *
+ * Read-only and offline: it reads the declarations, not a deployment, and makes
+ * no AWS call. `npm run agents:inspect` prints every agent;
+ * `npm run agents:inspect -- <id>` prints one.
+ */
+
+const GREY = "\u001b[90m";
+const BOLD = "\u001b[1m";
+const RESET = "\u001b[0m";
+const colour = process.stdout.isTTY === true;
+const dim = (text: string) => (colour ? `${GREY}${text}${RESET}` : text);
+const bold = (text: string) => (colour ? `${BOLD}${text}${RESET}` : text);
+
+function describe(config: FrameworkConfig, id: string): string[] {
+  const target = getFrameworkTargets(config).find((candidate) => candidate.reference === `agent:${id}`)!;
+  const declaration = config.agents?.[id];
+  const lifecycle = getAgentLifecycle(config, id);
+  const lanes = [
+    isTargetEnabled(config, "agent", id, "local", "unconditioned") ? "local session processes" : undefined,
+    isTargetDeployed(config, "agent", id, "prod", { inputs: "unconditioned" }) ? "AgentCore Runtime in a full deployment" : undefined,
+  ].filter((lane): lane is string => lane !== undefined);
+
+  const lines = [
+    bold(`agent:${id}`),
+    `  source      ${target.directory}/index.ts`,
+    `  runs        ${lanes.length > 0 ? lanes.join("; ") : "nowhere (deploy: none)"}`,
+    `  callers     ${
+      declaration?.auth === true
+        ? (declaration.route ? `the browser at ${declaration.route} with the user's session; ` : "") + "workloads declaring invokesAgent pass the user's session"
+        : "workloads declaring invokesAgent, with their own IAM role"
+    }`,
+    `  sessions    idle ${lifecycle.idleSeconds}s, at most ${lifecycle.maxLifetimeSeconds}s`,
+  ];
+  if (declaration?.auth === true) {
+    // Where USER_POOL_ID comes from, since an auth: true agent never writes it.
+    lines.splice(4, 0, `  user pool   ${
+      config.userPool && userPoolDelivery("agent", declaration, config.userPool)
+        ? `framework.config.ts userPool, ${formatResourceReference(config.userPool.userPoolId)}`
+        : "the one its own environment names"
+    }`);
+  }
+  const tools = getAgentTools(config, id);
+  const gateways = getAgentGateways(config, id);
+  if (gateways.length === 0) {
+    lines.push(`  gateways    ${dim("none")}`);
+  } else {
+    lines.push(`  gateways    ${gateways.map(gateway => gateway.id).join(", ")}; emulated locally by the runner`);
+    for (const tool of tools) {
+      lines.push(
+        `    ${tool.id.padEnd(24)} ${tool.auth ? "acts as the signed-in user" : "service authority"}  ${dim(`via ${tool.gatewayId}; wire name ${tool.wireName}`)}`,
+      );
+    }
+  }
+  return lines;
+}
+
+const requested = process.argv[2];
+const ids = Object.keys(framework.agents ?? {}).filter((id) => requested === undefined || id === requested);
+if (requested !== undefined && ids.length === 0) {
+  console.error(`No agent "${requested}". Declared: ${Object.keys(framework.agents ?? {}).join(", ") || "none"}.`);
+  process.exitCode = 1;
+}
+console.log(ids.map((id) => describe(framework, id).join("\n")).join("\n\n"));

@@ -1,0 +1,64 @@
+{
+  "name": "aws-studio-workspace",
+  "author": "Matthew Sweeney",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "engines": {
+    "node": ">=24.22.2 <25",
+    "npm": ">=11.19.1 <12"
+  },
+  "devEngines": {
+    "runtime": { "name": "node", "version": ">=24.22.2 <25", "onFail": "warn" },
+    "packageManager": { "name": "npm", "version": ">=11.19.1 <12", "onFail": "warn" }
+  },
+  "scripts": {
+    "studio": "node scripts/project-node.mjs node --import tsx client-app/server/index.ts",
+    "pack": "node scripts/project-node.mjs node --import tsx scripts/pack.ts",
+    "pack:studio": "node --import tsx scripts/pack-studio.ts",
+    "build": "npm --workspace framework-studio run build",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc -p scripts/tsconfig.json",
+    "test": "node scripts/verify-platform.mjs test",
+    "test:prepare": "node scripts/prepare-test-project.mjs",
+    "lockfile:check": "node scripts/check-lockfile-platforms.mjs",
+    "verify": "node scripts/verify-platform.mjs verify",
+    "verify:offline": "node scripts/verify-platform.mjs verify",
+    "private-dns:spike": "tsx packages/aws-studio/test/support/private-dns-parity/cli.ts",
+    "private-dns:aws-plan": "tsx packages/aws-studio/test/cdk/support/private-dns-parity-plan.ts"
+  },
+  "workspaces": [
+    "client-app",
+    "packages/*"
+  ],
+  "devDependencies": {
+    "@graphql-codegen/cli": "^7.4.6",
+    "@graphql-codegen/schema-ast": "^6.1.1",
+    "@hono/node-server": "1.19.15",
+    "@repo/framework-generated": "file:.cache/test-project-bootstrap/framework-generated",
+    "esbuild": "0.28.2",
+    "hono": "4.13.13",
+    "json-schema-to-typescript": "^15.0.4",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "5.0.3"
+  },
+  "packageManager": "npm@11.19.1",
+  "overrides": {
+    "@hono/node-server": "1.19.15",
+    "@prisma/cli-engine": "0.6.2",
+    "@prisma/orm-postgres": "8.0.0-rc.14",
+    "deepmerge-ts": "8.0.2",
+    "hono": "4.13.13",
+    "lodash": "4.18.1",
+    "valibot": "1.4.2",
+    "vite": "8.2.4",
+    "zod@^4.0.0": "4.6.7"
+  },
+  "allowScripts": {
+    "workerd@1.20260901.1": true,
+    "fsevents": false,
+    "esbuild@0.28.2": true
+  },
+  "dependencies": {
+    "@smithy/shared-ini-file-loader": "4.7.2"
+  }
+}

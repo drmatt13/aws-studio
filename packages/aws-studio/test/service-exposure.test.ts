@@ -1,0 +1,44 @@
+import { applicationVpc as fixtureVpc } from "../../../scripts/test-project-declarations";
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  normalizeFrameworkConfig,
+  type FrameworkConfig,
+} from "aws-studio/config";
+
+function withService(service: Record<string, unknown>): FrameworkConfig {
+  return { networks: [fixtureVpc],
+    resources: {},
+    defaults: {
+      lambda: {
+        runtime: "nodejs24",
+        packaging: "zip",
+        architecture: "arm64",
+        memorySize: 128,
+        timeoutSeconds: 10,
+        bundling: { minify: true, sourceMap: true },
+      },
+    },
+    http: {},
+    webSocket: {},
+    events: {},
+    services: {
+      "/orders/*": { cloud: { vpc: fixtureVpc }, directory: "compute/services/orders", methods: ["GET"], port: 8000, ...service },
+    },
+  } as unknown as FrameworkConfig;
+}
+
+test("a service's load balancer is private unless declared otherwise", () => {
+  const config = withService({ auth: true });
+  const target = normalizeFrameworkConfig(config).targets.get("service:orders");
+  assert.equal(target?.cloud.service?.publicLoadBalancer, false);
+});
+
+test("auth: true cannot be combined with a public load balancer", () => {
+  assert.throws(
+    () => normalizeFrameworkConfig(withService({ auth: true, cloud: { vpc: fixtureVpc, publicLoadBalancer: true } })),
+    /reachable without the HTTP API's authorizer/,
+  );
+  // Without auth the service owns its own access control, so it is allowed.
+  normalizeFrameworkConfig(withService({ cloud: { vpc: fixtureVpc, publicLoadBalancer: true } }));
+});

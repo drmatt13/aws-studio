@@ -1,0 +1,420 @@
+import { testProjectModule } from "./support/test-project";
+import { after as afterSourceMigration } from "node:test";
+import { copySourceFixtures } from "./support/source-fixtures";
+const migrationSources = copySourceFixtures("agentcore" + "-" + process.pid, ["workload-handler"]);
+afterSourceMigration(migrationSources.cleanup);
+import { applicationVpc as fixtureVpc, defaults } from "./support/declarations";
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import test from "node:test";
+import * as cdk from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
+import * as cognito from "aws-cdk-lib/aws-cognito";
+import * as agentcore from "aws-cdk-lib/aws-bedrockagentcore";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import { Construct } from "constructs";
+import {
+  defineFrameworkConfig,
+  getCloudTargets,
+  getDefaultConstructId,
+  invokeAgent,
+  invokesAgent,
+  workflow,
+  type Flow,
+  type FrameworkConfig,
+} from "aws-studio/config";
+
+import type { CloudAccessStatement } from "aws-studio/config";
+import { hasAgentCoreCloudResources } from "aws-studio/cdk/framework-agentcore";
+import { buildFrameworkLambdas } from "aws-studio/cdk/framework-cloud";
+import { finalizeFrameworkResources, initializeFrameworkResources } from "aws-studio/cdk/framework-resources";
+import { OrchestrationStack } from "aws-studio/cdk/orchestration-stack";
+import { findCycle, reaches, resourceGraph, type TemplateJson } from "./support/template-graph";
+import {
+  agentFixtureDirectory,
+  fixtureAgentSource,
+  fixtureToolSource,
+  toolFixtureDirectory,
+  writeSourceFixtures,
+} from "./support/source-fixtures";
+
+const { modelProviders } = testProjectModule<{ modelProviders: { access: readonly CloudAccessStatement[] } }>("framework-config/model-providers");
+
+const env = { account: "111122223333", region: "us-east-1" };
+const cognitoEnvironment = { USER_POOL_ID: "us-east-1_pool", USER_POOL_CLIENT_ID: "client" };
+
+/**
+ * The run a tool id belongs to: its suffix, which names the directory this
+ * run's fixtures are written under. The `echo` user tool and `echo-agent` stand
+ * in for an agent with users and a tool that acts as them, which the
+ * repository's own example does not have: its tools are service tools.
+ */
+function runOf(toolId: string): string {
+  return toolId.slice("lookup-".length);
+}
+
+/**
+ * Two agents and their tools, written for this test, so the synthesized graph
+ * has two Gateways to keep apart: an agent with users and a user tool, and a
+ * service agent and a service tool. Removed afterwards.
+ */
+function fixtures() {
+  const run = randomUUID().slice(0, 8);
+  const toolId = `lookup-${run}`;
+  const agentId = `worker-${run}`;
+  const dispose = writeSourceFixtures(run, {
+    tools: { [toolId]: fixtureToolSource, echo: fixtureToolSource },
+    agents: { [agentId]: fixtureAgentSource(agentId), "echo-agent": fixtureAgentSource("echo-agent") },
+  });
+  return { toolId, agentId, dispose };
+}
+
+function config(toolId: string, agentId: string, http = {}): FrameworkConfig {
+  const run = runOf(toolId);
+  return defineFrameworkConfig({ networks: [fixtureVpc],
+    defaults,
+    http: [http],
+    webSocket: [],
+    events: [],
+    services: [],
+    tools: [
+      {
+        echo: {
+          directory: toolFixtureDirectory(run, "echo"),
+          auth: true,
+          environment: cognitoEnvironment,
+          cloud: { access: [{ actions: ["s3:GetObject"], resources: ["arn:{partition}:s3:::example-bucket/*"] }] },
+        },
+        [toolId]: { directory: toolFixtureDirectory(run, toolId) },
+      },
+    ],
+    gateways: [{ "echo-agent": { tools: ["echo"], deploy: "both" }, [agentId]: { tools: [toolId], deploy: "both" } }],
+    agents: [
+      {
+        "echo-agent": {
+          directory: agentFixtureDirectory(run, "echo-agent"),
+          auth: true,
+          route: "/chat/echo",
+          gateways: ["echo-agent"],
+          deploy: "both",
+          environment: cognitoEnvironment,
+          cloud: { idleSeconds: 600, access: [{ actions: ["bedrock:InvokeModel"], resources: ["arn:{partition}:bedrock:*::foundation-model/*"] }] },
+        },
+        [agentId]: { directory: agentFixtureDirectory(run, agentId), gateways: [agentId], deploy: "both" },
+      },
+    ],
+  });
+}
+
+const manifest = (toolId: string) => ({
+  echo: {
+    description: "Echo.",
+    auth: true,
+    inputSchema: { type: "object", properties: { message: { type: "string" } }, required: ["message"] },
+    outputSchema: { type: "object" },
+  },
+  [toolId]: { description: "Look up.", auth: false, inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+}) as const;
+
+function synthesize(framework: FrameworkConfig, mode: "dev" | "prod", toolId: string, withCaller = false) {
+  const app = new cdk.App({ context: { "@aws-cdk/aws-lambda:useCdkManagedLogGroup": true } });
+  initializeFrameworkResources(app, { config: framework, mode, deployment: "agentcore-test", readers: { env: {} } });
+  const identity = new cdk.Stack(app, "Identity", { env });
+  const userPool = new cognito.UserPool(identity, "Pool");
+  const userPoolClient = userPool.addClient("Client");
+  const stack = new OrchestrationStack(app, "WorkflowsStack", {
+    env,
+    config: framework,
+    mode,
+    cognito: { userPool, userPoolClient },
+    tools: manifest(toolId),
+  });
+  if (withCaller) {
+    buildFrameworkLambdas(stack, stack.agentcore!.targets, getCloudTargets(framework, ["http"], mode), { config: framework, mode });
+  }
+  finalizeFrameworkResources(app);
+  return Template.fromStack(stack);
+}
+
+test("a full deployment builds one Gateway per agent, holding exactly that agent's tools", () => {
+  const { toolId, agentId, dispose } = fixtures();
+  try {
+    const template = synthesize(config(toolId, agentId), "prod", toolId);
+    template.resourceCountIs("AWS::BedrockAgentCore::Gateway", 2);
+    template.allResourcesProperties("AWS::BedrockAgentCore::Gateway", { AuthorizerType: "AWS_IAM" });
+    template.resourceCountIs("AWS::BedrockAgentCore::GatewayTarget", 2);
+
+    const targets = Object.values(template.findResources("AWS::BedrockAgentCore::GatewayTarget")) as {
+      Properties: { Name: string; GatewayIdentifier: unknown; TargetConfiguration: unknown };
+    }[];
+    const names = targets.map((target) => target.Properties.Name).sort();
+    assert.deepEqual(names, ["echo", toolId].sort());
+    const gatewayOf = (name: string) => JSON.stringify(targets.find((target) => target.Properties.Name === name)!.Properties.GatewayIdentifier);
+    assert.notEqual(gatewayOf("echo"), gatewayOf(toolId), "each agent's tools sit on that agent's own Gateway");
+
+    // A user tool lists the identity argument so Gateway carries it through.
+    const echo = JSON.stringify(targets.find((target) => target.Properties.Name === "echo")!.Properties.TargetConfiguration);
+    assert.match(echo, /__framework_identity/);
+    assert.doesNotMatch(
+      JSON.stringify(targets.find((target) => target.Properties.Name === toolId)!.Properties.TargetConfiguration),
+      /__framework_identity/,
+    );
+  } finally {
+    dispose();
+  }
+});
+
+test("cloud consumers deploy a shared tool once and omit local-only and unused tools", () => {
+  const { toolId, agentId, dispose } = fixtures();
+  try {
+    const { resources: _derivedResources, ...base } = config(toolId, agentId);
+    const framework = defineFrameworkConfig({
+      ...base,
+      tools: [{ ...base.tools, unused: {} }],
+      gateways: [{ ...base.gateways, "echo-agent": { tools: ["echo", toolId], deploy: "local-only" } }],
+    agents: [{
+        "echo-agent": { ...base.agents!["echo-agent"]!, gateways: ["echo-agent"], deploy: "local-only" },
+        [agentId]: { ...base.agents![agentId]!, deploy: "cloud-only" },
+      }],
+    });
+    const template = synthesize(framework, "prod", toolId);
+    template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 1);
+    template.resourceCountIs("AWS::BedrockAgentCore::Gateway", 1);
+    template.resourceCountIs("AWS::BedrockAgentCore::GatewayTarget", 1);
+    template.allResourcesProperties("AWS::BedrockAgentCore::GatewayTarget", { Name: toolId });
+    const toolLambdas = Object.keys(template.findResources("AWS::Lambda::Function"))
+      .filter((id) => id.startsWith("AgentCoreTools"));
+    assert.equal(toolLambdas.length, 1);
+    const original = synthesize(base, "prod", toolId);
+    assert.ok(original.findResources("AWS::Lambda::Function")[toolLambdas[0]!], "the shared tool retains its logical id");
+  } finally {
+    dispose();
+  }
+});
+
+test("agents deploy as Node code, with Cognito in front of an agent that has users", () => {
+  const { toolId, agentId, dispose } = fixtures();
+  try {
+    const template = synthesize(config(toolId, agentId), "prod", toolId);
+    template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 2);
+    const runtimes = Object.values(template.findResources("AWS::BedrockAgentCore::Runtime")) as {
+      Properties: Record<string, any>;
+    }[];
+    for (const runtime of runtimes) {
+      assert.equal(runtime.Properties.AgentRuntimeArtifact.CodeConfiguration.Runtime, "NODE_22");
+    }
+    const withUsers = runtimes.find((runtime) => runtime.Properties.AuthorizerConfiguration);
+    assert.ok(withUsers, "the agent with users has an authorizer");
+    const jwt = withUsers.Properties.AuthorizerConfiguration.CustomJWTAuthorizer;
+    assert.match(JSON.stringify(jwt.DiscoveryUrl), /well-known\/openid-configuration/);
+    assert.ok(jwt.AllowedAudience, "ID tokens carry aud, so the client id is the allowed audience");
+    assert.equal(jwt.AllowedClients, undefined);
+    assert.deepEqual(withUsers.Properties.RequestHeaderConfiguration, { RequestHeaderAllowlist: ["Authorization"] });
+    assert.equal(withUsers.Properties.LifecycleConfiguration.IdleRuntimeSessionTimeout, 600);
+    assert.match(JSON.stringify(withUsers.Properties.EnvironmentVariables), /FRAMEWORK_AGENTCORE_ADAPTER/);
+    assert.equal(runtimes.filter((runtime) => !runtime.Properties.AuthorizerConfiguration).length, 1);
+
+    const serialized = JSON.stringify(template.toJSON());
+    assert.match(serialized, /bedrock-agentcore:InvokeGateway/);
+    assert.match(serialized, /example-bucket/, "a tool's own access lands on its Lambda");
+    const runtimePolicy = JSON.stringify(
+      Object.entries(template.findResources("AWS::IAM::Policy")).filter(([id]) => id.startsWith("AgentCoreRuntimesEchoAgent")),
+    );
+    assert.match(runtimePolicy, /bedrock:InvokeModel/, "an agent's own access lands on its Runtime role");
+    // Each Runtime has its MMDSv2 setting applied, through one shared provider.
+    template.resourceCountIs("AWS::CloudFormation::CustomResource", 2);
+    const providers = Object.values(template.findResources("AWS::Lambda::Function")).filter(
+      (fn) => (fn as { Properties: { Handler?: string } }).Properties.Handler === "framework.onEvent",
+    );
+    assert.equal(providers.length, 1, "one MMDSv2 provider serves every Runtime");
+  } finally {
+    dispose();
+  }
+});
+
+test("the shared model permissions reach an agent's Runtime role with Mantle inference scoped to the default project", () => {
+  const { toolId, agentId, dispose } = fixtures();
+  try {
+    const { resources: _derivedResources, ...base } = config(toolId, agentId);
+    const framework = defineFrameworkConfig({
+      ...base,
+      agents: [{
+        ...base.agents,
+        [agentId]: { ...base.agents![agentId]!, cloud: { access: modelProviders.access } },
+      }],
+    });
+    const template = synthesize(framework, "prod", toolId);
+    const policies = Object.entries(template.findResources("AWS::IAM::Policy"))
+      .filter(([id]) => id.startsWith("AgentCoreRuntimesWorker"))
+      .map(([, policy]) => (policy as { Properties: { PolicyDocument: { Statement: { Action: string | string[]; Resource: unknown }[] } } }).Properties.PolicyDocument.Statement);
+    const statements = policies.flat();
+    const action = (name: string) => statements.find((statement) => [statement.Action].flat().includes(name));
+    assert.deepEqual(action("bedrock-mantle:CreateInference")?.Resource, {
+      "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, `:bedrock-mantle:${env.region}:${env.account}:project/default`]],
+    });
+    assert.equal(action("bedrock-mantle:CallWithBearerToken")?.Resource, "*");
+    assert.ok(action("bedrock:InvokeModel"), "the bedrock-runtime provider retains its model permissions");
+  } finally {
+    dispose();
+  }
+});
+
+test("a dev deployment holds nothing for agents: they, their Gateways and their tools all run locally", () => {
+  const { toolId, agentId, dispose } = fixtures();
+  try {
+    assert.equal(hasAgentCoreCloudResources(config(toolId, agentId), "dev"), false);
+    assert.equal(hasAgentCoreCloudResources(config(toolId, agentId), "prod"), true);
+  } finally {
+    dispose();
+  }
+});
+
+test("invokesAgent: an agent with users is called with the caller's token, a service agent with an IAM grant", () => {
+  const { toolId, agentId, dispose } = fixtures();
+  const caller = {
+    "/ask": {
+      directory: migrationSources.directory("workload-handler"),
+      methods: ["POST" as const],
+      auth: true as const,
+      deploy: "both" as const,
+      cloud: { bindings: [invokesAgent("echo-agent"), invokesAgent(agentId)] },
+    },
+  };
+  try {
+    const template = JSON.stringify(synthesize(config(toolId, agentId, caller), "prod", toolId, true).toJSON());
+    assert.match(template, /FRAMEWORK_AGENT_ECHO_AGENT/);
+    assert.match(template, /\\"kind\\":\\"agent\\"/);
+    assert.match(template, /\\"auth\\":true/);
+    assert.match(template, /\\"auth\\":false/);
+    // One grant: the service agent's. The agent with users accepts the user's token instead.
+    assert.equal((template.match(/bedrock-agentcore:InvokeAgentRuntime/g) ?? []).length, 1);
+  } finally {
+    dispose();
+  }
+});
+
+test("an empty Gateway deploys without an agent or tool", () => {
+  const framework = defineFrameworkConfig({ defaults, http: [], webSocket: [], events: [], services: [], gateways: [{ empty: {} }] });
+  assert.equal(hasAgentCoreCloudResources(framework, "prod"), true);
+  assert.equal(hasAgentCoreCloudResources(framework, "dev"), false);
+  const template = synthesize(framework, "prod", "unused");
+  template.resourceCountIs("AWS::BedrockAgentCore::Gateway", 1);
+  template.resourceCountIs("AWS::BedrockAgentCore::GatewayTarget", 0);
+  template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 0);
+});
+
+test("agents share a Gateway, with narrow grants only for their selected Gateways", () => {
+  const { toolId, agentId, dispose } = fixtures();
+  try {
+    const { resources: _derivedResources, ...base } = config(toolId, agentId);
+    const framework = defineFrameworkConfig({ ...base,
+      gateways: [{ shared: { tools: [toolId] }, private: { tools: ["echo"] } }],
+      agents: [{
+        [agentId]: { ...base.agents![agentId]!, gateways: ["shared"] },
+        "echo-agent": { ...base.agents!["echo-agent"]!, gateways: ["shared", "private"] },
+      }],
+    });
+    const template = synthesize(framework, "prod", toolId);
+    template.resourceCountIs("AWS::BedrockAgentCore::Gateway", 2);
+    template.resourceCountIs("AWS::BedrockAgentCore::GatewayTarget", 2);
+    const policies = Object.entries(template.findResources("AWS::IAM::Policy"));
+    const service = JSON.stringify(policies.filter(([id]) => id.startsWith(`AgentCoreRuntimes${getDefaultConstructId(agentId)}`)));
+    const user = JSON.stringify(policies.filter(([id]) => id.startsWith("AgentCoreRuntimesEchoAgent")));
+    assert.match(service, /AgentCoreGatewaysShared/);
+    assert.doesNotMatch(service, /AgentCoreGatewaysPrivate|lambda:InvokeFunction/);
+    assert.match(user, /AgentCoreGatewaysShared/);
+    assert.match(user, /AgentCoreGatewaysPrivate/);
+    assert.doesNotMatch(user, /lambda:InvokeFunction/);
+  } finally { dispose(); }
+});
+
+test("migrating to an explicit Gateway preserves the legacy Gateway, role and target logical IDs", () => {
+  const { toolId, agentId, dispose } = fixtures();
+  try {
+    const { resources: _derivedResources, ...base } = config(toolId, agentId);
+    const constructId = getDefaultConstructId(agentId);
+    const { [agentId]: previousGateway, ...otherGateways } = base.gateways!;
+    const framework = defineFrameworkConfig({ ...base,
+      gateways: [{ ...otherGateways, migrated: { ...previousGateway, cloud: { constructId } } }],
+      agents: [{ ...base.agents, [agentId]: { ...base.agents![agentId]!, gateways: ["migrated"] } }],
+    });
+    const actual = synthesize(framework, "prod", toolId);
+    const app = new cdk.App();
+    const stack = new cdk.Stack(app, "WorkflowsStack", { env });
+    const scope = new Construct(stack, "AgentCore");
+    const gateway = new agentcore.Gateway(new Construct(scope, "Gateways"), constructId, {
+      authorizerConfiguration: agentcore.GatewayAuthorizer.usingAwsIam(),
+      protocolConfiguration: agentcore.GatewayProtocol.mcp({ supportedVersions: [agentcore.MCPProtocolVersion.MCP_2025_03_26] }),
+    });
+    const fn = new lambda.Function(new Construct(scope, "Tools"), "LegacyTool", { runtime: lambda.Runtime.NODEJS_24_X, handler: "index.handler", code: lambda.Code.fromInline("exports.handler = async () => ({})") });
+    gateway.addLambdaTarget(`Target${toolId}`, { gatewayTargetName: toolId, lambdaFunction: fn, toolSchema: agentcore.ToolSchema.fromInline([{ name: toolId, description: "Legacy target", inputSchema: { type: agentcore.SchemaDefinitionType.OBJECT } }]) });
+    const legacy = Template.fromStack(stack);
+    for (const type of ["AWS::BedrockAgentCore::Gateway", "AWS::BedrockAgentCore::GatewayTarget", "AWS::IAM::Role", "AWS::IAM::Policy"]) {
+      const legacyIds = Object.keys(legacy.findResources(type)).filter(id => id.startsWith("AgentCoreGateways"));
+      assert.ok(legacyIds.length > 0, `legacy ${type} exists`);
+      for (const id of legacyIds) assert.ok(actual.findResources(type)[id], `${type} preserves ${id}`);
+    }
+  } finally { dispose(); }
+});
+
+test("a workflow's invokeAgent step calls the Runtime with the workflow's role, granted on that Runtime only", () => {
+  const { toolId, agentId, dispose } = fixtures();
+  const invokeStep = invokeAgent as unknown as (agent: string, input: unknown) => Flow<unknown>;
+  try {
+    const { resources: _derivedResources, ...base } = config(toolId, agentId);
+    const framework = defineFrameworkConfig({ networks: [fixtureVpc],
+      defaults,
+      http: [],
+      webSocket: [],
+      events: [],
+      services: [],
+      tools: [{ [toolId]: base.tools![toolId]! }],
+      gateways: [{ [agentId]: base.gateways![agentId]! }],
+      agents: [{ [agentId]: base.agents![agentId]! }],
+      workflows: [
+        {
+          review: workflow<{ caseId: string }>(({ input }) => invokeStep(agentId, { caseId: input.caseId }), {
+            timeoutSeconds: 600,
+          }),
+        },
+      ],
+    });
+
+    const app = new cdk.App({ context: { "@aws-cdk/aws-lambda:useCdkManagedLogGroup": true } });
+    initializeFrameworkResources(app, { config: framework, mode: "prod", deployment: "agentcore-test", readers: { env: {} } });
+    const identity = new cdk.Stack(app, "Identity", { env });
+    const userPool = new cognito.UserPool(identity, "Pool");
+    const stack = new OrchestrationStack(app, "WorkflowsStack", {
+      env,
+      config: framework,
+      mode: "prod",
+      cognito: { userPool, userPoolClient: userPool.addClient("Client") },
+      tools: manifest(toolId),
+    });
+    finalizeFrameworkResources(app);
+    app.synth();
+
+    const template = Template.fromStack(stack).toJSON() as TemplateJson & { Resources: Record<string, { Type: string; Properties: Record<string, unknown> }> };
+    const [machineId, machine] = Object.entries(template.Resources).find(([, resource]) => resource.Type === "AWS::StepFunctions::StateMachine")!;
+    const definition = JSON.stringify(machine.Properties.DefinitionString);
+    assert.match(definition, /arn:aws:states:::aws-sdk:bedrockagentcore:invokeAgentRuntime/);
+    // The state machine and the Runtime share the stack: a reference, not an import.
+    const runtimeId = Object.keys(template.Resources).find((id) => template.Resources[id].Type === "AWS::BedrockAgentCore::Runtime")!;
+    const graph = resourceGraph(template);
+    assert.ok(reaches(graph, machineId, runtimeId));
+    assert.equal(findCycle(graph), undefined);
+    assert.doesNotMatch(definition, /Fn::ImportValue/);
+
+    const statements = Object.values(template.Resources)
+      .filter((resource) => resource.Type === "AWS::IAM::Policy")
+      .flatMap((resource) => (resource.Properties.PolicyDocument as { Statement: { Action: unknown; Resource: unknown }[] }).Statement);
+    const invoke = statements.filter((statement) => JSON.stringify(statement.Action).includes("bedrock-agentcore:InvokeAgentRuntime"));
+    assert.equal(invoke.length, 1, "one grant, for the one Runtime the graph names");
+    const resources = JSON.stringify(invoke[0].Resource);
+    assert.match(resources, /AgentRuntimeArn/, "scoped to the Runtime's own ARN, not a wildcard");
+    assert.doesNotMatch(resources, /runtime\/\*"/);
+    assert.doesNotMatch(JSON.stringify(invoke[0].Action), /ForUser/);
+  } finally {
+    dispose();
+  }
+});

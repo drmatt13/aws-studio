@@ -1,0 +1,37 @@
+import type { ModeModel, ModelEdge, NetworkModel } from "./model";
+
+export const DESCRIPTION_FILE = "framework-config/studio/descriptions.ts";
+export const DESCRIPTION_LIMIT = 8000;
+export const ISLAND_IDS = ["island:apis", "island:lambda", "island:agentcore", "island:orchestration", "island:stacks", "island:inputs", "island:environment", "island:client-environment"] as const;
+
+export function networkFixtureIds(network: NetworkModel | undefined): string[] {
+  return network ? [`island:vpc:${network.id}`, `prop:vpc:${network.id}:internet-gateway`, ...(network?.egressOnlyInternetGateway ? [`prop:vpc:${network.id}:egress-only-gateway`] : []),
+    ...(network?.natGateway ? [`prop:vpc:${network.id}:nat-gateway`] : []),
+    ...new Set([...(network?.gatewayEndpoints ?? []), ...(network?.interfaceEndpoints ?? [])].map((name) => `prop:vpc:${network.id}:endpoint:${name}`))] : [];
+}
+
+/** Keep notes on the same relationship when graph ordering or environment details change.
+ * Identical relationships share notes; differently named mappings between a pair do not. */
+export function connectionDescriptionId(edge: ModelEdge): string {
+  // Conditional arrows now follow input -> workload; keep existing notes under their historical key.
+  const [from, destination] = edge.relation === "deployWhen" ? [edge.to, edge.from] : [edge.from, edge.to];
+  // Replay now targets the exposed bucket; retain notes authored on its stack relationship.
+  const to = edge.relation === "localReplay" ? destination.replace(/\.bucket$/, "") : destination;
+  return `connection-description:${JSON.stringify([edge.relation, from, to, edge.label, edge.attachment ?? null])}`;
+}
+
+/** Uses canonical model identities, including public stack fields and individual relationships. */
+export function descriptionEntityIds(models: readonly ModeModel[]): ReadonlySet<string> {
+  return new Set([...ISLAND_IDS, "gateway:http", "gateway:websocket", ...models.flatMap((model) => [
+    ...(model.gateways ?? []).map(gateway => gateway.id),
+    ...model.targets.map((target) => target.ref), ...model.routes.map((route) => route.id),
+    ...model.resources.map((resource) => resource.id), ...(model.localServices ?? []).map((service) => service.id),
+    ...model.edges.map(connectionDescriptionId),
+    ...(model.networks ?? []).flatMap(networkFixtureIds),
+  ])]);
+}
+
+export function descriptionError(value: string): string | undefined {
+  return value.length > DESCRIPTION_LIMIT ? `Use at most ${DESCRIPTION_LIMIT} characters.`
+    : value.includes("\0") ? "Descriptions cannot contain null characters." : undefined;
+}

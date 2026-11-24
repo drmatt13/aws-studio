@@ -1,0 +1,669 @@
+import { gatewaysOf } from "../../shared/gateways";
+import { sourceEditBlocked } from "../editing-state";
+import { Select, TextInput } from "../ui/FormControls";
+import { buttonClasses } from "../ui/Button";
+import { cx } from "../ui/classes";
+import {
+  dialogClasses,
+  dialogHeaderClasses,
+  dialogSubtitleClasses,
+  dialogTitleClasses,
+  dialogBodyClasses,
+  dialogFooterClasses,
+  dialogPrimaryActionClasses,
+} from "../inspector-ui";
+import { useEffect, useId, useRef, useState } from "react";
+import {
+  CREATORS,
+  CreationValidationError,
+  creationDefaults,
+  defaultImplementationDirectory,
+  networkCreationProblem,
+  readCreationRequest,
+  webSocketCreationCondition,
+  type CreationField,
+} from "../../shared/creation";
+import type { CreationEntry } from "../draft";
+import { useStudio } from "../studio";
+import { SOURCE_HOLD_NOTE, sourceHeld } from "../../shared/api";
+import { InspectorSwitch } from "./InspectorUI";
+import { InterfaceEndpointPicker } from "./InterfaceEndpointPicker";
+import { TagRows } from "./Tags";
+import { deploymentSettingLabel } from "../deployment";
+import { resourceOutputEnvironmentName } from "aws-studio/config";
+
+/** Forms are part of InspectorDraft: review/back, source conflicts, navigation,
+ * browser exit, discard and apply all share the existing session lifecycle. */
+export function CreationWizard({
+  entry,
+  back,
+}: {
+  readonly entry: CreationEntry;
+  readonly back: () => void;
+}) {
+  const { draft, draftState, model, snapshot, live, response } = useStudio();
+  const dialog = useRef<HTMLDialogElement>(null);
+  const prefix = useId();
+  const [tagError, setTagError] = useState<string>();
+  const [touched, setTouched] = useState<ReadonlySet<string>>(() => new Set());
+  const touch = (field: string) =>
+    setTouched((current) => (current.has(field) ? current : new Set([...current, field])));
+  const creator = CREATORS[entry.resourceKind];
+  const api = entry.resourceKind === "route" || entry.resourceKind === "gateway";
+  const catalogInput = entry.resourceKind === "input" || entry.resourceKind === "secret";
+  const linkedToEnv = entry.resourceKind === "secret" || entry.form.linkedToEnv !== false;
+  const disabled = sourceEditBlocked({ draftState, draft, model, live });
+  useEffect(() => {
+    const element = dialog.current!;
+    if (!draftState.reviewOpen && !draftState.pendingNavigation) element.showModal();
+    return () => element.close();
+  }, [draftState.reviewOpen, draftState.pendingNavigation]);
+  let problem: CreationValidationError | undefined;
+  const newWebSocket =
+    (entry.resourceKind === "function" || entry.resourceKind === "route") &&
+    entry.form.category === "webSocket" &&
+    !entry.form.existingTarget;
+  let webSocketCondition: ReturnType<typeof webSocketCreationCondition>;
+  let webSocketConditionProblem: CreationValidationError | undefined;
+  if (newWebSocket)
+    try {
+      webSocketCondition = webSocketCreationCondition(Object.values(snapshot.models));
+    } catch (error) {
+      if (error instanceof CreationValidationError) webSocketConditionProblem = error;
+    }
+  try {
+    const request = readCreationRequest({ kind: entry.resourceKind, ...entry.form });
+    if (request.kind === "vpc") problem = networkCreationProblem(request, model.networks ?? []);
+    if (newWebSocket && entry.form.deploy !== "none") {
+      problem = webSocketConditionProblem;
+      if (webSocketCondition && entry.form.deploy !== "both")
+        problem = new CreationValidationError(
+          "deploy",
+          "Choose Use $connect condition or Off for this WebSocket handler.",
+        );
+    }
+  } catch (error) {
+    if (error instanceof CreationValidationError) problem = error;
+  }
+  const fields = creator.fields.filter((field) => {
+    if (api && field.key === "category") return false;
+    if (entry.resourceKind === "input") {
+      if (["envName", "required", "defaultValue"].includes(field.key)) return linkedToEnv;
+      if (field.key === "value") return !linkedToEnv;
+    }
+    if (entry.resourceKind === "auth-provider") {
+      if (["issuer", "clientId", "secretEnvName", "scopes"].includes(field.key))
+        return entry.form.providerType === "oidc";
+      if (field.key === "metadataUrl") return entry.form.providerType === "saml";
+      if (["description", "tags"].includes(field.key)) return false;
+    }
+    if (entry.resourceKind === "stack" && ["readBucketArn", "readPrefix"].includes(field.key))
+      return entry.form.template === "identity-pool";
+    const lambda = entry.resourceKind === "function" || entry.resourceKind === "route";
+    if (!lambda) return true;
+    if (field.key === "head") return entry.form.category === "http" && entry.form.method === "GET";
+    if (field.key === "localReplay") return entry.form.category === "event";
+    if (entry.form.category === "event" && ["path", "method", "auth"].includes(field.key))
+      return false;
+    if (entry.form.category === "webSocket" && ["method", "auth"].includes(field.key)) return false;
+    if (
+      entry.resourceKind === "route" &&
+      entry.form.existingTarget &&
+      !["description", "category", "path", "method", "existingTarget", "tags", "head"].includes(field.key)
+    )
+      return false;
+    return true;
+  });
+  const render = (field: CreationField) => {
+    const id = `${prefix}-${field.key}`;
+    const serverError = draftState.error?.startsWith(`${field.key}: `)
+      ? draftState.error.slice(field.key.length + 2)
+      : undefined;
+    const error =
+      serverError ??
+      (problem?.field === field.key && touched.has(field.key) ? problem.message : undefined);
+    const selector =
+      webSocketCondition &&
+      model.resources.find((resource) => resource.id === webSocketCondition.resource);
+    const help =
+      field.key === "deploy" && webSocketCondition
+        ? `Copies $connect's current condition: ${selector?.fromEnv ?? selector?.path.join(".") ?? webSocketCondition.resource} equals ${JSON.stringify(webSocketCondition.equals)}. Each environment resolves its own value. Off keeps the new handler disabled.`
+        : field.key === "deploy" && webSocketConditionProblem
+          ? webSocketConditionProblem.message
+          : field.help;
+    const describedBy =
+      [help ? `${id}-help` : undefined, error ? `${id}-error` : undefined]
+        .filter(Boolean)
+        .join(" ") || undefined;
+    const value = entry.form[field.key];
+    const update = (next: string | number | boolean) => {
+      touch(field.key);
+      const form = { ...entry.form, [field.key]: next };
+      if (field.key === "linkedToEnv") {
+        if (next) {
+          form.defaultValue = String(entry.form.value ?? "");
+          form.value = "";
+        } else {
+          form.value = String(entry.form.defaultValue ?? "");
+          form.defaultValue = "";
+          form.required = false;
+        }
+      }
+      if (field.key === "existingTarget" && next) {
+        const target = model.targets.find((target) => target.ref === next);
+        if (target) form.id = target.id;
+      }
+      const envName = (value: string) =>
+        value
+          .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+          .replaceAll("-", "_")
+          .toUpperCase();
+      const route = (name: string, category: unknown) =>
+        entry.resourceKind === "service"
+          ? `/${name}/*`
+          : category === "webSocket"
+            ? name
+            : `/${name}`;
+      if (field.key === "vpc" && next && form.subnet === "none") form.subnet = "private";
+      if (field.key === "vpc" && !next && ["function", "route"].includes(entry.resourceKind))
+        form.subnet = "none";
+      if (field.key === "id" && typeof next === "string") {
+        const old = String(entry.form.id);
+        if ("envName" in form && (!form.envName || form.envName === envName(old)))
+          form.envName = envName(next);
+        if (
+          "className" in form &&
+          (!form.className ||
+            form.className === `${old[0]?.toUpperCase() ?? ""}${old.slice(1)}Stack`)
+        )
+          form.className = `${next[0]?.toUpperCase() ?? ""}${next.slice(1)}Stack`;
+        if (
+          entry.resourceKind !== "agent" &&
+          "path" in form &&
+          (!form.path || form.path === route(old, form.category))
+        )
+          form.path = route(next, form.category);
+      }
+      if (
+        field.key === "category" &&
+        (!form.path || form.path === route(String(form.id), entry.form.category))
+      )
+        form.path = route(String(form.id), next);
+      if ("head" in form && (form.category !== "http" || form.method !== "GET")) form.head = false;
+      if (field.key === "bindingResource" && !form.bindingVariable) {
+        const resource = model.resources.find((resource) => resource.id === next);
+        if (resource)
+          form.bindingVariable =
+            (resource.fromEnv ?? resourceOutputEnvironmentName(resource)) +
+            (resource.kind === "secret" && !["service", "task"].includes(entry.resourceKind)
+              ? "_SECRET_ARN"
+              : "");
+      }
+      if (field.key === "consumer" && !form.consumerVariable) {
+        const target = model.targets.find((target) => target.ref === next);
+        if (target)
+          form.consumerVariable =
+            String(form.envName) +
+            (entry.resourceKind === "secret" && target.kind !== "service" && target.kind !== "task"
+              ? "_SECRET_ARN"
+              : "");
+      }
+      draft.setCreation(entry.resourceKind, form);
+    };
+    const options =
+      field.key === "vpc"
+        ? ["", ...(model.networks ?? []).map((network) => network.id)]
+        : field.key === "bindingResource"
+          ? [
+              "",
+              ...model.resources
+                .filter((resource) => resource.kind === "input" || resource.kind === "secret")
+                .map((resource) => resource.id),
+            ]
+          : field.key === "consumer"
+            ? ["", ...model.targets.map((target) => target.ref)]
+            : field.key === "existingTarget"
+              ? [
+                  "",
+                  ...model.targets
+                    .filter(
+                      (target) => target.kind === "lambda" && target.role === entry.form.category,
+                    )
+                    .map((target) => target.ref),
+                ]
+              : field.options;
+    const appendOptions =
+      field.key === "steps"
+        ? model.targets
+            .filter((target) => target.kind === "task" || target.role === "event")
+            .map((target) => target.ref)
+        : field.key === "tools"
+          ? model.targets.filter((target) => target.role === "tool").map((target) => target.id)
+          : field.key === "gateways"
+            ? gatewaysOf(model).flatMap(gateway => gateway.protocol === "agentcore" && (entry.form.auth || !gateway.tools.some(tool => model.targets.some(target => target.role === "tool" && target.id === tool && target.auth))) ? [gateway.key] : [])
+            : undefined;
+    const remainingOptions = appendOptions?.filter(
+      (option) =>
+        !String(value)
+          .split(",")
+          .map((part) => part.trim())
+          .includes(option),
+    );
+    const optionLabel = (option: string) => {
+      if (field.key === "implementation")
+        return option === "existing" ? "Use existing code" : "Create starter files";
+      if (field.key === "starter")
+        return option === "model" ? "Model and tools (provider charges)" : "Echo (no model call)";
+      if (field.key === "template")
+        return option === "bucket"
+          ? "Private encrypted bucket (retain data)"
+          : option === "identity-pool"
+            ? "Cognito identity pool (authenticated only)"
+            : "SQS queue";
+      if (field.key === "deploy")
+        return option === "inherit"
+          ? "Inherit · exposing gateways"
+          : option === "both" && webSocketCondition
+            ? "Use $connect condition"
+            : deploymentSettingLabel(
+                option,
+                model.deployChoices?.[
+                  entry.resourceKind === "tool"
+                    ? "tool"
+                    : entry.form.category === "webSocket"
+                      ? "webSocket"
+                      : entry.form.category === "event"
+                        ? "event"
+                        : "http"
+                ]?.[option],
+              );
+      if (field.key === "scope")
+        return (
+          (
+            { both: "Dev + Prod", dev: "Development", prod: "Production" } as Record<string, string>
+          )[option] ?? option
+        );
+      if (field.key === "category")
+        return (
+          (
+            { event: "Event Lambda", http: "HTTP Lambda", webSocket: "WebSocket Lambda" } as Record<
+              string,
+              string
+            >
+          )[option] ?? option
+        );
+      if (field.key === "vpc") {
+        const network = model.networks?.find((network) => network.id === option);
+        return network?.name ? `${network.name} (${network.id})` : option || "None";
+      }
+      return option || "None";
+    };
+    const endpoints = entry.resourceKind === "vpc" && field.key === "endpoints";
+    const tagField = field.key === "tags";
+    return (
+      <div
+        className={cx(
+          "min-w-0 gap-1",
+          field.type === "boolean"
+            ? "grid grid-cols-[minmax(0,1fr)_auto] content-start items-center gap-x-3"
+            : "flex flex-col",
+          endpoints ? "col-span-full" : "",
+          tagField || field.key === "description" || field.type === "list" ? "col-span-full" : "",
+        )}
+        key={field.key}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) touch(field.key);
+        }}
+        data-slot="creation-field"
+        data-creation-field
+        data-wide={tagField || field.key === "description" || field.type === "list"}
+      >
+        {tagField ? (
+          <span
+            id={`${id}-label`}
+            className="text-label font-medium"
+            data-slot="creation-field-label"
+          >
+            {field.label}
+          </span>
+        ) : (
+          <label className="text-label font-medium" htmlFor={id}>
+            {field.label}
+          </label>
+        )}
+        <div
+          className={field.type === "boolean" ? "contents" : "grid min-w-0 gap-2"}
+          role={tagField ? "group" : undefined}
+          aria-labelledby={tagField ? `${id}-label` : undefined}
+          aria-describedby={tagField ? describedBy : undefined}
+          data-slot="creation-field-control"
+        >
+          {tagField ? (
+            <TagRows
+              value={JSON.parse(String(value ?? "{}")) as Record<string, string>}
+              disabled={disabled}
+              onChange={(tags, error) => {
+                setTagError(error);
+                draft.setCreation(
+                  entry.resourceKind,
+                  { ...entry.form, tags: JSON.stringify(tags) },
+                  error,
+                );
+              }}
+            />
+          ) : endpoints ? (
+            <InterfaceEndpointPicker
+              id={id}
+              services={model.interfaceEndpointServices}
+              selected={String(value ?? "")
+                .split(",")
+                .map((name) => name.trim())
+                .filter(Boolean)}
+              onChange={(services) => update(services.join(", "))}
+              disabled={disabled}
+              invalid={!!error}
+              describedBy={describedBy}
+            />
+          ) : field.type === "boolean" ? (
+            <InspectorSwitch
+              className="col-start-2 row-start-1"
+              id={id}
+              label={field.label}
+              checked={value === true}
+              onChange={update}
+              disabled={disabled}
+              invalid={!!error}
+              describedBy={describedBy}
+            />
+          ) : options ? (
+            <Select
+              id={id}
+              value={String(value)}
+              onChange={(event) => update(event.target.value)}
+              disabled={disabled}
+              aria-invalid={!!error}
+              aria-describedby={describedBy}
+            >
+              {options.map((option) => (
+                <option
+                  key={option}
+                  value={option}
+                  disabled={
+                    field.key === "deploy" &&
+                    !!(webSocketCondition || webSocketConditionProblem) &&
+                    option !== "none" &&
+                    (option !== "both" || !!webSocketConditionProblem)
+                  }
+                >
+                  {optionLabel(option)}
+                </option>
+              ))}
+            </Select>
+          ) : (
+            <TextInput
+              id={id}
+              type={field.type === "number" ? "number" : "text"}
+              value={String(value)}
+              onChange={(event) =>
+                update(field.type === "number" ? Number(event.target.value) : event.target.value)
+              }
+              disabled={disabled}
+              aria-invalid={!!error}
+              aria-describedby={describedBy}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          )}
+          {remainingOptions ? (
+            <Select
+              aria-label={`Add ${field.key === "steps" ? "workflow step" : field.key === "gateways" ? "gateway" : "agent tool"}`}
+              disabled={disabled || !remainingOptions.length}
+              value=""
+              onChange={(event) => {
+                if (event.target.value)
+                  update([String(value), event.target.value].filter(Boolean).join(", "));
+              }}
+            >
+              <option value="">
+                {remainingOptions.length
+                  ? `Select an existing ${field.key === "steps" ? "target" : field.key === "gateways" ? "gateway" : "tool"}…`
+                  : `No more ${field.key === "steps" ? "targets" : field.key === "gateways" ? "gateways" : "tools"} available`}
+              </option>
+              {remainingOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </Select>
+          ) : null}
+          {help ? (
+            <p
+              id={`${id}-help`}
+              className={cx(
+                "m-0 text-caption text-graphite",
+                field.type === "boolean" && "col-span-full",
+              )}
+            >
+              {help}
+            </p>
+          ) : null}
+          {error ? (
+            <p
+              id={`${id}-error`}
+              className={cx(
+                "m-0 text-refuse wrap-anywhere text-caption",
+                field.type === "boolean" && "col-span-full",
+              )}
+              role="status"
+            >
+              {error}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    );
+  };
+  const implementationDirectory = String(
+    entry.form.directory ||
+      defaultImplementationDirectory(
+        entry.resourceKind,
+        String(entry.form.id || "<identifier>"),
+        String(entry.form.category ?? "event"),
+      ) ||
+      "",
+  );
+  return (
+    <dialog
+      ref={dialog}
+      className={dialogClasses({ size: "creation" })}
+      aria-labelledby={`${prefix}-title`}
+      onCancel={(event) => {
+        event.preventDefault();
+        back();
+      }}
+      data-slot="creation-wizard"
+    >
+      <header className={dialogHeaderClasses}>
+        <p className={dialogSubtitleClasses}>Add to application · Configure → Review → Apply</p>
+        <h2 id={`${prefix}-title`} className={dialogTitleClasses}>
+          {api ? "Create API" : catalogInput
+            ? "Create input parameter or secret"
+            : entry.resourceKind === "vpc"
+              ? "Create VPC"
+              : `Create ${creator.label.toLowerCase()}`}
+        </h2>
+      </header>
+      <div className={dialogBodyClasses} aria-busy={!!draftState.busy}>
+        <p>{creator.help}</p>
+        {catalogInput && entry.form.group ? (
+          <p className="text-caption text-graphite">
+            Adds to the input group <code>inputs.{String(entry.form.group)}</code>. Change the
+            catalog group under Advanced settings.
+          </p>
+        ) : null}
+        {implementationDirectory && !entry.form.existingTarget ? (
+          <details data-slot="implementation-preview">
+            <summary className="cursor-pointer py-2">Implementation files</summary>
+            <p className="text-caption text-graphite">
+              {entry.resourceKind === "agent" ? "Repository root" : "cdk-app"}:{" "}
+              <code>{implementationDirectory}</code>.{" "}
+              {entry.form.implementation === "existing"
+                ? "Existing files are validated and preserved."
+                : "The application template defines the starter files. Review lists every proposed file."}{" "}
+              The declared construct identity is resolved during review; deployment is separate.
+            </p>
+          </details>
+        ) : null}
+        <fieldset
+          className="m-0 min-w-0 border-0 p-0"
+          disabled={disabled}
+          aria-label={`${catalogInput ? "Input parameter or secret" : creator.label} settings`}
+          data-slot="creation-form-fields"
+        >
+          <div
+            className="grid grid-cols-2 gap-4 m-0 vp-560:grid-cols-[1fr]"
+            data-slot="creation-fields"
+          >
+            {api ? (
+              <div className="col-span-full grid min-w-0 gap-2" data-slot="creation-field" data-creation-field data-wide="true">
+                <label className="text-label font-medium" htmlFor={`${prefix}-api-type`}>Type</label>
+                <Select id={`${prefix}-api-type`} disabled={disabled} value={entry.resourceKind === "gateway" ? "agentcore" : String(entry.form.category)} onChange={event => {
+                  const kind = event.target.value === "agentcore" ? "gateway" : "route";
+                  const defaults = creationDefaults(kind);
+                  const form = Object.fromEntries(CREATORS[kind].fields.map(field => [field.key, entry.form[field.key] ?? defaults[field.key]!])) as Record<string, string | number | boolean>;
+                  if (kind === "route") {
+                    form.category = event.target.value;
+                    if (entry.resourceKind === "gateway" || entry.form.category !== event.target.value) {
+                      form.path = event.target.value === "webSocket" ? String(form.id) : `/${String(form.id)}`;
+                      form.existingTarget = "";
+                      form.head = false;
+                    }
+                  }
+                  draft.setCreation(kind, form, tagError);
+                }}>
+                  <option value="http">HTTP</option>
+                  <option value="webSocket">WebSocket</option>
+                  <option value="agentcore">AgentCore</option>
+                </Select>
+              </div>
+            ) : null}
+            {catalogInput ? (
+              <div
+                className="col-span-full grid min-w-0 grid-cols-[minmax(0,1fr)_auto] content-start items-center gap-x-3 gap-y-1"
+                data-slot="creation-field"
+                data-creation-field
+                data-wide="true"
+              >
+                <label className="text-label font-medium" htmlFor={`${prefix}-secret`}>
+                  Secret
+                </label>
+                <div className="contents" data-slot="creation-field-control">
+                  <InspectorSwitch
+                    className="col-start-2 row-start-1"
+                    id={`${prefix}-secret`}
+                    label="Secret"
+                    checked={entry.resourceKind === "secret"}
+                    disabled={disabled}
+                    describedBy={`${prefix}-secret-help`}
+                    onChange={(secret) => {
+                      const kind = secret ? "secret" : "input";
+                      const form = Object.fromEntries(
+                        CREATORS[kind].fields.map((field) => [
+                          field.key,
+                          entry.form[field.key] ?? creationDefaults(kind)[field.key]!,
+                        ]),
+                      ) as Record<string, string | number | boolean>;
+                      if (!secret) Object.assign(form, entry.inputSettings);
+                      const consumer = model.targets.find((target) => target.ref === form.consumer);
+                      if (consumer && consumer.kind !== "service" && consumer.kind !== "task") {
+                        const automatic =
+                          String(form.envName) +
+                          (entry.resourceKind === "secret" ? "_SECRET_ARN" : "");
+                        if (form.consumerVariable === automatic)
+                          form.consumerVariable =
+                            String(form.envName) + (secret ? "_SECRET_ARN" : "");
+                      }
+                      draft.setCreation(kind, form, tagError);
+                    }}
+                  />
+                  <p
+                    id={`${prefix}-secret-help`}
+                    className="col-span-full m-0 text-caption text-graphite"
+                  >
+                    Off creates a string input parameter. On creates a secret whose value is
+                    authored separately in a protected environment file.
+                  </p>
+                </div>
+              </div>
+            ) : null}
+            {fields.filter((field) => !field.advanced).map(render)}
+          </div>
+          {fields.some((field) => field.advanced) ? (
+            <details className="group/advanced mt-4">
+              <summary className="cursor-pointer py-2">Advanced settings</summary>
+              <div
+                className="m-0 grid grid-cols-2 gap-4 group-open/advanced:pt-2 vp-560:grid-cols-[1fr]"
+                data-slot="creation-fields"
+              >
+                {fields.filter((field) => field.advanced).map(render)}
+              </div>
+            </details>
+          ) : null}
+        </fieldset>
+        {live.evaluating ? (
+          <p className="text-caption text-graphite" role="status">
+            {sourceHeld(response.sourcePublication?.status) ? SOURCE_HOLD_NOTE : "Refreshing configuration…"} Your form is preserved.
+          </p>
+        ) : null}
+        {draft.conflict ? (
+          <div className="text-refuse wrap-anywhere" role="alert">
+            <p>
+              Source changed while you were configuring this resource. Your form is preserved.
+              Review against the latest source to check the exact updated proposal.
+            </p>
+            <button
+              className={buttonClasses({ variant: "quiet" })}
+              disabled={!!draftState.busy}
+              onClick={() => draft.reviewAgainstLatest()}
+            >
+              Review against latest source
+            </button>
+          </div>
+        ) : null}
+        {draftState.error ? (
+          <p className="text-refuse wrap-anywhere" role="alert">
+            {draftState.error}
+          </p>
+        ) : null}
+        <p className="text-caption text-graphite">
+          Review shows every proposed file before anything is written. Apply saves source;
+          deployment is a separate action.
+        </p>
+      </div>
+      <footer className={dialogFooterClasses}>
+        <button
+          className={buttonClasses({ variant: "quiet" })}
+          disabled={!!draftState.busy}
+          onClick={back}
+        >
+          Back to resource types
+        </button>
+        <button
+          className={buttonClasses({ variant: "quiet" })}
+          disabled={!!draftState.busy}
+          onClick={() => draft.discard()}
+        >
+          Cancel creation
+        </button>
+        <button
+          className={buttonClasses({ variant: "primary", className: dialogPrimaryActionClasses })}
+          disabled={!!problem || !!tagError || draft.invalid || disabled}
+          onClick={() => void draft.review()}
+          data-variant="primary"
+        >
+          Review generated changes
+        </button>
+      </footer>
+    </dialog>
+  );
+}

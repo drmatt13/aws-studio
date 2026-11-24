@@ -1,0 +1,642 @@
+import * as cdk from "aws-cdk-lib";
+import { createHash } from "crypto";
+import { defineInputs, resolveInput, resourceEnvContextKey, type CloudMode, type ResourceReference } from "aws-studio/config";
+import { modeFromContext, type DeploymentTarget } from "aws-studio/deploy";
+import { resolveDatabaseSettings, type DatabaseSettingsInput } from "./database-settings";
+import { resolveStatefulResources, type StatefulResourcesConfiguration } from "aws-studio/deploy/stateful-resources";
+import { frameworkRepositoryRoot } from "aws-studio/config/source";
+import { projectDeclarations, requireDeploymentSettings, type ProjectDeclarations, type SignInProviderSettings } from "aws-studio/config/project-declarations";
+
+/** Application-owned deployment policy. See docs/FRAMEWORK.md#configuration-and-environment.
+ * Importing this module never reads .env, creates an App, or generates code.
+ */
+export interface DeploymentSources {
+  getContext: (key: string) => unknown;
+  /** The selected inputs file, plus the CDK CLI's CDK_DEFAULT_ACCOUNT and CDK_DEFAULT_REGION. */
+  env: Readonly<Record<string, string | undefined>>;
+  /** The deployment target bin/app.ts resolved from context. */
+  target?: Pick<DeploymentTarget, "name" | "mode" | "account" | "region">;
+  /** The primary database declaration, before explicit deployment overrides. */
+  databaseSettings?: DatabaseSettingsInput;
+  statefulResources?: StatefulResourcesConfiguration;
+}
+
+export function resolveDeploymentInputs({ getContext, env, target, databaseSettings, statefulResources }: DeploymentSources) {
+  const warnings: string[] = [];
+  const account = env.CDK_DEFAULT_ACCOUNT;
+  const region = env.CDK_DEFAULT_REGION;
+
+  if (!account || !region) {
+    throw new Error(
+      "CDK_DEFAULT_ACCOUNT and CDK_DEFAULT_REGION must be set: every stack is pinned to one account and region. The CDK CLI sets them from your AWS profile (--profile <PROFILE>).",
+    );
+  }
+
+  const stackEnv: cdk.Environment = {
+    account,
+    region,
+  };
+
+  // The one derived value the graph is built from. Resolved here so no stack has
+  // to re-answer "which deployment is this" from something else it can see -
+  // whether an RDS stack happened to be created, say. It comes from CDK context:
+  // the target bin/app.ts resolved, or `-c prodDeployment` when a caller (a
+  // test) supplies none.
+  const stated = modeFromContext(getContext);
+  if (!target) warnings.push(...stated.warnings);
+  const mode: CloudMode = target?.mode ?? stated.mode ?? "dev";
+
+  // Every setting below is a declaration in framework-config/inputs/deployment, resolved like a
+  // workload input: -c context, then the inputs file, then its default.
+  // The project's own declarations, loaded from the project this synthesizes.
+  const declarations = projectDeclarations(frameworkRepositoryRoot());
+  const settings = requireDeploymentSettings(declarations.deploymentInputs().deploymentInputs(mode));
+  const readers = { env, getContext: (key: string) => (CONTEXT_ALIASES[key] ?? [key]).map((name) => getContext(name)).find((value) => value !== undefined) };
+  const resolved = (reference: ResourceReference) => {
+    const result = resolveInput(reference, readers);
+    if (result.state === "invalid") {
+      throw new Error(`${reference.fromEnv} (or -c ${CONTEXT_ALIASES[contextKey(reference)]?.[0] ?? contextKey(reference)}) must be ${reference.values!.map((value) => `"${value}"`).join(" or ")}. Received: ${result.value}`);
+    }
+    return result;
+  };
+  const text = (reference: ResourceReference) => { const result = resolved(reference); return result.state === "supplied" || result.state === "fallback" ? result.value : undefined; };
+  const flag = (reference: ResourceReference) => text(reference) === "true";
+
+  // PROD_DEPLOYMENT used to live in cdk-app/.env. A leftover line that agrees is
+  // only noise; one that disagrees is someone expecting the file to decide, and
+  // building the other graph silently would be the worst answer.
+  const legacyMode = optionalBoolean(env.PROD_DEPLOYMENT, "PROD_DEPLOYMENT");
+  if (legacyMode !== undefined && legacyMode !== (mode === "prod")) {
+    throw new Error(
+      `PROD_DEPLOYMENT=${legacyMode} in the inputs file disagrees with this ${mode} synth. The mode is chosen per command now: pass -c prodDeployment=${legacyMode} to build ${legacyMode ? "production" : "development"}, and remove PROD_DEPLOYMENT from the inputs file.`,
+    );
+  }
+  if (legacyMode !== undefined) {
+    warnings.push("[cdk-app] PROD_DEPLOYMENT in the inputs file is no longer read; the mode comes from -c prodDeployment. Remove the line.");
+  }
+
+  // Deployments are named in cdk-app/cdk.json alone. A CDK_APP_NAME left in an
+  // inputs file is someone expecting it to name the deployment, so say it does not.
+  const retiredName = env.CDK_APP_NAME?.trim();
+  if (retiredName) {
+    warnings.push(`[cdk-app] CDK_APP_NAME=${retiredName} in the inputs file is no longer read; deployments are named <app>-<stage> from framework:app in cdk-app/cdk.json${target ? ` (this one is ${target.name})` : ""}. Remove the line.`);
+  }
+
+  // A target pinned to an account or region is never synthesized for another:
+  // the selected profile is a credential source, not a statement about where
+  // production lives.
+  if (target?.account && target.account !== account) {
+    throw new Error(`${target.name} is pinned to account ${target.account} in framework:targets, but the selected credentials are for ${account}. Choose the profile for ${target.account}.`);
+  }
+  if (target?.region && target.region !== region) {
+    throw new Error(`${target.name} is pinned to ${target.region} in framework:targets, but this synth is for ${region}. Select ${target.region} (--region or the profile's region).`);
+  }
+
+  // Development convenience: the pre-signup trigger confirms new users itself
+  // instead of mailing them a code. Never derived from anything else, and
+  // refused outright in production: an address nobody proved they own must not
+  // be marked verified in a pool real users sign in to.
+  const requestedSkipEmailVerification = flag(settings.skipEmailVerification);
+  if (requestedSkipEmailVerification && mode === "prod") {
+    throw new Error(
+      "SKIP_EMAIL_VERIFICATION is a development setting and cannot be used by a production deployment. Remove it from cdk-app/.env.dev or cdk-app/.env.prod (or drop -c skipEmailVerification).",
+    );
+  }
+
+  // Where Cognito sends verification and password-reset mail from. Absent,
+  // Cognito's built-in sender is used, which is capped at a small daily quota.
+  const cognitoSesFromEmail = text(settings.cognitoSesFromEmail);
+  const cognitoSesFromName = text(settings.cognitoSesFromName);
+  const cognitoSesRegion = text(settings.cognitoSesRegion);
+  if (!cognitoSesFromEmail && (cognitoSesFromName || cognitoSesRegion)) {
+    throw new Error(
+      "COGNITO_SES_FROM_NAME and COGNITO_SES_REGION only apply with COGNITO_SES_FROM_EMAIL. Set the sender address, or remove them.",
+    );
+  }
+  if (mode === "prod" && !cognitoSesFromEmail) {
+    warnings.push(
+      "[cdk-app] Production Cognito mail uses Cognito's built-in sender, which is limited to about 50 messages a day. Set COGNITO_SES_FROM_EMAIL to a verified SES identity before real users sign up.",
+    );
+  }
+
+  // Days of automated RDS backups. Production only; 0 turns backups off, which
+  // is a deliberate choice for a disposable deployment and nothing else.
+  const database = resolveDatabaseSettings({ getContext, env, defaults: databaseSettings });
+  const databaseBackupRetentionDays = database.backupRetentionDays;
+
+  // Guards deletion protection and the removal policy on the database and user
+  // pool, so a value that does not parse must never fall through to false.
+  //
+  // The original spelling of this flag was missing an "r". It is still honored,
+  // because silently ignoring a stale -c retainStatefulResouces=true on a
+  // production deploy would drop protection from the database it was typed to
+  // protect.
+  const retainStatefulResoucesLegacy = optionalBoolean(
+    getContext("retainStatefulResouces"),
+    "-c retainStatefulResouces",
+  );
+
+  if (retainStatefulResoucesLegacy !== undefined) {
+    warnings.push(
+      '[cdk-app] -c retainStatefulResouces is misspelled and will be removed. Use -c retainStatefulResources, or set RETAIN_STATEFUL_RESOURCES in cdk-app/.env.dev or cdk-app/.env.prod.',
+    );
+  }
+
+  const retainStatefulResources = flag(settings.retainStatefulResources);
+  const stateful = resolveStatefulResources(statefulResources, mode, retainStatefulResources);
+
+  // API Gateways are framework managed. Stale flags must never silently change a graph.
+  for (const [label, raw] of [
+    ["DEPLOY_PROD_WEBSOCKET_API", env.DEPLOY_PROD_WEBSOCKET_API],
+    ["DEPLOY_WEBSOCKET_API", env.DEPLOY_WEBSOCKET_API],
+    ["-c deployProdWebSocketApi", getContext("deployProdWebSocketApi")],
+    ["-c deployWebSocketApi", getContext("deployWebSocketApi")],
+    ["-c enableWebSockets", getContext("enableWebSockets")],
+  ] as const) {
+    const value = optionalBoolean(raw, label);
+    if (value === false) throw new Error(`${label}=false is no longer supported. WebSocket API Gateway is framework managed. Remove this setting; use deploy: "local-only" or deploy: { when: { resource: resources.input, equals: "value" } } on handlers to control deployment.`);
+    if (value === true) warnings.push(`[cdk-app] ${label} is no longer read. WebSocket API Gateway is framework managed; remove the setting.`);
+  }
+
+  // Retired. The $connect authorizer declared in framework-config is the one
+  // switch now, in both lanes. A leftover `true` changes nothing; a `false` is
+  // refused rather than ignored, because it asked for an unauthenticated API
+  // that this deployment would no longer build.
+  const retiredWsAuthorizer =
+    optionalBoolean(getContext("useCustomWsAuthorizer"), "-c useCustomWsAuthorizer") ??
+    optionalBoolean(env.USE_CUSTOM_WS_AUTHORIZER, "USE_CUSTOM_WS_AUTHORIZER in cdk-app/.env.dev or cdk-app/.env.prod");
+  if (retiredWsAuthorizer === false) {
+    throw new Error(
+      "USE_CUSTOM_WS_AUTHORIZER=false is no longer supported. The authorizer declared on $connect in framework-config/workloads/websocket.ts is always attached; remove that declaration to deploy a WebSocket API without one.",
+    );
+  }
+  if (retiredWsAuthorizer === true) {
+    warnings.push(
+      "[cdk-app] USE_CUSTOM_WS_AUTHORIZER is no longer read: the $connect authorizer declared in framework-config is always attached. Remove the line from cdk-app/.env.dev or cdk-app/.env.prod.",
+    );
+  }
+
+  // Commands always pass the target bin/app.ts resolved; only unit tests call
+  // this without one, and they read the placeholder.
+  const deploymentName = target?.name ?? UNTARGETED_DEPLOYMENT;
+
+  if (!/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(deploymentName)) {
+    throw new Error(
+      `The deployment name must be 1-63 lowercase letters, numbers, or hyphens, start with a letter, and not end with a hyphen. Received: ${deploymentName}`,
+    );
+  }
+
+  const readRenamedString = (current: ResourceReference, legacy: ResourceReference) => {
+    const legacyValue = text(legacy);
+    if (legacyValue !== undefined) {
+      warnings.push(
+        `[cdk-app] ${legacy.fromEnv} / -c ${contextKey(legacy)} is deprecated and will be removed. Use ${current.fromEnv} / -c ${contextKey(current)}.`,
+      );
+    }
+    return text(current) ?? legacyValue;
+  };
+
+  const resolvedFrontendUrl = readRenamedString(settings.frontendUrl, settings.prodUrl);
+  const resolvedFrontendCloudFrontCertificateArn = readRenamedString(
+    settings.frontendCloudFrontCertificateArn,
+    settings.prodCloudFrontCertificateArn,
+  );
+
+  // Like USE_COGNITO_CUSTOM_DOMAIN this is meaningful only in production:
+  // the CloudFront distribution that would carry the
+  // alternate domain name is not created at all in local dev stack mode. Set it
+  // false to keep the domain and certificate parked in the inputs file while deploying on
+  // the generated CloudFront URL.
+  const useFrontendCustomDomain = flag(settings.useFrontendCustomDomain);
+
+  // Dropping the values here rather than at each use site keeps them out of
+  // frontendUrl, trustedFrontendUrls, and the Cognito callback URLs in one place.
+  const applyFrontendCustomDomain = mode === "prod" && useFrontendCustomDomain;
+  const configuredFrontendUrl = applyFrontendCustomDomain
+    ? resolvedFrontendUrl
+    : undefined;
+  const configuredFrontendCloudFrontCertificateArn = applyFrontendCustomDomain
+    ? resolvedFrontendCloudFrontCertificateArn
+    : undefined;
+
+  const localhostDevUrl = settings.localDevUrl.default!;
+  const localDevUrl = text(settings.localDevUrl)!;
+
+  const frontendDomainName = configuredFrontendUrl
+    ? getDomainNameFromUrl(configuredFrontendUrl, "frontendUrl/FRONTEND_URL")
+    : undefined;
+
+  // No mode guard needed: frontendDomainName derives from configuredFrontendUrl,
+  // which is already undefined in local dev stack mode and when
+  // useFrontendCustomDomain is false.
+  if (frontendDomainName && !configuredFrontendCloudFrontCertificateArn) {
+    throw new Error(
+      "frontendCloudFrontCertificateArn/FRONTEND_CLOUDFRONT_CERTIFICATE_ARN is required when frontendUrl/FRONTEND_URL is configured so CloudFront can attach the alternate domain name.",
+    );
+  }
+
+  if (frontendDomainName && configuredFrontendCloudFrontCertificateArn) {
+    validateUsEast1AcmCertificateArn(
+      configuredFrontendCloudFrontCertificateArn,
+      "frontendCloudFrontCertificateArn/FRONTEND_CLOUDFRONT_CERTIFICATE_ARN",
+      account,
+    );
+  }
+
+  const cognitoDomainPrefix = getGeneratedCognitoDomainPrefix(deploymentName, account, region);
+
+  // Both custom-domain controls belong to production. Park authored dev values
+  // without requesting a Cognito-managed CloudFront distribution in development.
+  const useCognitoCustomDomain = flag(settings.useCognitoCustomDomain);
+
+  const applyCognitoCustomDomain = mode === "prod" && useCognitoCustomDomain;
+  if (mode === "dev" && useCognitoCustomDomain && text(settings.cognitoDomainName)) {
+    warnings.push("[cdk-app] Cognito custom domains apply only to production. Development custom-domain inputs are ignored; an existing custom domain may be removed or replaced. deploy:resources refuses a direct migration and requires a reviewed saved plan with the typed deployment name before changing it.");
+  }
+  const configuredCognitoDomainName = applyCognitoCustomDomain ? text(settings.cognitoDomainName) : undefined;
+  const cognitoDomainName = configuredCognitoDomainName
+    ? normalizeDomainName(
+        configuredCognitoDomainName,
+        "cognitoDomainName/COGNITO_DOMAIN_NAME",
+      )
+    : undefined;
+  // Dropped together with the domain name: CognitoStack rejects one without the
+  // other, so gating only half of the pair would turn the toggle into an error.
+  const cognitoDomainCertificateArn = applyCognitoCustomDomain ? text(settings.cognitoDomainCertificateArn) : undefined;
+
+  if (cognitoDomainName && cognitoDomainCertificateArn) {
+    validateUsEast1AcmCertificateArn(
+      cognitoDomainCertificateArn,
+      "cognitoDomainCertificateArn/COGNITO_DOMAIN_CERTIFICATE_ARN",
+      account,
+    );
+  }
+
+  // Federated sign-in: each provider in resources.signInProviders is built when
+  // the inputs file sets every one of its lines, and left out when it sets
+  // none. Its client secret is checked for presence only: npm run
+  // deploy:resources uploads it, and the template carries a resolve reference.
+  const signInProviders = resolveSignInProviders(mode, text, env, declarations);
+
+  // Container placement used to be one deployment-wide input. It is each
+  // task's own declaration now — cloud.subnet, inherited from
+  // defaults.container.subnet — in the framework network, so the old inputs
+  // are reported rather than silently ignored.
+  const retiredTaskNetwork = [
+    ["taskVpcId", "TASK_VPC_ID"],
+    ["taskSubnetIds", "TASK_SUBNET_IDS"],
+    ["taskSecurityGroupIds", "TASK_SECURITY_GROUP_IDS"],
+    ["taskAssignPublicIp", "TASK_ASSIGN_PUBLIC_IP"],
+  ].filter(([contextKey, name]) => getContext(contextKey!) !== undefined || optionalString(env[name!]) !== undefined)
+    .map(([, name]) => name);
+  if (retiredTaskNetwork.length > 0) {
+    warnings.push(
+      `[cdk-app] ${retiredTaskNetwork.join(", ")} ${retiredTaskNetwork.length === 1 ? "is" : "are"} no longer read: tasks run in the framework network, in the subnet each declares as cloud.subnet (inherited from defaults.container.subnet). Remove ${retiredTaskNetwork.length === 1 ? "the line" : "the lines"} from cdk-app/.env.dev or cdk-app/.env.prod.`,
+    );
+  }
+
+  // The retired password-based Proxy option is not an alias for end-to-end IAM.
+  if (getContext("enableRdsProxy") !== undefined) {
+    warnings.push(
+      "[cdk-app] enableRdsProxy is no longer read. Remove it from cdk.json or the command line; use DATABASE_PROXY_ENABLED or databaseProxyEnabled for end-to-end IAM Proxy connections.",
+    );
+  }
+
+  // LANGGRAPH_* is deliberately absent. A workload's own deployment inputs are
+  // declared beside the workload, on `resources.langgraph` in
+  // framework.config.ts, with the names they are read from; the framework
+  // resolves them for the workloads a graph actually builds. This file keeps
+  // the flags that decide *which* graph is built.
+
+  return {
+    stackEnv,
+    deploymentName,
+    mode,
+    databaseBackupRetentionDays,
+    database,
+    requestedSkipEmailVerification,
+    cognitoSesFromEmail,
+    cognitoSesFromName,
+    cognitoSesRegion,
+    retainStatefulResources,
+    stateful,
+    databaseRetention: stateful.database.retention === "retain",
+    cognitoRetention: stateful.cognito.retention === "retain",
+    useFrontendCustomDomain,
+    configuredFrontendUrl,
+    configuredFrontendCloudFrontCertificateArn,
+    frontendDomainName,
+    localDevUrl,
+    localhostDevUrl,
+    cognitoDomainPrefix,
+    useCognitoCustomDomain,
+    cognitoDomainName,
+    cognitoDomainCertificateArn,
+    signInProviders,
+    warnings,
+  };
+}
+
+export type DeploymentInputs = ReturnType<typeof resolveDeploymentInputs>;
+
+// One Entra tenant's issuer: Cognito validates the issuer of every ID token, and
+// the multi-tenant endpoints (common, organizations, consumers) issue each
+// tenant's own, so they cannot be trusted as one provider.
+const ENTRA_TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function resolveSignInProviders(
+  mode: CloudMode,
+  text: (reference: ResourceReference) => string | undefined,
+  env: DeploymentSources["env"],
+  declarations: ProjectDeclarations,
+): SignInProviderSettings {
+  const { SIGN_IN_PROVIDERS, signInProviderKeys } = declarations.signInCatalog();
+  const declared = defineInputs(declarations.signInInputs().signInProviders, { mode }) as unknown as Readonly<Record<string, ResourceReference>>;
+  const result: Record<string, Record<string, string>> = {};
+  for (const [id, provider] of Object.entries(SIGN_IN_PROVIDERS)) {
+    const secret = declared[provider.secret]!;
+    const values = Object.fromEntries(Object.entries(provider.settings).map(([field, key]) => [field, text(declared[key])]));
+    const lines = signInProviderKeys(id).map((key) => declared[key].fromEnv!);
+    const unset = [
+      ...Object.entries(provider.settings).filter(([field]) => values[field] === undefined).map(([, key]) => declared[key].fromEnv!),
+      ...(optionalString(env[secret.fromEnv!]) ? [] : [secret.fromEnv!]),
+    ];
+    if (unset.length === lines.length) continue;
+    if (unset.length > 0) {
+      throw new Error(
+        `${provider.title} sign-in is partly configured: set ${lines.join(", ")} in the inputs file to enable it, or remove them all. Unset: ${unset.join(", ")}.`,
+      );
+    }
+    result[id] = values as Record<string, string>;
+  }
+  const microsoft = result.microsoft;
+  if (microsoft && !ENTRA_TENANT_ID.test(microsoft.tenantId!)) {
+    throw new Error(
+      `MICROSOFT_TENANT_ID must be your Entra directory (tenant) ID, a GUID. Received: ${microsoft.tenantId}. The common, organizations and consumers endpoints sign in other tenants' users, which Cognito cannot verify as one provider.`,
+    );
+  }
+  return result as SignInProviderSettings;
+}
+
+/** Resolve auth/CORS origins and same-origin routing for either frontend hostname. */
+export function resolveFrontendSettings(
+  deployment: DeploymentInputs,
+  cloudFrontUrl?: string,
+) {
+  const {
+    configuredFrontendUrl, requestedSkipEmailVerification, mode,
+    localhostDevUrl, localDevUrl,
+  } = deployment;
+  // A dev deployment serves its browser traffic from a laptop, so localhost is a
+  // real origin there and a plaintext one is allowed.
+  const isDevDeployment = mode === "dev";
+  const frontendUrl = configuredFrontendUrl ?? cloudFrontUrl;
+  // Only ever what was asked for. With no frontend URL the custom-message
+  // trigger sends Cognito's own code message, so verification still works.
+  const skipEmailVerification = requestedSkipEmailVerification;
+  // Both hostname choices serve /api on the frontend origin. The generated
+  // hostname uses a routing store to avoid a website -> API -> website cycle.
+  const useSameOriginApiProxy = mode === "prod" && Boolean(frontendUrl);
+
+  const trustedFrontendUrls = dedupeFrontendUrls([
+    ...(frontendUrl ? [frontendUrl] : []),
+    // Local origins are a dev-deployment affordance and nothing else. A
+    // production stack never trusts one, so LOCAL_DEV_URL cannot put
+    // http://localhost:3000 into the production Cognito client's callback
+    // list, the API's CORS origins, or the credentialed-request gate.
+    ...(isDevDeployment ? [localhostDevUrl, localDevUrl] : []),
+  ]);
+  trustedFrontendUrls.forEach((url) => assertValidTrustedFrontendUrl(url, isDevDeployment));
+
+  const cognitoFrontendUrls = trustedFrontendUrls.filter(
+    isCognitoRedirectOrigin,
+  );
+
+  const authCallbackUrls = cognitoFrontendUrls.map(
+    (url) => `${url}/auth/callback`,
+  );
+
+  return { frontendUrl, skipEmailVerification, useSameOriginApiProxy, trustedFrontendUrls, cognitoFrontendUrls, authCallbackUrls };
+}
+
+/**
+ * CDK context keys that differ from the key a declaration derives from its
+ * variable name, or older spellings still honored, in the order they are read.
+ */
+/** The deployment name a target-less call (a unit test) resolves; commands always pass a target. */
+export const UNTARGETED_DEPLOYMENT = "untargeted";
+
+const CONTEXT_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  frontendCloudfrontCertificateArn: ["frontendCloudFrontCertificateArn", "frontendCloudfrontCertificateArn"],
+  prodCloudfrontCertificateArn: ["prodCloudFrontCertificateArn", "prodCloudfrontCertificateArn"],
+  retainStatefulResources: ["retainStatefulResources", "retainStatefulResouces"],
+};
+const contextKey = (reference: ResourceReference) => resourceEnvContextKey(reference.fromEnv!);
+
+const optionalString = (value: unknown) => {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  const stringValue = String(value);
+  return stringValue.trim() ? stringValue : undefined;
+};
+
+// These flags decide what real cloud infrastructure is created, so a
+// typo must not quietly coerce to a value nobody asked for. Anything other than
+// "true"/"false" is an error rather than a truthiness test.
+const optionalBoolean = (value: unknown, label: string) => {
+  const stringValue = optionalString(value);
+
+  if (stringValue === undefined) {
+    return undefined;
+  }
+
+  const normalizedValue = stringValue.trim().toLowerCase();
+
+  if (normalizedValue === "true") {
+    return true;
+  }
+
+  if (normalizedValue === "false") {
+    return false;
+  }
+
+  throw new Error(
+    `${label} must be "true" or "false". Received: ${stringValue}`,
+  );
+};
+
+const normalizeFrontendUrl = (url: string) =>
+  cdk.Token.isUnresolved(url) ? url : url.trim().replace(/\/+$/, "");
+
+// Cognito rejects a hosted-UI prefix containing any of these, with only
+// "Invalid request provided: AWS::Cognito::UserPoolDomain" to explain itself.
+// A deployment such as aws-studio-dev can contain one, so the generated prefix
+// has to strip them rather than pass the name through.
+const COGNITO_RESERVED_WORDS = ["aws", "amazon", "cognito"];
+
+const stripCognitoReservedWords = (value: string) =>
+  COGNITO_RESERVED_WORDS.reduce(
+    (result, word) => result.replaceAll(word, ""),
+    value,
+  )
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+const getGeneratedCognitoDomainPrefix = (deploymentName: string, account: string, region: string) => {
+  // Only the app name can carry a reserved word; the account id and region
+  // cannot, so they stay verbatim and keep the prefix globally unique.
+  const safeDeploymentName =
+    stripCognitoReservedWords(deploymentName) || "app";
+  const rawPrefix = `${safeDeploymentName}-${account}-${region}`;
+
+  if (rawPrefix.length <= 63) {
+    return rawPrefix;
+  }
+
+  const hash = createHash("sha256").update(rawPrefix).digest("hex").slice(0, 8);
+  const suffix = `-${account}-${region}-${hash}`;
+  const maxDeploymentNameLength = 63 - suffix.length;
+  const shortenedDeploymentName = safeDeploymentName
+    .slice(0, maxDeploymentNameLength)
+    .replace(/-+$/, "");
+
+  return `${shortenedDeploymentName}${suffix}`;
+};
+
+const normalizeDomainName = (value: string, label: string) => {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    throw new Error(`${label} must not be empty.`);
+  }
+
+  try {
+    return new URL(trimmedValue).hostname;
+  } catch {
+    try {
+      return new URL(`https://${trimmedValue}`).hostname;
+    } catch {
+      throw new Error(
+        `${label} must be a bare domain name or an absolute URL. Received: ${value}`,
+      );
+    }
+  }
+};
+
+const validateUsEast1AcmCertificateArn = (
+  certificateArn: string,
+  label: string,
+  account: string,
+) => {
+  if (cdk.Token.isUnresolved(certificateArn)) {
+    return;
+  }
+
+  const arnParts = certificateArn.split(":");
+  const [arnPrefix, partition, service, certificateRegion, certificateAccount] =
+    arnParts;
+  const resource = arnParts.slice(5).join(":");
+
+  if (
+    arnPrefix !== "arn" ||
+    !partition ||
+    service !== "acm" ||
+    !/^certificate\/[0-9a-f-]+$/i.test(resource)
+  ) {
+    throw new Error(
+      `${label} must be an ACM certificate ARN. Received: ${certificateArn}`,
+    );
+  }
+
+  if (certificateRegion !== "us-east-1") {
+    throw new Error(
+      `${label} must reference an ACM certificate in us-east-1. Received region: ${certificateRegion}`,
+    );
+  }
+
+  if (certificateAccount !== account) {
+    throw new Error(
+      `${label} must reference an ACM certificate in the same AWS account as this deployment (${account}). Received account: ${certificateAccount}`,
+    );
+  }
+};
+
+const getDomainNameFromUrl = (url: string, label: string) => {
+  const normalizedUrl = normalizeFrontendUrl(url);
+
+  if (cdk.Token.isUnresolved(normalizedUrl)) {
+    return undefined;
+  }
+
+  try {
+    return new URL(normalizedUrl).hostname;
+  } catch {
+    throw new Error(`${label} must be an absolute URL. Received: ${url}`);
+  }
+};
+
+const isLoopbackHttpUrl = (url: string) => {
+  if (cdk.Token.isUnresolved(url) || !url.startsWith("http://")) {
+    return false;
+  }
+
+  try {
+    const parsedUrl = new URL(url);
+    return (
+      parsedUrl.hostname === "localhost" ||
+      parsedUrl.hostname === "127.0.0.1" ||
+      parsedUrl.hostname === "[::1]" ||
+      parsedUrl.hostname === "::1"
+    );
+  } catch {
+    return false;
+  }
+};
+
+// A LAN HTTP origin can be trusted for CORS and native auth, but Cognito
+// refuses it as a hosted-UI redirect: HTTP callbacks are loopback-only.
+const isCognitoRedirectOrigin = (url: string) =>
+  cdk.Token.isUnresolved(url) ||
+  url.startsWith("https://") ||
+  isLoopbackHttpUrl(url);
+
+const assertValidTrustedFrontendUrl = (url: string, isDevDeployment: boolean) => {
+  if (
+    isDevDeployment ||
+    cdk.Token.isUnresolved(url) ||
+    url.startsWith("https://") ||
+    isLoopbackHttpUrl(url)
+  ) {
+    return;
+  }
+
+  throw new Error(
+    `Production trusted frontend URLs must use HTTPS except for localhost testing URLs. Received: ${url}`,
+  );
+};
+
+const dedupeFrontendUrls = (urls: string[]) => {
+  const seenUrls = new Set<string>();
+  const uniqueUrls: string[] = [];
+
+  for (const url of urls) {
+    const normalizedUrl = normalizeFrontendUrl(url);
+
+    if (!normalizedUrl) {
+      continue;
+    }
+
+    // Repeated references to the same CDK token resolve to the same origin too.
+    // Keep token strings intact, but deduplicate them just like literal URLs.
+    if (seenUrls.has(normalizedUrl)) {
+      continue;
+    }
+
+    seenUrls.add(normalizedUrl);
+    uniqueUrls.push(normalizedUrl);
+  }
+
+  return uniqueUrls;
+};

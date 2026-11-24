@@ -1,0 +1,472 @@
+import { InspectorCount, InspectorSummary } from "./InspectorUI";
+import { TextInput, Select } from "../ui/FormControls";
+import { buttonClasses } from "../ui/Button";
+import { cx } from "../ui/classes";
+import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import type { InfrastructureInventory, InfrastructureResource } from "../../shared/infrastructure";
+import { api } from "../api";
+import { ApiError } from "../http";
+import { editorLink, titleOf } from "../lookup";
+import { useStudio } from "../studio";
+import { ResourceStatus } from "./ResourceStatus";
+import { isFrameworkManaged } from "../../shared/framework-management";
+import { AwsConnectionSummary } from "./AwsConnectionSummary";
+
+function useInventory() {
+  const { mode } = useStudio();
+  return useQuery({
+    queryKey: ["infrastructure", mode],
+    queryFn: () => api.infrastructure(mode),
+    refetchInterval: 5000,
+  });
+}
+const classification = {
+  framework: "Framework resource",
+  supporting: "Generated supporting resource",
+  imported: "Imported reference",
+  unowned: "Unknown framework owner",
+};
+function infrastructureError(error: unknown): string {
+  if (error instanceof ApiError && error.status === 404)
+    return "The running Studio server is out of date and does not have the infrastructure endpoint. Restart npm run studio, then reload this page. No AWS deployment is needed.";
+  return error instanceof Error ? error.message : "Synthesis failed.";
+}
+
+function ResourceDetails({
+  resource,
+  inventory,
+  navigate,
+}: {
+  resource: InfrastructureResource;
+  inventory: InfrastructureInventory;
+  navigate: (id: string) => void;
+}) {
+  const { index, snapshot } = useStudio();
+  const edges = inventory.dependencies.filter(
+    (edge) => edge.from === resource.id || edge.to === resource.id,
+  );
+  return (
+    <div className="py-3 wrap-anywhere" data-slot="infrastructure-detail">
+      <dl className="grid grid-cols-[110px_minmax(0,1fr)] gap-1.75 text-label">
+        <dt>Evidence</dt>
+        <dd className="m-0">Synthesized assembly</dd>
+        <dt>Identity</dt>
+        <dd className="m-0">
+          <code>{resource.id}</code>
+        </dd>
+        <dt>Type</dt>
+        <dd className="m-0">
+          <code>{resource.type}</code>
+        </dd>
+        <dt>Classification</dt>
+        <dd className="m-0">{classification[resource.classification]}</dd>
+        {resource.logicalId ? (
+          <>
+            <dt>Logical ID</dt>
+            <dd className="m-0">
+              <code>{resource.logicalId}</code>
+            </dd>
+          </>
+        ) : null}
+        {resource.constructPath ? (
+          <>
+            <dt>Construct path</dt>
+            <dd className="m-0">
+              <code>{resource.constructPath}</code>
+            </dd>
+          </>
+        ) : null}
+        {resource.condition ? (
+          <>
+            <dt>CloudFormation condition</dt>
+            <dd className="m-0">
+              <code>{resource.condition}</code> · evaluated at deployment
+            </dd>
+          </>
+        ) : null}
+        <dt>Deployment status</dt>
+        <dd className="m-0">Not queried</dd>
+      </dl>
+      {resource.owners.map((id) => (
+        <p className="mt-2 mb-0" key={id}>
+          Logical entity:{" "}
+          <button className={buttonClasses({ variant: "link" })} onClick={() => navigate(id)}>
+            {titleOf(index, id)}
+          </button>
+        </p>
+      ))}
+      {resource.source ? (
+        <p className="mt-2 mb-0 text-caption">
+          Owner declaration:{" "}
+          <a
+            href={editorLink(snapshot.repositoryRoot, {
+              ...resource.source,
+              column: resource.source.column ?? 1,
+              start: 0,
+              end: 0,
+            })}
+          >
+            {resource.source.file}:{resource.source.line}
+          </a>
+        </p>
+      ) : null}
+      {edges.length ? (
+        <details>
+          <InspectorSummary>
+            CloudFormation dependencies
+            <InspectorCount className="ml-1.5">{edges.length}</InspectorCount>
+          </InspectorSummary>
+          <ul>
+            {edges.map((edge) => {
+              const other = inventory.resources.find(
+                (item) => item.id === (edge.from === resource.id ? edge.to : edge.from),
+              );
+              return (
+                <li key={`${edge.from}:${edge.to}:${edge.kind}`}>
+                  {edge.from === resource.id ? "Depends on" : "Referenced by"}{" "}
+                  <code>{other?.logicalId ?? other?.id}</code>{" "}
+                  <span className="text-graphite">({edge.kind})</span>
+                </li>
+              );
+            })}
+          </ul>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+/** Synthesized inventory for the Stacks island; never creates map nodes or edits source. */
+export function InfrastructurePanel({
+  initialOwner,
+  onNavigate,
+}: {
+  initialOwner?: string;
+  onNavigate: (id: string) => void;
+}) {
+  const { mode, awsProfile, index, draft, draftState, live, model } = useStudio();
+  const query = useInventory();
+  const client = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [stack, setStack] = useState("");
+  const [type, setType] = useState("");
+  const [owner, setOwner] = useState(initialOwner ?? "");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const running = pending || query.data?.status === "running";
+  const blocked =
+    draft.dirty || !!draftState.busy || live.evaluating || !!live.running || model.stale;
+  const state = query.data;
+  const inventory = useMemo(() => {
+    if (!state?.inventory) return undefined;
+    const stacks = state.inventory.stacks.filter(
+      (item) =>
+        !/(?:^|-)(?:AsynchronousLambdaFunctionsStack|WebSocketLambdaFunctionsStack|WebSocketApiStack)$/i.test(
+          item.name,
+        ),
+    );
+    const stackIds = new Set(stacks.map((item) => item.id));
+    const resources = state.inventory.resources.filter((item) => stackIds.has(item.stack));
+    const resourceIds = new Set(resources.map((item) => item.id));
+    return {
+      ...state.inventory,
+      stacks,
+      resources,
+      dependencies: state.inventory.dependencies.filter(
+        (item) => resourceIds.has(item.from) && resourceIds.has(item.to),
+      ),
+    };
+  }, [state?.inventory]);
+  const managedStack = (item: InfrastructureInventory["stacks"][number]) =>
+    item.owners.filter((id) => isFrameworkManaged(index, id)).map((id) => index.resources.get(id)).find((resource) => !!resource);
+  const inputFile =
+    index.resources.get(`envfile:${mode}`)?.deploymentFile?.path ?? `cdk-app/.env.${mode}`;
+  const ownerIds = useMemo(
+    () =>
+      [
+        ...new Set([
+          ...(inventory?.resources.flatMap((resource) => resource.owners) ?? []),
+          ...(inventory?.stacks.flatMap((stack) => stack.owners) ?? []),
+          ...(initialOwner ? [initialOwner] : []),
+        ]),
+      ].sort(),
+    [inventory, initialOwner],
+  );
+  const visible =
+    inventory?.resources.filter((resource) => {
+      const ownedStack = inventory.stacks
+        .find((stack) => stack.id === resource.stack)
+        ?.owners.some((id) => id === owner);
+      const matchesOwner =
+        !owner ||
+        (owner === "__unknown"
+          ? resource.owners.length === 0
+          : ownedStack || resource.owners.some((id) => id === owner || id.startsWith(`${owner}.`)));
+      const words =
+        `${resource.logicalId ?? ""} ${resource.type} ${resource.constructPath ?? ""} ${resource.owners.map((id) => `${id} ${titleOf(index, id)}`).join(" ")}`.toLowerCase();
+      return (
+        matchesOwner &&
+        (!stack || resource.stack === stack) &&
+        (!type || resource.type === type) &&
+        search
+          .trim()
+          .toLowerCase()
+          .split(/\s+/)
+          .every((term) => words.includes(term))
+      );
+    }) ?? [];
+  const synthesize = async () => {
+    setPending(true);
+    setError("");
+    try {
+      client.setQueryData(["infrastructure", mode], await api.synthesize(mode, awsProfile));
+    } catch (error) {
+      setError(infrastructureError(error));
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <div className="grid gap-3.5" data-slot="infrastructure-panel">
+      <p className="m-0 text-caption text-graphite">
+        Resources constructed by the saved CDK app for{" "}
+        <strong>{mode === "dev" ? "Development" : "Production"}</strong>, including stacks outside
+        framework-config.
+      </p>
+      {initialOwner ? (
+        <p className="m-0 text-caption">
+          {owner === initialOwner ? <>Filtered to {titleOf(index, initialOwner)}. </> : null}
+          <button
+            className={buttonClasses({ variant: "link" })}
+            onClick={() => onNavigate("island:stacks")}
+          >
+            Show all infrastructure
+          </button>
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2.5" data-slot="infrastructure-run">
+        <AwsConnectionSummary />
+        <button
+          className={buttonClasses({ variant: "neutral" })}
+          disabled={!awsProfile || query.isPending || !!query.error || running || blocked}
+          aria-busy={running}
+          onClick={() => void synthesize()}
+        >
+          {running ? "Synthesizing…" : state?.inventory ? "Refresh from CDK" : "Synthesize CDK"}
+        </button>
+        {state && !running ? (
+          <span
+            className={cx(
+              "text-caption",
+              state.stale || state.status === "failed" ? "text-local" : "text-graphite",
+            )}
+          >
+            {state.stale || (!!state.inventory && state.inputs?.profile !== awsProfile)
+              ? "Needs refresh for selected connection"
+              : state.status === "failed"
+                ? "Synthesis failed"
+                : state.inventory
+                  ? "Up to date"
+                  : "Not synthesized"}
+          </span>
+        ) : null}
+      </div>
+      <p className="m-0 text-caption text-graphite">
+        Builds a local inventory and templates; does not deploy or rewrite stack source.
+      </p>
+      {blocked ? (
+        <p role="status" className="m-0">
+          {draft.dirty
+            ? "Apply or discard the current draft before synthesizing saved source."
+            : model.stale
+              ? "Fix the configuration errors before synthesizing saved source."
+              : "Wait for source validation or the current operation to finish before synthesizing."}
+        </p>
+      ) : null}
+      {query.isPending ? <p className="m-0">Loading inventory…</p> : null}
+      {query.error ? (
+        <p role="alert" className="m-0">
+          {infrastructureError(query.error)}
+        </p>
+      ) : null}
+      {error || state?.error ? (
+        <pre
+          className="whitespace-pre-wrap wrap-anywhere [max-height:240px] overflow-auto [padding:10px] bg-[light-dark(var(--refuse-wash),rgba(220,80,60,.1))]"
+          role="alert"
+          data-slot="infrastructure-error"
+        >
+          {error || state?.error}
+        </pre>
+      ) : null}
+      {state?.stale ? (
+        <p
+          className="m-0 [padding:10px] border border-[light-dark(var(--local),#b48335)] bg-[light-dark(var(--caution-wash),transparent)] rounded-md"
+          role="status"
+          data-slot="infrastructure-stale"
+        >
+          Stale inventory. Source or inputs changed, or the latest synthesis failed. Showing the
+          last successful assembly.
+        </p>
+      ) : null}
+      <details className="group/synthesis">
+        <InspectorSummary className="text-caption text-graphite group-open/synthesis:mb-2">
+          Synthesis details
+          {state?.generatedAt ? ` · ${new Date(state.generatedAt).toLocaleString()}` : ""}
+        </InspectorSummary>
+        <p className="m-0 text-caption text-graphite">
+          Uses an isolated copy of {state?.inputs?.file ?? inputFile}. May bundle assets and use AWS
+          credentials for CDK context lookups. The inputs file stays unchanged.
+        </p>
+        {state?.inputs ? (
+          <p className="m-0 text-caption text-graphite">
+            {state.inputs.profile} · {state.inputs.modeSelection}
+          </p>
+        ) : null}
+        {initialOwner ? (
+          <p className="m-0 text-caption text-graphite">
+            Synthesis refreshes the full app inventory. The results below are filtered to this
+            stack.
+          </p>
+        ) : null}
+      </details>
+      {!inventory && running ? (
+        <p className="m-0 text-caption text-graphite" role="status">
+          Synthesis is running. Resources will appear when the assembly is complete.
+        </p>
+      ) : null}
+      {inventory ? (
+        <>
+          <label className="grid min-w-0 gap-1.25 text-label">
+            Search infrastructure
+            <TextInput
+              className="w-full"
+              type="search"
+              aria-label="Search infrastructure"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Resource type, logical ID, path or owner"
+            />
+          </label>
+          <details>
+            <InspectorSummary>
+              Filter resources{stack || type || owner ? " · active" : ""}
+            </InspectorSummary>
+            <div
+              className="grid grid-cols-[minmax(0,1fr)] gap-2 [margin-top:8px] vp-540:grid-cols-[minmax(0,1fr)]"
+              data-slot="infrastructure-filters"
+            >
+              <label className="grid min-w-0 gap-1.25 text-label">
+                Stack
+                <Select
+                  className="w-full"
+                  aria-label="Infrastructure stack"
+                  value={stack}
+                  onChange={(event) => setStack(event.target.value)}
+                >
+                  <option value="">All stacks</option>
+                  {inventory.stacks.map((stack) => (
+                    <option key={stack.id} value={stack.id}>
+                      {stack.name}
+                      {managedStack(stack) ? " · Framework managed" : ""}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <label className="grid min-w-0 gap-1.25 text-label">
+                Logical owner
+                <Select
+                  className="w-full"
+                  aria-label="Infrastructure owner"
+                  value={owner}
+                  onChange={(event) => setOwner(event.target.value)}
+                >
+                  <option value="">All owners</option>
+                  <option value="__unknown">Unknown owner</option>
+                  {ownerIds.map((id) => (
+                    <option key={id} value={id}>
+                      {titleOf(index, id)}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <label className="grid min-w-0 gap-1.25 text-label">
+                Resource type
+                <Select
+                  className="w-full"
+                  aria-label="Infrastructure resource type"
+                  value={type}
+                  onChange={(event) => setType(event.target.value)}
+                >
+                  <option value="">All types</option>
+                  {[...new Set(inventory.resources.map((resource) => resource.type))]
+                    .sort()
+                    .map((type) => (
+                      <option key={type}>{type}</option>
+                    ))}
+                </Select>
+              </label>
+            </div>
+          </details>
+          <p role="status" className="m-0">
+            {visible.length} of {inventory.resources.length} resources · {inventory.stacks.length}{" "}
+            stacks
+          </p>
+          {inventory.stacks
+            .filter(
+              (item) =>
+                (!stack || item.id === stack) &&
+                visible.some((resource) => resource.stack === item.id),
+            )
+            .map((stack) => (
+              <section key={stack.id}>
+                <h3 className="mt-0 mb-3 text-label font-semibold text-balance">{stack.name}</h3>
+                <p className="m-0 text-caption text-graphite">{stack.environment}</p>
+                <ResourceStatus placement="inline" resource={managedStack(stack)} />
+                {visible
+                  .filter((resource) => resource.stack === stack.id)
+                  .map((resource) => (
+                    <details
+                      key={resource.id}
+                      className="border-t border-rule py-2.5"
+                      data-slot="infrastructure-resource"
+                    >
+                      <InspectorSummary className="cursor-pointer wrap-anywhere">
+                        <strong>{resource.logicalId ?? resource.constructPath}</strong>
+                        <span className="mt-0.75 block text-caption text-graphite">
+                          {resource.type} · {classification[resource.classification]}
+                        </span>
+                      </InspectorSummary>
+                      <ResourceDetails
+                        resource={resource}
+                        inventory={inventory}
+                        navigate={onNavigate}
+                      />
+                    </details>
+                  ))}
+              </section>
+            ))}
+          {!visible.length ? (
+            <p className="m-0">
+              No matching resources. This declaration may run locally, be absent from this
+              environment, or have no reliable ownership metadata.
+            </p>
+          ) : null}
+          <details>
+            <InspectorSummary>Inventory evidence and limitations</InspectorSummary>
+            {inventory.notes.map((note) => (
+              <p key={note} className="m-0 text-caption text-graphite">
+                {note}
+              </p>
+            ))}
+            <p className="m-0 text-caption text-graphite">
+              Only explicit synthesis metadata establishes ownership. Owner declarations were
+              captured at synthesis
+              {state?.sourceRevision ? ` from Studio revision ${state.sourceRevision}` : ""}.
+            </p>
+          </details>
+        </>
+      ) : null}
+    </div>
+  );
+}

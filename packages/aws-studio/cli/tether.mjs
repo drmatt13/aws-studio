@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+/**
+ * Runs a program for as long as the process that started this one is alive.
+ *
+ *   node tether.mjs <file> [args...]
+ *
+ * Studio starts the source watch and the web client through this, with a pipe
+ * for stdin that it never writes. When Studio ends — cleanly, or killed outright
+ * — the operating system closes that pipe, and this stops the program and
+ * everything it started. Output passes straight through.
+ */
+import { spawn } from "node:child_process";
+import { COMMAND_NOT_FOUND, spawnWindowsJob } from "./owned-process.cjs";
+
+const command = process.argv.slice(2);
+const forwardInput = command[0] === "--forward-input";
+if (forwardInput) command.shift();
+const [file, ...args] = command;
+if (!file) {
+  process.stderr.write("tether.mjs needs a program to run.\n");
+  process.exit(2);
+}
+
+const windows = process.platform === "win32";
+let child;
+try {
+  const options = { stdio: [forwardInput ? "pipe" : "ignore", "inherit", "inherit"], windowsHide: true, detached: !windows };
+  child = windows ? spawnWindowsJob(file, args, options) : spawn(file, args, options);
+} catch {
+  process.stderr.write("The process supervisor could not start its command. Check the host runtime and temporary directory.\n");
+  process.exit(127);
+}
+if (forwardInput) {
+  // Protocol clients keep this pipe open: EOF still tears down the owned process tree.
+  child.stdin.on("error", () => {});
+  process.stdin.pipe(child.stdin);
+}
+let stopping = false;
+
+function stop() {
+  if (stopping) return;
+  stopping = true;
+  if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) process.exit(0);
+  // Closing the Windows host's job handle kills every descendant, including
+  // children orphaned when their immediate command parent exited earlier.
+  if (windows) child.kill();
+  else {
+    try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+    setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already gone. */ } process.exit(0); }, 5000).unref();
+  }
+}
+
+child.on("error", (error) => {
+  process.stderr.write(`${error.code === "ENOENT" ? COMMAND_NOT_FOUND : error.message}\n`);
+  process.exit(127);
+});
+child.on("exit", (code, signal) => {
+  // The program may exit before descendants that ignored its termination
+  // signal. Its detached group belongs to this tether, so finish that group
+  // before exiting and canceling the escalation timer. Never signal our group.
+  if (!windows && child.pid !== undefined) {
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* Owned group already gone. */ }
+  }
+  process.exit(code ?? (signal ? 1 : 0));
+});
+process.stdin.on("end", stop);
+process.stdin.on("close", stop);
+process.stdin.on("error", stop);
+process.stdin.resume();
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, stop);

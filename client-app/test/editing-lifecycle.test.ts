@@ -1,0 +1,326 @@
+import { copyStudioTestProject, sourceFixtureCheckpoint } from "./support/source-fixture";
+import assert from "./support/assert";
+import { randomUUID } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { after, afterEach, before, beforeEach, test } from "node:test";
+import { SnapshotBuilder } from "../server/snapshot";
+import { EditService } from "../server/edits/transaction";
+import { SourceJournal } from "../server/edits/journal";
+import { creationDefaults, readCreationRequest, type CreationKind } from "../shared/creation";
+
+const root = path.resolve(__dirname, "../..");
+let fixture: string;
+let builder: SnapshotBuilder, edits: EditService;
+const evaluatorLog: string[] = [];
+before(async () => {
+  fixture = copyStudioTestProject("lifecycle-", { physicalDependencies: true });
+  builder = new SnapshotBuilder(fixture, line => { evaluatorLog.push(line); if (evaluatorLog.length > 60) evaluatorLog.shift(); }); edits = new EditService(fixture, builder); await builder.refresh();
+});
+let restoreSource: () => Promise<void>;
+beforeEach(() => { restoreSource = sourceFixtureCheckpoint(fixture, builder, { physicalDependencies: true }); });
+afterEach(async () => { await restoreSource(); });
+
+after(async () => { await builder?.dispose(); if (fixture) rmSync(fixture, { recursive: true, force: true }); });
+const state = () => builder.current!;
+const revision = () => state().snapshot.revision;
+const request = (kind: CreationKind, values: Record<string, unknown>) => readCreationRequest({ kind, ...creationDefaults(kind), ...values });
+
+async function assertApplied(operation: Promise<{ readonly status: string; readonly message: string }>): Promise<void> {
+  const result = await operation;
+  assert.equal(result.status, "applied", JSON.stringify({ result, models: Object.fromEntries((["dev", "prod"] as const).map(mode => [mode, { status: state().snapshot.models[mode].status, stale: state().snapshot.models[mode].stale, diagnostics: state().snapshot.models[mode].diagnostics }])), evaluatorLog }));
+}
+
+test("lane-incompatible permissions survive real source review, apply, reload and removal", async () => {
+  const target = "lambda:sign-in", destination = "task:db-migrate";
+  const operation = { kind: "connection", target, connection: "runsTask", destination, enabled: true } as const;
+  const plan = await edits.planBatch([operation], revision());
+  assert.ok(plan.ok, JSON.stringify(plan.preflight));
+  await assertApplied(edits.applyBatch(plan.planId));
+  await builder.refresh();
+  for (const model of Object.values(state().snapshot.models)) {
+    assert.equal(model.status, "ok", JSON.stringify(model.diagnostics));
+    const edge = model.edges.find(edge => edge.from === target && edge.to === destination && edge.relation === "runsTask")!;
+    assert.ok(edge, "the saved connection remains visible after re-evaluation");
+    assert.match(edge.readinessIssues?.[0]?.message ?? "", /local caller/);
+  }
+  const remove = await edits.planBatch([{ ...operation, enabled: false }], revision());
+  assert.ok(remove.ok, JSON.stringify(remove.preflight));
+  await assertApplied(edits.applyBatch(remove.planId));
+  assert.ok(Object.values(state().snapshot.models).every(model => !model.edges.some(edge => edge.from === target && edge.to === destination && edge.relation === "runsTask")));
+});
+
+test("packaging conversion refuses missing canonical artifacts without source writes", async () => {
+  const file = path.join(fixture, "framework-config/workloads/events.ts"), before = readFileSync(file, "utf8");
+  const plan = await edits.planBatch([{ kind: "field", intent: { target: "lambda:invocation-test-step", field: "lambda.packaging", value: "container" } }], revision());
+  assert.equal(plan.ok, false);
+  assert.match(JSON.stringify(plan.preflight), /no Dockerfile/);
+  await assert.rejects(edits.applyBatch(plan.planId), /rejected/);
+  assert.equal(readFileSync(file, "utf8"), before);
+});
+
+test("missing configured implementation is visible and reviewed repair preserves occupied paths", async () => {
+  const created = await edits.planBatch([{ kind: "create", request: request("function", { id: "audit-repair", category: "http", path: "/audit-repair", auth: false, directory: "compute/http/audit-custom-repair" }) }], revision());
+  assert.ok(created.ok, JSON.stringify(created.preflight)); await assertApplied(edits.applyBatch(created.planId));
+  const directory = path.join(fixture, "compute/http/audit-custom-repair"), backup = path.join(fixture, "backup-step");
+  renameSync(directory, backup);
+  try {
+    await builder.refresh();
+    assert.equal(state().snapshot.models.dev.targets.find(target => target.ref === "lambda:audit-repair")?.implementation?.ready, false);
+    const review = await edits.planBatch([{ kind: "implementation", target: "lambda:audit-repair" }], revision());
+    assert.ok(review.ok, JSON.stringify(review.preflight));
+    assert.ok(review.changes.some(change => change.file.endsWith("audit-custom-repair/index.ts") && change.operation === "create"));
+    assert.equal(existsSync(directory), false, "review creates no implementation directory");
+    mkdirSync(directory); writeFileSync(path.join(directory, "index.ts"), "// later editor\n");
+    await assert.rejects(edits.applyBatch(review.planId), /changed/);
+    assert.equal(readFileSync(path.join(directory, "index.ts"), "utf8"), "// later editor\n");
+    rmSync(directory, { recursive: true });
+    const retry = await edits.planBatch([{ kind: "implementation", target: "lambda:audit-repair" }], revision());
+    await assertApplied(edits.applyBatch(retry.planId));
+    assert.equal(state().snapshot.models.dev.targets.find(target => target.ref === "lambda:audit-repair")?.implementation?.ready, true);
+  } finally { rmSync(directory, { recursive: true, force: true }); renameSync(backup, directory); await builder.refresh(); await restoreSource(); }
+});
+
+test("route edits review and install real generated contracts; late implementation changes stale the review", async () => {
+  const generated = path.join(fixture, "packages/api-contract/src/generated/framework-routes.ts"), before = readFileSync(generated, "utf8");
+  const plan = await edits.planBatch([{ kind: "route", route: "route:http:/graphql", value: "/audit-graphql" }], revision());
+  assert.ok(plan.ok, JSON.stringify(plan.preflight));
+  assert.ok(plan.changes.some(change => change.file.endsWith("framework-routes.ts")));
+  const handler = path.join(fixture, "compute/http/graphql-api/index.ts"), original = readFileSync(handler, "utf8");
+  writeFileSync(handler, original + "\n// external change\n");
+  await assert.rejects(edits.applyBatch(plan.planId), /changed/);
+  assert.equal(readFileSync(generated, "utf8"), before);
+  writeFileSync(handler, original);
+  await assertApplied(edits.applyBatch(plan.planId));
+  assert.match(readFileSync(generated, "utf8"), /audit-graphql/);
+  await restoreSource();
+  assert.equal(readFileSync(generated, "utf8"), before);
+});
+
+test("event repair uses the edited creation template and rejects later template changes", async () => {
+  const creation = await edits.planBatch([{ kind: "create", request: request("function", { id: "template-repair" }) }], revision());
+  assert.ok(creation.ok, JSON.stringify(creation.preflight)); await assertApplied(edits.applyBatch(creation.planId));
+  const file = path.join(fixture, "compute/events/template-repair/index.ts");
+  rmSync(file); await builder.refresh();
+  const template = path.join(fixture, "framework-config/templates/lambda/event/files/index.ts.template");
+  writeFileSync(template, readFileSync(template, "utf8") + "\n// Shared repair starter.\n");
+  const repair = await edits.planBatch([{ kind: "implementation", target: "lambda:template-repair" }], revision());
+  assert.ok(repair.ok, JSON.stringify(repair.preflight));
+  assert.match(repair.changes.find(change => change.file.endsWith("template-repair/index.ts"))!.diff.unified, /Shared repair starter/);
+  writeFileSync(template, readFileSync(template, "utf8") + "\n// Template changed during review.\n");
+  await assert.rejects(edits.applyBatch(repair.planId), /changed after review/);
+  assert.equal(existsSync(file), false);
+  const retry = await edits.planBatch([{ kind: "implementation", target: "lambda:template-repair" }], revision());
+  assert.ok(retry.ok, JSON.stringify(retry.preflight)); await assertApplied(edits.applyBatch(retry.planId));
+  assert.match(readFileSync(file, "utf8"), /withLocalReplay\(/);
+});
+
+test("echo and tool starters use real contracts without introducing model prerequisites", async () => {
+  const agent = await edits.planBatch([{ kind: "create", request: request("agent", { id: "audit-echo", directory: "compute/agents/audit-custom-echo" }) }], revision());
+  assert.ok(agent.ok, JSON.stringify(agent.preflight));
+  assert.ok(agent.changes.some(change => change.file === "compute/agents/audit-custom-echo/index.ts"));
+  assert.ok(!agent.changes.find(change => change.file === "compute/agents/audit-custom-echo/package.json")!.diff.unified.includes("@repo/models"));
+  await assertApplied(edits.applyBatch(agent.planId));
+  assert.equal(state().snapshot.models.prod.targets.find(target => target.ref === "agent:audit-echo")!.requirements, 0);
+  await restoreSource();
+  const tool = await edits.planBatch([{ kind: "create", request: request("tool", { id: "audit-tool" }) }], revision());
+  assert.ok(tool.ok, JSON.stringify(tool.preflight));
+  assert.match(tool.changes.find(change => change.file.endsWith("audit-tool/index.ts"))!.diff.unified, /authenticatedTool/);
+  await assertApplied(edits.applyBatch(tool.planId));
+  assert.equal(state().snapshot.models.dev.targets.find(target => target.ref === "lambda:audit-tool")!.role, "tool");
+  await restoreSource();
+});
+
+test("partial tool scaffold rejects an incompatible existing contract without overwriting it", async () => {
+  const creation = await edits.planBatch([{ kind: "create", request: request("tool", { id: "audit-partial-tool" }) }], revision());
+  assert.ok(creation.ok, JSON.stringify(creation.preflight)); await assertApplied(edits.applyBatch(creation.planId));
+  const directory = path.join(fixture, "compute/tools/audit-partial-tool"), handler = path.join(directory, "index.ts"), contract = path.join(directory, "contract.ts");
+  const originalHandler = readFileSync(handler, "utf8"), originalContract = readFileSync(contract, "utf8");
+  try {
+    rmSync(handler); writeFileSync(contract, originalContract.replace("message: z.string().min(1).max(8000)", "other: z.string()")); await builder.refresh();
+    const rejected = await edits.planBatch([{ kind: "implementation", target: "lambda:audit-partial-tool" }], revision());
+    assert.equal(rejected.ok, false); assert.match(JSON.stringify(rejected.preflight), /message/);
+    assert.equal(existsSync(handler), false); assert.match(readFileSync(contract, "utf8"), /other/);
+    writeFileSync(contract, originalContract); await builder.refresh();
+    const repair = await edits.planBatch([{ kind: "implementation", target: "lambda:audit-partial-tool" }], revision());
+    assert.ok(repair.ok, JSON.stringify(repair.preflight));
+    writeFileSync(contract, originalContract + "\n// changed after review\n");
+    await assert.rejects(edits.applyBatch(repair.planId), /changed/); assert.equal(existsSync(handler), false);
+  } finally { writeFileSync(contract, originalContract); writeFileSync(handler, originalHandler); await builder.refresh(); await restoreSource(); }
+});
+
+test("existing code creation uses the configured path and rejects unsafe implementation paths", async () => {
+  for (const directory of ["compute/../escape", "compute/http/a\\b", "/outside/handler"]) assert.throws(() => request("function", { id: "audit-existing", category: "http", path: "/audit-existing", directory }));
+  const directory = path.join(fixture, "compute/http/audit-existing-code"); mkdirSync(directory);
+  const file = path.join(directory, "index.ts"), bytes = 'export const lambdaHandler = async () => ({ statusCode: 200, body: "User owned" });\n'; writeFileSync(file, bytes);
+  try {
+    const createRequest = request("function", { id: "audit-existing", category: "http", path: "/audit-existing", auth: false, directory: "compute/http/audit-existing-code", implementation: "existing" });
+    const plan = await edits.planBatch([{ kind: "create", request: createRequest }], revision());
+    assert.ok(plan.ok, JSON.stringify(plan.preflight)); assert.ok(!plan.changes.some(change => change.file === "compute/http/audit-existing-code/index.ts"));
+    await assertApplied(edits.applyBatch(plan.planId)); assert.equal(readFileSync(file, "utf8"), bytes);
+  } finally { rmSync(directory, { recursive: true }); }
+});
+
+test("container and agent removal include source archives, workspace projections and exact source writes", async () => {
+  for (const kind of ["service", "task", "agent"] as const) {
+    const id = `audit-remove-${kind}`, creation = await edits.planBatch([{ kind: "create", request: request(kind, { id, ...(kind === "service" ? { path: `/${id}/*` } : {}), ...(["service", "task"].includes(kind) ? { vpc: "application" } : {}) }) }], revision());
+    assert.ok(creation.ok, JSON.stringify(creation.preflight)); await assertApplied(edits.applyBatch(creation.planId));
+    const removal = await edits.planBatch([{ kind: "removeWorkload", target: `${kind}:${id}` }], revision());
+    assert.ok(removal.ok, JSON.stringify(removal.preflight)); assert.ok(removal.changes.some(change => change.file.startsWith(`archived-workloads/${kind}/${id}/`)));
+    await assertApplied(edits.applyBatch(removal.planId));
+    assert.equal(state().snapshot.models.dev.targets.some(target => target.ref === `${kind}:${id}`), false);
+    await restoreSource();
+  }
+});
+
+test("tool removal updates its generated target manifest during removal", async () => {
+  const creation = await edits.planBatch([{ kind: "create", request: request("tool", { id: "audit-remove-tool" }) }], revision());
+  assert.ok(creation.ok, JSON.stringify(creation.preflight)); await assertApplied(edits.applyBatch(creation.planId));
+  const removal = await edits.planBatch([{ kind: "removeWorkload", target: "lambda:audit-remove-tool" }], revision());
+  assert.ok(removal.ok, JSON.stringify(removal.preflight));
+  assert.ok(removal.changes.some(change => change.file.endsWith("target-ids.ts") && change.diff.lines.some(line => line.kind === "remove" && line.text.includes("audit-remove-tool"))));
+  await assertApplied(edits.applyBatch(removal.planId));
+  assert.equal(state().snapshot.models.dev.targets.some(target => target.ref === "lambda:audit-remove-tool"), false);
+  await restoreSource();
+});
+
+test("database and invocation connections preserve identities and generated outputs through source edits", async () => {
+  const ref = "lambda:sign-in", construct = state().snapshot.models.prod.targets.find(target => target.ref === ref)!.constructId;
+  for (const connection of [{ kind: "connection", target: ref, connection: "database", enabled: true } as const, { kind: "connection", target: ref, connection: "runsTask", destination: "task:invocation-test-task", enabled: true } as const]) {
+    const plan = await edits.planBatch([connection], revision()); assert.ok(plan.ok, JSON.stringify(plan.preflight));
+    await assertApplied(edits.applyBatch(plan.planId));
+    assert.equal(state().snapshot.models.prod.targets.find(target => target.ref === ref)!.constructId, construct);
+    assert.ok(state().snapshot.models.prod.edges.some(edge => edge.from === ref && edge.relation === connection.connection));
+    await restoreSource();
+  }
+});
+
+test("literal workload removal archives exact code and generated references", async () => {
+  const creation = await edits.planBatch([{ kind: "create", request: request("function", { id: "audit-removable", category: "http", path: "/audit-removable", auth: false }) }], revision());
+  assert.ok(creation.ok, JSON.stringify(creation.preflight)); await assertApplied(edits.applyBatch(creation.planId));
+  const source = "compute/http/audit-removable/index.ts", bytes = readFileSync(path.join(fixture, source), "utf8");
+  const removal = await edits.planBatch([{ kind: "removeWorkload", target: "lambda:audit-removable" }], revision());
+  assert.ok(removal.ok, JSON.stringify(removal.preflight));
+  assert.ok(removal.changes.some(change => change.file === source && change.operation === "delete"));
+  assert.ok(removal.changes.some(change => change.file === "archived-workloads/lambda/audit-removable/index.ts" && change.operation === "create"));
+  await assertApplied(edits.applyBatch(removal.planId));
+  assert.equal(existsSync(path.join(fixture, source)), false);
+  assert.equal(readFileSync(path.join(fixture, "archived-workloads/lambda/audit-removable/index.ts"), "utf8"), bytes);
+  assert.equal(state().snapshot.models.dev.targets.some(target => target.ref === "lambda:audit-removable"), false);
+  await restoreSource();
+  await assert.rejects(edits.planBatch([{ kind: "removeWorkload", target: "lambda:invocation-test-step" }], revision()), /consumers/);
+});
+
+test("private bucket template, native scoped grant and secret delivery use catalog authority", async () => {
+  const stack = await edits.planBatch([{ kind: "create", request: request("stack", { id: "auditUploads", className: "AuditUploadsStack", template: "bucket" }) }], revision());
+  assert.ok(stack.ok, JSON.stringify(stack.preflight));
+  const code = stack.changes.find(change => change.file.endsWith("audit-uploads-stack.ts"))!.diff.unified;
+  assert.match(code, /BLOCK_ALL/); assert.match(code, /RemovalPolicy.RETAIN/); assert.match(code, /autoDeleteObjects: false/);
+  await assertApplied(edits.applyBatch(stack.planId));
+  const grant = await edits.planBatch([{ kind: "connection", target: "lambda:sign-in", connection: "grant", destination: "resource:auditUploads.bucket", grant: "grantRead", scope: "uploads/*", enabled: true }], revision());
+  assert.ok(grant.ok, JSON.stringify(grant.preflight));
+  await assertApplied(edits.applyBatch(grant.planId));
+  assert.ok(state().snapshot.models.prod.edges.some(edge => edge.from === "lambda:sign-in" && edge.to === "resource:auditUploads.bucket" && edge.relation === "grant"));
+  const disconnect = await edits.planBatch([{ kind: "connection", target: "lambda:sign-in", connection: "grant", destination: "resource:auditUploads.bucket", grant: "grantRead", scope: "uploads/*", enabled: false }], revision());
+  assert.ok(disconnect.ok, JSON.stringify(disconnect.preflight)); await assertApplied(edits.applyBatch(disconnect.planId));
+  assert.ok(!state().snapshot.models.prod.edges.some(edge => edge.from === "lambda:sign-in" && edge.to === "resource:auditUploads.bucket" && edge.relation === "grant"));
+  await restoreSource();
+  // sign-in's environment is `{ ...authEndpointEnvironment }`: a new variable follows the spread, a name it supplies is refused.
+  await assert.rejects(edits.planBatch([{ kind: "connection", target: "lambda:sign-in", connection: "resource", destination: "resource:openaiApiKey", variable: "TRUSTED_FRONTEND_ORIGINS", enabled: true }], revision()), /already exists/);
+  const afterSpread = await edits.planBatch([{ kind: "connection", target: "lambda:sign-in", connection: "resource", destination: "resource:openaiApiKey", variable: "AUDIT_PROVIDER_SECRET_ARN", enabled: true }], revision());
+  assert.ok(afterSpread.ok, JSON.stringify(afterSpread.preflight));
+  assert.match(afterSpread.changes.find(change => change.file.endsWith("workloads/http.ts"))!.diff.unified, /\+\s+environment: \{ \.\.\.authEndpointEnvironment, AUDIT_PROVIDER_SECRET_ARN: inputs\["openaiApiKey"\]\.arn \},/);
+  const secret = await edits.planBatch([{ kind: "connection", target: "lambda:test-run-task", connection: "resource", destination: "resource:openaiApiKey", variable: "AUDIT_PROVIDER_SECRET_ARN", enabled: true }], revision());
+  assert.ok(secret.ok, JSON.stringify(secret.preflight));
+  assert.ok(secret.changes.some(change => /\.arn/.test(change.diff.unified)));
+  await assertApplied(edits.applyBatch(secret.planId));
+  const source = readFileSync(path.join(fixture, "framework-config/workloads/http.ts"), "utf8");
+  assert.ok(!source.includes("studioConnectionResources"), "existing catalog import is reused");
+  await restoreSource();
+});
+
+test("durable interrupted source recovery preserves later edits and has a fingerprint-bound completion", () => {
+  const directory = path.join(fixture, "framework-config/journal-fixture"), one = path.join(directory, "one.ts"), two = path.join(directory, "two.ts"); mkdirSync(directory);
+  writeFileSync(one, "original one\n"); writeFileSync(two, "original two\n");
+  const first = new SourceJournal(fixture), runningId = first.begin("Running fixture", [{ file: one, before: "original one\n", after: "reviewed one\n" }]);
+  const separateService = new SourceJournal(fixture);
+  assert.deepEqual(separateService.pending(), []);
+  assert.throws(() => separateService.restore(runningId, "RESTORE SOURCE"), /still applying/);
+  assert.throws(() => separateService.keepCurrent(runningId, "", "KEEP CURRENT SOURCE"), /still applying/);
+  first.finish(runningId, "restored");
+  const killed = spawnSync(process.execPath, ["--import", "tsx", "-e", `const {SourceJournal}=require(${JSON.stringify(path.join(root, "client-app/server/edits/journal.ts"))}); const {writeSourceChange}=require(${JSON.stringify(path.join(root, "packages/aws-studio/scripts/source/io.ts"))});const {withSourceWriteSync}=require(${JSON.stringify(path.join(root, "packages/aws-studio/scripts/source/source-gate.ts"))});withSourceWriteSync(${JSON.stringify(fixture)},()=>{const j=new SourceJournal(${JSON.stringify(fixture)});j.begin("Interrupted fixture",${JSON.stringify([{ file: one, before: "original one\n", after: "reviewed one\n" }, { file: two, before: "original two\n", after: "reviewed two\n" }])});writeSourceChange(${JSON.stringify(fixture)},${JSON.stringify(one)},"original one\\n","reviewed one\\n");process.kill(process.pid,"SIGKILL");});`], { cwd: root, encoding: "utf8" });
+  if (process.platform === "win32") assert.notEqual(killed.status, 0, killed.stderr);
+  else assert.equal(killed.signal, "SIGKILL", killed.stderr);
+  const restarted = new SourceJournal(fixture);
+  const id = restarted.pending()[0]!.id;
+  assert.deepEqual(restarted.pending()[0]!.files.map(file => file.state), ["written", "original"]);
+  writeFileSync(two, "later user edit\n");
+  assert.throws(() => restarted.restore(id, ""), /RESTORE SOURCE/);
+  const remaining = restarted.restore(id, "RESTORE SOURCE");
+  assert.equal(readFileSync(one, "utf8"), "original one\n"); assert.equal(readFileSync(two, "utf8"), "later user edit\n");
+  assert.equal(remaining[0]!.files[1]!.state, "conflicted");
+  const fingerprint = remaining[0]!.fingerprint; writeFileSync(two, "newer edit\n");
+  assert.throws(() => restarted.keepCurrent(id, fingerprint, "KEEP CURRENT SOURCE"), /changed/);
+  assert.deepEqual(restarted.keepCurrent(id, restarted.pending()[0]!.fingerprint, "KEEP CURRENT SOURCE"), []);
+  const linked = path.join(fixture, ".cache/framework-studio/transactions", `${randomUUID()}.json`); symlinkSync(one, linked);
+  try { assert.throws(() => restarted.pending(), /symbolic/); } finally { rmSync(linked); rmSync(directory, { recursive: true }); }
+});
+
+test("competing Studio processes exclusively lock source and explicit recovery releases a dead owner", async () => {
+  const file = path.join(fixture, "framework-config/concurrency-fixture.ts"), barrier = path.join(fixture, "begin-barrier"); writeFileSync(file, "original\n");
+  const script = `const {SourceJournal}=require(${JSON.stringify(path.join(root, "client-app/server/edits/journal.ts"))}); const fs=require("node:fs"); const j=new SourceJournal(${JSON.stringify(fixture)}); process.stdout.write("ready\\n"); while(!fs.existsSync(${JSON.stringify(barrier)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5); try { const id=j.begin("Competing fixture",${JSON.stringify([{ file, before: "original\n", after: "reviewed\n" }])}); fs.writeFileSync(${JSON.stringify(file)},"reviewed\\n"); process.stdout.write("acquired "+id+"\\n"); setInterval(()=>{},1000); } catch(e) { process.stdout.write("rejected "+e.status+" "+String(e.code??"")+" "+String(e.message??"").slice(0,500)+"\\n"); }`;
+  const children = [0, 1].map(() => { const child = spawn(process.execPath, ["--import", "tsx", "-e", script], { cwd: root, stdio: ["ignore", "pipe", "pipe"] }); const output = { child, text: "", errors: "" }; child.stdout.on("data", chunk => { output.text += String(chunk); }); child.stderr.on("data", chunk => { output.errors += String(chunk); }); return output; });
+  const until = (ready: () => boolean) => new Promise<void>((resolve, reject) => { const started = Date.now(); const poll = () => { if (ready()) resolve(); else if (Date.now() - started > 15_000) reject(new Error(JSON.stringify(children.map(child => [child.text, child.errors])))); else setTimeout(poll, 10); }; poll(); });
+  try {
+    await until(() => children.every(child => child.text.includes("ready"))); writeFileSync(barrier, "start");
+    await until(() => children.every(child => /acquired |rejected /.test(child.text)));
+    const results = JSON.stringify(children.map(child => ({ text: child.text, errors: child.errors })));
+    assert.equal(children.filter(child => child.text.includes("acquired ")).length, 1, results); assert.equal(children.filter(child => child.text.includes("rejected 409")).length, 1, results);
+    const winner = children.find(child => child.text.includes("acquired "))!;
+    assert.deepEqual(new SourceJournal(fixture).pending(), [], "a different live process is excluded from recovery");
+    const exited = new Promise<void>(resolve => winner.child.once("exit", () => resolve())); winner.child.kill("SIGKILL"); await exited;
+    const journal = new SourceJournal(fixture), pending = journal.pending(); assert.equal(pending.length, 1);
+    assert.throws(() => journal.begin("No automatic stale reclaim", [{ file, before: "reviewed\n", after: "later\n" }]), /recovery/i);
+    assert.deepEqual(journal.restore(pending[0]!.id, "RESTORE SOURCE"), []); assert.equal(readFileSync(file, "utf8"), "original\n");
+    const orphan = randomUUID(); writeFileSync(path.join(fixture, ".cache/framework-studio/transactions/source.lock"), JSON.stringify({ id: orphan, root: realpathSync(fixture), ownerPid: winner.child.pid }));
+    const interruptedBeforeWrites = journal.pending()[0]!; assert.equal(interruptedBeforeWrites.id, orphan); assert.deepEqual(interruptedBeforeWrites.files, []);
+    assert.deepEqual(journal.keepCurrent(orphan, interruptedBeforeWrites.fingerprint, "KEEP CURRENT SOURCE"), []);
+  } finally { for (const child of children) child.child.kill("SIGKILL"); rmSync(barrier, { force: true }); rmSync(file, { force: true }); }
+});
+
+
+test("Gateway source lifecycle reviews generated bindings, applies ordered access and protects consumers", async () => {
+  // Source-recovery fixtures above intentionally publish without the normal refresh.
+  await builder.refresh();
+  const gatewayId = "gateway:agentcore:audit-gateway";
+  const create = await edits.planBatch([{ kind: "create", request: request("gateway", { id: "audit-gateway", tools: [] }) }], revision());
+  assert.ok(create.ok, JSON.stringify(create.preflight));
+  assert.equal(create.select, gatewayId);
+  assert.ok(!create.changes.some(change => change.file.startsWith("compute/") || /\.env\.(?:dev|prod)$/.test(change.file)));
+  await assertApplied(edits.applyBatch(create.planId));
+  assert.ok(state().snapshot.models.dev.gateways?.some(gateway => gateway.id === gatewayId && gateway.protocol === "agentcore" && gateway.tools.length === 0));
+  const access = await edits.planBatch([
+    { kind: "gatewayTools", gateway: gatewayId, tools: ["add-numbers"] },
+    { kind: "agentGateways", target: "agent:example-agent", gateways: ["audit-gateway", "example-gateway"] },
+  ], revision());
+  assert.ok(access.ok, JSON.stringify(access.preflight));
+  assert.ok(access.changes.some(change => change.file === "packages/framework-generated/src/agentcore.ts" && change.diff.unified.includes("audit-gateway")));
+  await assertApplied(edits.applyBatch(access.planId));
+  const model = state().snapshot.models.prod;
+  const agent = model.targets.find(target => target.ref === "agent:example-agent")!;
+  assert.deepEqual(agent.compute.kind === "agent" && agent.compute.gateways, ["audit-gateway", "example-gateway"]);
+  assert.ok(model.edges.some(edge => edge.relation === "usesGateway" && edge.from === agent.ref && edge.to === gatewayId));
+  assert.ok(model.edges.some(edge => edge.relation === "usesTool" && edge.from === gatewayId && edge.to === "lambda:add-numbers"));
+  assert.ok(agent.environment.some(entry => entry.name === "FRAMEWORK_AGENTCORE_ADAPTER" && entry.via === "agentcore" && entry.value.kind === "reference" && entry.value.display.includes("audit-gateway, example-gateway")));
+  assert.match(readFileSync(path.join(fixture, "packages/framework-generated/src/agentcore.ts"), "utf8"), /"add-numbers": "audit-gateway"/);
+  await assert.rejects(edits.planBatch([{ kind: "removeGateway", gateway: gatewayId }], revision()), /Disconnect agents/);
+  const disconnect = await edits.planBatch([{ kind: "agentGateways", target: agent.ref, gateways: ["example-gateway"] }], revision());
+  assert.ok(disconnect.ok, JSON.stringify(disconnect.preflight));
+  await assertApplied(edits.applyBatch(disconnect.planId));
+  const remove = await edits.planBatch([{ kind: "removeGateway", gateway: gatewayId }], revision());
+  assert.ok(remove.ok, JSON.stringify(remove.preflight));
+  await assertApplied(edits.applyBatch(remove.planId));
+  assert.ok(!state().snapshot.models.dev.gateways?.some(gateway => gateway.id === gatewayId));
+  assert.ok(state().snapshot.models.dev.targets.some(target => target.ref === "lambda:add-numbers"), "removing a Gateway retains its Lambda tool implementation");
+});

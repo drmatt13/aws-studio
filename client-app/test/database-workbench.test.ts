@@ -1,0 +1,503 @@
+import assert from "./support/assert";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { afterEach, test } from "node:test";
+import { DatabaseWorkbenchService, compileDatabaseSource, databaseConfigurationRevision, databasePrismaConfig, databaseContractPath, databaseContractImpact } from "../server/database-workbench";
+import type { DatabaseHistory } from "../shared/database-history";
+import { CONTRACT_FILE } from "../server/database";
+import { sha256 } from "../server/files";
+import { ok } from "@prisma/orm-framework/utils/result";
+
+const repository = path.resolve(__dirname, "../..");
+const roots: string[] = [];
+const source = `// use prisma-8
+// Keep this authored comment.
+model Entry {
+  id Uuid @id(map: "entry_pk")
+  title String @map("entry_title") // preserve the physical name
+  updatedAt temporal.timestamptzString(6, onCreate: now, onUpdate: now)
+  @@map("entries")
+}
+`;
+
+function fixture(text = source): { root: string; file: string; service: DatabaseWorkbenchService } {
+  const root = mkdtempSync(path.join(repository, ".cache/framework-studio/workbench-test-"));
+  roots.push(root);
+  mkdirSync(path.join(root, "packages/database/prisma"), { recursive: true });
+  writeFileSync(path.join(root, "packages/database/prisma.config.ts"), `import { definePrismaConfig } from "@prisma/cli-engine";
+import { defineConfig } from "@prisma/orm-postgres/config";
+export default definePrismaConfig({orm: defineConfig({contract:"prisma/contract.prisma",output:"src/generated",migrations:{dir:"prisma/migrations"}})});
+`);
+  const file = path.join(root, CONTRACT_FILE);
+  writeFileSync(file, text);
+  return { root, file, service: new DatabaseWorkbenchService(root) };
+}
+
+afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+
+test("fixed contract authority accepts the native Windows path without allowing a different repository path", () => {
+  const { root, file } = fixture();
+  assert.equal(databaseContractPath(root), file);
+});
+
+test("real installed Prisma validates dialect semantics with exact UTF-16 source ranges without emitting", async () => {
+  const { root, file, service } = fixture();
+  const loaded = await service.load();
+  assert.equal(loaded.validation.valid, true);
+  assert.equal(loaded.validation.schema?.tables[0]?.columns[1]?.column, "entry_title");
+  const bad = source.replace("title String", "title UnknownType");
+  const invalid = await service.validate(bad);
+  assert.equal(invalid.valid, false);
+  const finding = invalid.diagnostics.find(item => item.code === "PSL_UNRESOLVED_REFERENCE")!;
+  assert.equal(bad.slice(finding.from, finding.to), "UnknownType");
+  assert.equal(invalid.schema, undefined, "invalid drafts cannot silently publish partial diagrams");
+  assert.equal(readFileSync(file, "utf8"), source);
+  assert.deepEqual(readdirSync(path.join(root, "packages/database")), ["prisma", "prisma.config.ts"]);
+});
+
+test("canonical storage hashes distinguish optional storage changes from mapped logical renames", async () => {
+  const { root } = fixture();
+  const original = await compileDatabaseSource(root, source);
+  const renamed = await compileDatabaseSource(root, source.replace("title String", "label String"));
+  const optional = await compileDatabaseSource(root, source.replace("title String", "title String?"));
+  assert.equal(renamed.validation.storageHash, original.validation.storageHash);
+  assert.notEqual(optional.validation.storageHash, original.validation.storageHash);
+  assert.equal(renamed.validation.schema?.tables[0]?.columns[1]?.name, "label");
+  assert.equal(renamed.validation.schema?.tables[0]?.columns[1]?.column, "entry_title");
+});
+
+test("formatting uses installed formatter and retains comments, mappings, parameterized types and annotations", async () => {
+  const { service, file } = fixture();
+  const formatted = await service.format(source);
+  assert.ok(formatted.source.includes("Keep this authored comment."));
+  assert.ok(formatted.source.includes("preserve the physical name"));
+  assert.ok(formatted.source.includes('@map("entry_title")'));
+  assert.ok(formatted.source.includes("temporal.timestamptzString(6, onCreate: now, onUpdate: now)"));
+  assert.equal(formatted.sourceHash, sha256(source));
+  assert.equal(readFileSync(file, "utf8"), source, "format is a draft operation");
+  await assert.rejects(service.format(source + "model Broken {"), /diagnostics/);
+});
+
+test("review performs no writes and save consumes a single exact-source review", async () => {
+  const { service, file } = fixture();
+  const draft = source.replace("title String", "title String?");
+  const review = await service.review(draft, sha256(source));
+  assert.equal(review.before, source);
+  assert.equal(review.after, draft);
+  assert.equal(readFileSync(file, "utf8"), source);
+  await assert.rejects(service.save("unknown"), /expired/);
+  const saved = await service.save(review.reviewId);
+  assert.equal(saved.saved, true);
+  assert.equal(saved.revision, sha256(draft));
+  assert.equal(saved.contractImpact?.beforeRevision, sha256(source));
+  assert.equal(saved.contractImpact?.revision, saved.revision);
+  assert.equal(saved.contractImpact?.earliestStage, "api");
+  assert.deepEqual(saved.contractImpact?.models, ["Entry"]);
+  assert.equal(saved.contractImpact?.diffs[0]?.path, "Entry.title");
+  assert.equal(readFileSync(file, "utf8"), draft);
+  await assert.rejects(service.save(review.reviewId), /expired/);
+  // Returning to an older source is a new reviewed save, never a database rollback.
+  const restoreReview = await service.review(source, saved.revision);
+  await service.save(restoreReview.reviewId);
+  assert.equal(readFileSync(file, "utf8"), source);
+});
+
+test("saved semantic impact detects private additions, mappings and execution changes without downstream validation", async () => {
+  const { root, service } = fixture();
+  const previous = await compileDatabaseSource(root, source);
+  const privateField = source.replace("  title String", "  privateNote String?\n  title String");
+  const review = await service.review(privateField, sha256(source));
+  const saved = await service.save(review.reviewId);
+  assert.equal(saved.contractImpact?.semantics, "changed");
+  assert.deepEqual(saved.contractImpact?.stages, ["api", "codegen", "client"]);
+  assert.equal(saved.contractImpact?.diffs[0]?.path, "Entry.privateNote");
+  const mapped = source.replace('entry_title', 'entry_title_new');
+  const current = await compileDatabaseSource(root, mapped);
+  const impact = databaseContractImpact(source, mapped, previous.validation, current.validation);
+  assert.equal(impact.semantics, "changed");
+  assert.equal(impact.earliestStage, "api");
+  assert.deepEqual(impact.models, ["Entry"]);
+  assert.deepEqual(impact.diffs, [], "storage semantics are independent from the readable field projection");
+});
+
+test("comment-only source saves do not manufacture downstream work and missing semantics remain conservative", async () => {
+  const { service } = fixture();
+  const changed = source + "\n// documentation only\n";
+  const review = await service.review(changed, sha256(source));
+  const saved = await service.save(review.reviewId);
+  assert.equal(saved.contractImpact?.semantics, "unchanged");
+  assert.equal(saved.contractImpact?.earliestStage, null);
+  assert.deepEqual(saved.contractImpact?.stages, []);
+  assert.equal(databaseContractImpact(source, changed).semantics, "unknown");
+  assert.equal(databaseContractImpact(source, changed).earliestStage, "api");
+});
+
+test("an access protection is a contract change even though storage is unchanged, and a misplaced one fails validation", async () => {
+  const governed = source.replace("model Entry {", "/// @access(read: authenticated)\nmodel Entry {");
+  const { root, service } = fixture(governed);
+  const readOnly = governed.replace('  title String @map("entry_title")', '  /// @access(readonly)\n  title String @map("entry_title")');
+  const review = await service.review(readOnly, sha256(governed));
+  const saved = await service.save(review.reviewId);
+  assert.equal(saved.contractImpact?.semantics, "changed");
+  assert.equal(saved.contractImpact?.earliestStage, "api");
+  assert.deepEqual(saved.contractImpact?.diffs.map(diff => [diff.path, diff.before, diff.after]), [["Entry.title (access)", "managed in app code", "read-only"]]);
+  assert.equal(review.validation.storageHash, (await compileDatabaseSource(root, governed)).validation.storageHash, "comments never change storage");
+  const misplaced = governed.replace("  id Uuid", "  /// @access(secret)\n  id Uuid");
+  const invalid = (await compileDatabaseSource(root, misplaced)).validation;
+  assert.equal(invalid.valid, false);
+  assert.deepEqual(invalid.diagnostics.map(item => [item.code, misplaced.slice(0, item.from).split("\n").length, misplaced.slice(item.from, item.to)]), [["AG-FIELD-RULE", 5, "secret"]]);
+  const retired = (await compileDatabaseSource(root, governed.replace('@id(map: "entry_pk")', '@id(map: "entry_pk") // @access read-only'))).validation;
+  assert.deepEqual(retired.diagnostics.map(item => item.code), ["AG-LEGACY"], "the retired comment form is refused, not ignored");
+  await assert.rejects(service.review(misplaced, saved.revision), /diagnostics/);
+});
+
+test("source review compares Access Graph policy and inherited restrictions before saving", async () => {
+  const authored = `// use prisma-8
+enum WorkspaceRole {
+  /// @access(read, update)
+  EDITOR = "EDITOR"
+  @@type("pg/text@1")
+}
+enum MemberState {
+  ACTIVE = "ACTIVE"
+  INACTIVE = "INACTIVE"
+  @@type("pg/text@1")
+}
+/// @access(read: id == auth.id)
+model User {
+  id Uuid @id @default(uuid())
+  memberships Member[]
+  profiles Profile[]
+  ledger LedgerEntry[]
+}
+/// @access(read: userId == auth.id)
+model LedgerEntry {
+  id Uuid @id @default(uuid())
+  userId Uuid
+  amount Int
+  user User @relation(fields: [userId], references: [id])
+}
+/// @access(roles: members[state=ACTIVE].role)
+model Workspace {
+  id Uuid @id @default(uuid())
+  members Member[]
+  folders Folder[]
+}
+model Member {
+  workspaceId Uuid
+  userId Uuid
+  role WorkspaceRole
+  state MemberState
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+  @@id([workspaceId, userId])
+}
+/// @access(from: workspace)
+model Folder {
+  id Uuid @id @default(uuid())
+  workspaceId Uuid
+  archived Boolean
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  entries Entry[]
+}
+/// @access(from: folder)
+model Entry {
+  id Uuid @id @default(uuid())
+  folderId Uuid
+  title String
+  folder Folder @relation(fields: [folderId], references: [id])
+}
+model Profile {
+  id Uuid @id @default(uuid())
+  userId Uuid
+  user User @relation(fields: [userId], references: [id])
+}
+`;
+  const { file, service } = fixture(authored);
+  const draft = authored
+    .replace("@access(read, update)", "@access(read, publish, protected)")
+    .replace("  amount Int", "  /// @access(read: userId == auth.id, readonly)\n  amount Int")
+    .replace("members[state=ACTIVE].role)", "members[state=INACTIVE].role, only: [read])")
+    .replace("from: workspace)", "from: workspace)\n/// @access(deny read: archived == true)")
+    .replace("  title String", "  /// @access(serverOnly)\n  title String")
+    .replace("model Profile", "/// @access(read: userId == auth.id)\nmodel Profile");
+  const baseline = await service.validate(authored);
+  const review = await service.review(draft, sha256(authored));
+  assert.equal(review.validation.storageHash, baseline.storageHash);
+  assert.equal(review.validation.executionHash, baseline.executionHash);
+  assert.equal(review.contractImpact?.earliestStage, "api");
+  const effects = Object.fromEntries(review.contractImpact?.accessChanges?.map(diff => [diff.path, diff]) ?? []);
+  assert.equal(effects["WorkspaceRole · permission publish"]?.after, "EDITOR");
+  assert.equal(effects["WorkspaceRole · protected values"]?.after, "EDITOR");
+  assert.equal(effects["LedgerEntry · amount"]?.before, "Read eligible");
+  assert.equal(effects["LedgerEntry · amount"]?.after, "Read eligible · Read only · LedgerEntry.userId == auth.id");
+  assert.equal(effects["WorkspaceRole · EDITOR CRUD mask"]?.after, "read");
+  assert.match(effects["Entry · scope"]?.after ?? "", /state = INACTIVE/);
+  assert.match(effects["Entry · action caps"]?.after ?? "", /Workspace \[read\]/);
+  assert.equal(effects["Entry · generic update"]?.before, "EDITOR");
+  assert.equal(effects["Entry · generic update"]?.after, "None");
+  assert.equal(effects["Entry · deny via Folder"]?.after, "Folder · not archived");
+  assert.equal(effects["Folder · deny"]?.after, "Folder · not archived");
+  assert.equal(effects["Entry · title"]?.after, "Server only");
+  assert.equal(effects["Profile · row eligibility"]?.after, "Eligible under a scope");
+  assert.equal(readFileSync(file, "utf8"), authored);
+  const saved = await service.save(review.reviewId);
+  assert.deepEqual(saved.contractImpact?.accessChanges, review.contractImpact?.accessChanges);
+  const comment = await service.review(draft.replace("enum WorkspaceRole", "// An explanation.\nenum WorkspaceRole"), saved.revision);
+  assert.equal(comment.contractImpact?.accessChanges, undefined);
+});
+
+test("external changes and config changes preserve external source and refuse stale review", async () => {
+  const { root, service, file } = fixture();
+  const draft = source.replace("title String", "title String?");
+  const review = await service.review(draft, sha256(source));
+  const external = source + "\n// External editor changed this file.\n";
+  writeFileSync(file, external);
+  await assert.rejects(service.save(review.reviewId), /changed after review/);
+  assert.equal(readFileSync(file, "utf8"), external);
+  await assert.rejects(service.review(draft, sha256(source)), /outside this draft/);
+  const fresh = await service.review(draft, sha256(external));
+  const config = path.join(root, "packages/database/prisma.config.ts");
+  writeFileSync(config, readFileSync(config, "utf8") + "\n// Config changed.\n");
+  await assert.rejects(service.save(fresh.reviewId), /configuration changed/);
+  assert.equal(readFileSync(file, "utf8"), external);
+});
+
+test("invalid drafts and symlinked contracts cannot be saved", async () => {
+  const { service, file } = fixture();
+  await assert.rejects(service.review(source + "model Bad {", sha256(source)), /diagnostics/);
+  assert.equal(readFileSync(file, "utf8"), source);
+  const real = file + ".real";
+  writeFileSync(real, source);
+  rmSync(file); symlinkSync(real, file);
+  await assert.rejects(service.review(source.replace("title String", "title String?"), sha256(source)), /symbolic link/);
+  assert.equal(readFileSync(real, "utf8"), source);
+});
+
+test("source save success remains explicit when framework graph refresh fails", async () => {
+  const { root, file } = fixture();
+  const service = new DatabaseWorkbenchService(root, async () => { throw new Error("Snapshot unavailable"); });
+  const draft = source.replace("title String", "title String?");
+  const review = await service.review(draft, sha256(source));
+  const result = await service.save(review.reviewId);
+  assert.equal(result.saved, true);
+  assert.equal(result.refresh, "unavailable");
+  assert.match(result.message, /schema saved/);
+  assert.equal(readFileSync(file, "utf8"), draft);
+});
+
+test("unsupported targets remain unknown and never inherit a configured remote DATABASE_URL", async () => {
+  const { root, service } = fixture();
+  writeFileSync(path.join(root, "docker-compose.yml"), `services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: private-user
+      POSTGRES_PASSWORD: never-expose-this
+      POSTGRES_DB: fixture
+    ports: ['127.0.0.1:\${POSTGRES_HOST_PORT}:5432']
+`);
+  const production = await service.inspect("production", sha256(source));
+  assert.equal(production.status, "unsupported");
+  assert.equal(production.physical.status, "unknown");
+  assert.equal(production.marker.status, "unknown");
+  assert.ok(!JSON.stringify(await service.load()).includes("never-expose-this"));
+  await assert.rejects(service.inspect("arbitrary-url", sha256(source)), /Choose a database target/);
+  await assert.rejects(service.inspect("production", "stale"), /Saved source changed/);
+});
+
+function composeFixture(root: string): void {
+  writeFileSync(path.join(root, ".env"), "POSTGRES_HOST_PORT=5432\n");
+  writeFileSync(path.join(root, "docker-compose.yml"), `services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: fixture-user
+      POSTGRES_PASSWORD: fixture-password-never-output
+      POSTGRES_DB: fixture
+    ports: ['127.0.0.1:\${POSTGRES_HOST_PORT}:5432']
+`);
+}
+
+test("pending migrations, physical drift and unexplained state stay distinct using canonical historical contracts", async () => {
+  const { root, file } = fixture(); composeFixture(root);
+  const before = await compileDatabaseSource(root, source);
+  const changed = source.replace("title String", "title String?"); writeFileSync(file, changed);
+  const after = await compileDatabaseSource(root, changed);
+  const from = before.validation.storageHash!, to = after.validation.storageHash!;
+  const history: DatabaseHistory = { revision: "history-fixture", sourceHash: sha256(changed), heads: [to], refs: [], observedAt: new Date().toISOString(), issues: [],
+    snapshots: [{ hash: from, path: "fixture-contract.json", available: true, provenance: "semantic-contract", contract: before.config.target.contractSerializer.serializeContract(before.contract!), issues: [] }],
+    migrations: [{ id: "fixture-migration", name: "optional-title", space: "app", from, to, migrationHash: "fixture-edge", integrity: "verified", operations: [], source: "reviewed source", sourcePath: "fixture/migration.ts", sourceVerification: "not-executed", pendingPlaceholders: false, issues: [], createdAt: new Date().toISOString() }] };
+  let markerHash: string | null = from;
+  let savedMatches = false, historicalMatches = true;
+  const requests: string[] = [];
+  const service = new DatabaseWorkbenchService(root, undefined, (connection) => {
+    assert.ok(!connection.includes("remote"));
+    assert.match(new URL(connection).searchParams.get("options")!, /default_transaction_read_only=on/);
+    return {
+      async connect() {}, async close() {}, async readLedger() { return []; },
+      async readMarker() { return markerHash ? { storageHash: markerHash, profileHash: "test", contractJson: null, canonicalVersion: null, updatedAt: new Date(), appTag: null, meta: {}, invariants: [] } : null; },
+      async schemaVerify(options) {
+        const hash = (options.contract as typeof after.contract)!.storage.storageHash; requests.push(hash);
+        const matches = hash === to ? savedMatches : historicalMatches;
+        return { ok: matches, summary: "fixture", contract: { storageHash: hash }, target: { expected: "postgres" }, schema: { issues: matches ? [] : [{ path: ["public", "entries", "entry_title"], explanation: "Fixture column difference" }] }, timings: { total: 0 } };
+      },
+    };
+  });
+  const pending = await service.inspect("local:postgres", sha256(changed), history.revision, history);
+  assert.equal(pending.status, "observed");
+  assert.equal(pending.physical.status, "differs");
+  assert.equal(pending.historicalPhysical?.status, "matches");
+  assert.equal(pending.migrationState.status, "pending");
+  assert.deepEqual(requests, [to, from], "saved and known historical physical baselines both verified");
+  history.issues.push({ code: "branch", message: "Another developer's valid side branch." });
+  assert.equal((await service.inspect("local:postgres", sha256(changed), history.revision, history)).migrationState.status, "pending", "legal topology does not hide a valid forward route");
+  history.issues.push({ code: "snapshotUnavailable", message: "Required historical metadata is incomplete." });
+  assert.equal((await service.inspect("local:postgres", sha256(changed), history.revision, history)).migrationState.status, "unknown", "missing snapshots remain blocking integrity evidence");
+  history.issues.pop();
+  historicalMatches = false;
+  assert.equal((await service.inspect("local:postgres", sha256(changed), history.revision, history)).migrationState.status, "divergent");
+  markerHash = "outside-known-history";
+  const unknown = await service.inspect("local:postgres", sha256(changed), history.revision, history);
+  assert.equal(unknown.migrationState.status, "unknown");
+  assert.equal(unknown.historicalPhysical, undefined);
+  markerHash = null; savedMatches = true;
+  assert.equal((await service.inspect("local:postgres", sha256(changed), history.revision, history)).migrationState.status, "unknown");
+  markerHash = to;
+  assert.equal((await service.inspect("local:postgres", sha256(changed), history.revision, history)).migrationState.status, "current");
+  savedMatches = false;
+  assert.equal((await service.inspect("local:postgres", sha256(changed), history.revision, history)).migrationState.status, "divergent");
+});
+
+test("unreachable observations remain unknown, redact private failures and invalidate changed target identity", async () => {
+  const { root } = fixture(); composeFixture(root);
+  const unreachable = new DatabaseWorkbenchService(root, undefined, () => ({ async connect() { throw new Error("fixture-password-never-output postgresql://secret@host"); }, async close() {}, async readMarker() { return null; }, async readLedger() { return []; }, async schemaVerify() { throw new Error("unreachable"); } }));
+  const result = await unreachable.inspect("local:postgres", sha256(source));
+  assert.equal(result.status, "unreachable");
+  assert.equal(result.physical.status, "unknown");
+  assert.equal(result.migrationState.status, "unknown");
+  assert.ok(!JSON.stringify(result).includes("fixture-password-never-output"));
+  assert.ok(!JSON.stringify(result).includes("postgresql://"));
+  const compiled = await compileDatabaseSource(root, source);
+  const stale = new DatabaseWorkbenchService(root, undefined, () => ({
+    async connect() {}, async close() {}, async readMarker() { return null; }, async readLedger() { return []; },
+    async schemaVerify() {
+      const compose = path.join(root, "docker-compose.yml"); writeFileSync(compose, readFileSync(compose, "utf8").replace("fixture-password-never-output", "rotated-password"));
+      return { ok: true, summary: "fixture", contract: { storageHash: compiled.validation.storageHash! }, target: { expected: "postgres" }, schema: { issues: [] }, timings: { total: 0 } };
+    },
+  }));
+  assert.equal((await stale.inspect("local:postgres", sha256(source))).status, "stale");
+});
+
+test("aborted validation publishes no result and does not write source", async () => {
+  const { service, file } = fixture();
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(service.validate(source, controller.signal), error => error instanceof Error && error.name === "AbortError");
+  assert.equal(readFileSync(file, "utf8"), source);
+});
+
+test("transitive config edits invalidate public identity, canonical configuration and reviewed source", async () => {
+  const { root, service } = fixture();
+  const config = path.join(root, "packages/database/prisma.config.ts");
+  const settings = path.join(root, "packages/database/studio-format.ts");
+  writeFileSync(settings, "export const indent = 2;\n");
+  writeFileSync(config, `import { definePrismaConfig } from "@prisma/cli-engine";
+import { defineConfig } from "@prisma/orm-postgres/config";
+import { indent } from "./studio-format.js";
+export default definePrismaConfig({orm:{...defineConfig({contract:"prisma/contract.prisma",output:"src/generated",migrations:{dir:"prisma/migrations"}}),formatter:{indent}}});
+`);
+  const firstIdentity = databaseConfigurationRevision(root);
+  // Formatter is part of the canonical config; the façade stores it through the ORM config.
+  const first = await service.load();
+  assert.equal((await databasePrismaConfig(root)).formatter?.indent, 2);
+  const review = await service.review(source.replace("title String", "title String?"), sha256(source));
+  writeFileSync(settings, "export const indent = 4;\n");
+  assert.notEqual(databaseConfigurationRevision(root), firstIdentity);
+  const second = await service.load();
+  assert.equal((await databasePrismaConfig(root)).formatter?.indent, 4);
+  assert.notEqual(second.configRevision, first.configRevision);
+  await assert.rejects(service.save(review.reviewId), /configuration changed/);
+});
+
+test("emitted artifact evidence verifies real canonical hashes and distinguishes saved storage from execution changes", async () => {
+  const { root, service, file } = fixture();
+  assert.equal((await service.load()).emitted?.status, "missing");
+  const compiled = await compileDatabaseSource(root, source);
+  const { createControlClient } = await import("@prisma/orm-toolchain/cli/control-api");
+  const client = createControlClient(compiled.config);
+  const emitted = await client.emit({ contractConfig: { output: path.join(root, "packages/database/src/generated/contract.json"), source: { format: "psl", async load() { return ok(compiled.contract!); } } } });
+  await client.close();
+  assert.ok(emitted.ok);
+  mkdirSync(path.join(root, "packages/database/src/generated"), { recursive: true });
+  const output = path.join(root, "packages/database/src/generated/contract.json");
+  writeFileSync(output, emitted.value.contractJson);
+  assert.equal((await service.load()).emitted?.status, "matches");
+  writeFileSync(file, source.replace("onCreate: now, onUpdate: now", "onCreate: now"));
+  const behavior = (await service.load()).emitted!;
+  assert.equal(behavior.status, "differs");
+  assert.equal(behavior.storageMatches, true);
+  assert.equal(behavior.executionMatches, false);
+  writeFileSync(file, source.replace("title String", "title String?"));
+  assert.equal((await service.load()).emitted?.storageMatches, false);
+  assert.equal(readFileSync(output, "utf8"), emitted.value.contractJson, "read evidence never generates or rewrites artifacts");
+  const malformed = JSON.parse(emitted.value.contractJson); malformed.execution.executionHash = "not-a-valid-hash";
+  writeFileSync(output, JSON.stringify(malformed));
+  assert.equal((await service.load()).emitted?.status, "invalid", "emitted bytes are freshly checked even when compiled source was cached");
+});
+
+test("valid native CHECK constraints remain valid with an explicit source-backed diagram capability note", async () => {
+  const annotated = source.replace('  @@map("entries")', '  @@check(expression: "length(entry_title) > 0", name: "entry_title_present")\n  @@map("entries")');
+  const { root } = fixture(annotated);
+  const result = await compileDatabaseSource(root, annotated);
+  assert.equal(result.validation.valid, true);
+  assert.ok(result.validation.schema?.problems.some(item => item.includes("@@check") && item.includes("preserved in source")));
+});
+
+test("an unresolved PostgreSQL Compose override never silently observes the base target", async () => {
+  const { root, service } = fixture(); composeFixture(root);
+  writeFileSync(path.join(root, "docker-compose.override.yml"), "services:\n  postgres:\n    ports: ['127.0.0.1:6543:5432']\n");
+  const simulator = path.join(root, "compose-unavailable.cjs"); writeFileSync(simulator, "process.exit(1)");
+  const previous = process.env.FRAMEWORK_DOCKER_CLI; process.env.FRAMEWORK_DOCKER_CLI = simulator;
+  try {
+    const target = (await service.load()).targets.find(item => item.id === "local:postgres")!;
+    assert.equal(target.available, false);
+    assert.match(target.detail, /overrides PostgreSQL/);
+    const observation = await service.inspect("local:postgres", sha256(source));
+    assert.equal(observation.status, "unsupported");
+    assert.equal(observation.physical.status, "unknown");
+  } finally { if (previous === undefined) delete process.env.FRAMEWORK_DOCKER_CLI; else process.env.FRAMEWORK_DOCKER_CLI = previous; }
+});
+
+test("operational PostgreSQL overrides preserve inspection and effective Compose resolves changed bindings privately", async () => {
+  const { root, service } = fixture();
+  composeFixture(root);
+  writeFileSync(path.join(root, "docker-compose.override.yml"), "services:\n  postgres:\n    healthcheck:\n      interval: 10s\n");
+  assert.equal((await service.load()).targets.find(target => target.id === "local:postgres")?.available, true);
+  writeFileSync(path.join(root, "docker-compose.override.yml"), "services:\n  postgres:\n    ports: ['127.0.0.1:5544:5432']\n");
+  const simulator = path.join(root, "compose-resolution.cjs");
+  writeFileSync(simulator, `process.stdout.write(JSON.stringify({services:{postgres:{environment:{POSTGRES_USER:"fixture",POSTGRES_PASSWORD:"effective-secret-never-exposed",POSTGRES_DB:"fixture"},ports:[{host_ip:"127.0.0.1",published:"5544",target:5432,protocol:"tcp"}]}}}));`);
+  const previous = process.env.FRAMEWORK_DOCKER_CLI;
+  process.env.FRAMEWORK_DOCKER_CLI = simulator;
+  try {
+    const loaded = await service.load();
+    const target = loaded.targets.find(target => target.id === "local:postgres")!;
+    assert.equal(target.available, true);
+    assert.match(target.detail, /5544/);
+    assert.ok(!JSON.stringify(loaded).includes("effective-secret-never-exposed"));
+  } finally { if (previous === undefined) delete process.env.FRAMEWORK_DOCKER_CLI; else process.env.FRAMEWORK_DOCKER_CLI = previous; }
+});
+
+test("a root dotenv port edit changes target identity after the Prisma config has injected its old port", { skip: process.env.POSTGRES_HOST_PORT !== undefined }, async () => {
+  const { root, service } = fixture(); composeFixture(root);
+  const config = path.join(root, "packages/database/prisma.config.ts");
+  writeFileSync(config, `import { config as loadDotEnv } from "dotenv";\nloadDotEnv({path:new URL("../../.env",import.meta.url),quiet:true});\n` + readFileSync(config, "utf8"));
+  writeFileSync(path.join(root, ".env"), "POSTGRES_HOST_PORT=65431\n");
+  const first = (await service.load()).targets.find(item => item.id === "local:postgres")!;
+  assert.match(first.detail, /65431/);
+  assert.equal(process.env.POSTGRES_HOST_PORT, "65431", "the authored config has injected its original dotenv value");
+  writeFileSync(path.join(root, ".env"), "POSTGRES_HOST_PORT=65432\n");
+  const second = (await service.load()).targets.find(item => item.id === "local:postgres")!;
+  assert.match(second.detail, /65432/);
+  assert.notEqual(second.identity, first.identity);
+  assert.equal(process.env.POSTGRES_HOST_PORT, "65431", "the test does not clear or rewrite the stale injected process value");
+});

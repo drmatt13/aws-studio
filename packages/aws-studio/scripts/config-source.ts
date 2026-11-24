@@ -1,0 +1,520 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import ts from "typescript";
+
+/**
+ * The static half of route-key validation.
+ *
+ * Route maps are validated by their keys, and a spread can overwrite a key
+ * before any runtime validator sees it — `{ ...a, ...b }` silently keeps one
+ * declaration and drops the other. TypeScript catches a repeated literal key
+ * within one object; only reading the source catches the rest, so the check
+ * lives here rather than pretending a runtime validator could recover what was
+ * already lost.
+ *
+ * Sections compose as an array of modules, so this reads the config and then one
+ * hop further into each module it names. That is also what lets it report the
+ * case `defineFrameworkConfig` can only describe by position: the same key
+ * declared in two files, named by file.
+ */
+
+/** Sections whose keys are an identity — a route, a route key, or a target id. */
+const CHECKED_SECTIONS = [
+  "http",
+  "webSocket",
+  "events",
+  "services",
+  "tasks",
+  "workflows",
+  "tools",
+  "agents",
+  "gateways",
+] as const;
+
+export type CheckedSection = (typeof CHECKED_SECTIONS)[number];
+
+/** The keys each section declares, in the order the source declares them. */
+export type SectionKeys = Readonly<Record<CheckedSection, readonly string[]>>;
+
+/** A range of a file's text, as offsets: `text.slice(start, end)`. */
+export interface SourceSpan {
+  readonly start: number;
+  readonly end: number;
+}
+
+/** One section entry, and where it was written. */
+export interface LocatedSectionEntry {
+  readonly section: CheckedSection;
+  readonly key: string;
+  /** Absolute path of the module that declares the entry. */
+  readonly file: string;
+  /** The key as written, quotes included. */
+  readonly keySpan: SourceSpan;
+  /** The entry's value: an object literal, or the call or name that produces it. */
+  readonly valueSpan: SourceSpan;
+  /** One-based position of the key, for a message or an editor link. */
+  readonly line: number;
+  readonly column: number;
+  /** Which element of the section's module array declared it. */
+  readonly moduleIndex: number;
+}
+
+/** A configuration property other than a section, followed the way a section is. */
+export interface LocatedConfigProperty {
+  readonly name: string;
+  readonly file: string;
+  /** The resolved expression: `defineNetwork({...})`, an object literal, a reference. */
+  readonly span: SourceSpan;
+  readonly line: number;
+  readonly column: number;
+}
+
+/** Every section entry and configuration property, located. */
+export interface LocatedConfigSource {
+  readonly configFile: string;
+  readonly sections: Readonly<Record<CheckedSection, readonly LocatedSectionEntry[]>>;
+  readonly properties: Readonly<Partial<Record<string, LocatedConfigProperty>>>;
+  readonly networks: readonly (LocatedConfigProperty & { readonly id: string; readonly exportName: string })[];
+  readonly privateHostedZones: readonly (LocatedConfigProperty & { readonly id: string; readonly exportName: string })[];
+}
+
+/** File access, injectable so the checker can be tested without a repository. */
+export interface ConfigSourceHost {
+  readonly readFile: (file: string) => string;
+  readonly exists: (file: string) => boolean;
+}
+
+const nodeHost: ConfigSourceHost = {
+  readFile: (file) => readFileSync(file, "utf8"),
+  exists: (file) => existsSync(file),
+};
+
+export interface AssertSectionModulesOptions {
+  /** Root that file names in messages are reported relative to. */
+  readonly repositoryRoot?: string;
+  readonly host?: ConfigSourceHost;
+}
+
+/** Strips the wrappers an authored section is allowed to carry. */
+function unwrap(node: ts.Expression): ts.Expression {
+  let current = node;
+  for (;;) {
+    if (ts.isParenthesizedExpression(current)) current = current.expression;
+    else if (ts.isSatisfiesExpression(current) || ts.isAsExpression(current)) {
+      current = current.expression;
+    } else return current;
+  }
+}
+
+/** A section expression together with the file it was written in. */
+interface Located {
+  readonly file: string;
+  readonly expression: ts.Expression;
+}
+
+class ConfigSource {
+  private readonly parsed = new Map<string, ts.SourceFile>();
+
+  constructor(
+    private readonly host: ConfigSourceHost,
+    private readonly repositoryRoot: string,
+  ) {}
+
+  /** A path as it should read in a message: relative to the root, forward slashes. */
+  name(file: string): string {
+    return path.relative(this.repositoryRoot, file).replaceAll("\\", "/");
+  }
+
+  parse(file: string): ts.SourceFile {
+    const cached = this.parsed.get(file);
+    if (cached) return cached;
+    const sourceFile = ts.createSourceFile(
+      file,
+      this.host.readFile(file),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    this.parsed.set(file, sourceFile);
+    return sourceFile;
+  }
+
+  /** A top-level const, exported or not, by the name it is bound to. */
+  private declaration(file: string, name: string): ts.Expression | undefined {
+    let found: ts.Expression | undefined;
+    ts.forEachChild(this.parse(file), (statement) => {
+      if (!ts.isVariableStatement(statement)) return;
+      for (const declaration of statement.declarationList.declarations) {
+        if (
+          ts.isIdentifier(declaration.name) &&
+          declaration.name.text === name &&
+          declaration.initializer
+        ) {
+          found = unwrap(declaration.initializer);
+        }
+      }
+    });
+    return found;
+  }
+
+  /** The module and original export an imported name is bound to. */
+  private importBinding(
+    file: string,
+    name: string,
+  ): { readonly specifier: string; readonly exported: string } | undefined {
+    let found: { specifier: string; exported: string } | undefined;
+    ts.forEachChild(this.parse(file), (statement) => {
+      if (!ts.isImportDeclaration(statement)) return;
+      const bindings = statement.importClause?.namedBindings;
+      if (!bindings || !ts.isNamedImports(bindings)) return;
+      if (!ts.isStringLiteral(statement.moduleSpecifier)) return;
+      for (const element of bindings.elements) {
+        if (element.name.text !== name) continue;
+        found = {
+          specifier: statement.moduleSpecifier.text,
+          exported: element.propertyName?.text ?? element.name.text,
+        };
+      }
+    });
+    return found;
+  }
+
+  /** A VPC editor may rewrite only the literal passed to the framework's factory. */
+  networkExportName(located: Located, factory = "defineNetwork"): string | undefined {
+    const call = unwrap(located.expression);
+    if (!ts.isCallExpression(call)) return undefined;
+    const file = this.parse(located.file);
+    const callee = unwrap(call.expression);
+    let official = false;
+    for (const statement of file.statements) {
+      if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier) || statement.moduleSpecifier.text !== "aws-studio/config" || statement.importClause?.isTypeOnly) continue;
+      const bindings = statement.importClause?.namedBindings;
+      if (bindings && ts.isNamedImports(bindings) && ts.isIdentifier(callee)) {
+        official ||= bindings.elements.some(element => !element.isTypeOnly && element.name.text === callee.text && (element.propertyName?.text ?? element.name.text) === factory);
+      } else if (bindings && ts.isNamespaceImport(bindings) && ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
+        official ||= bindings.name.text === callee.expression.text && callee.name.text === factory;
+      }
+    }
+    if (!official) return undefined;
+    for (const statement of file.statements) {
+      if (!ts.isVariableStatement(statement) || !(statement.declarationList.flags & ts.NodeFlags.Const) || !statement.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.initializer && unwrap(declaration.initializer) === call) return declaration.name.text;
+      }
+    }
+    return undefined;
+  }
+
+  /** A relative specifier as a file on disk. */
+  private moduleFile(from: string, specifier: string): string | undefined {
+    const base = path.resolve(path.dirname(from), specifier);
+    const candidates = [
+      ...(/\.[cm]?[jt]s$/.test(base) ? [base.replace(/\.js$/, ".ts")] : []),
+      `${base}.ts`,
+      path.join(base, "index.ts"),
+    ];
+    return candidates.find((candidate) => this.host.exists(candidate));
+  }
+
+  /**
+   * Follows const aliases and imports to their declaration expressions.
+   * Returns the problem when an identifier cannot be resolved.
+   */
+  resolve(located: Located, seen = new Set<string>()): Located | string {
+    const expression = unwrap(located.expression);
+    if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
+      const namespace = expression.expression.text;
+      const statement = this.parse(located.file).statements.find((item): item is ts.ImportDeclaration => ts.isImportDeclaration(item) && !!item.importClause?.namedBindings && ts.isNamespaceImport(item.importClause.namedBindings) && item.importClause.namedBindings.name.text === namespace);
+      if (statement && ts.isStringLiteral(statement.moduleSpecifier) && statement.moduleSpecifier.text.startsWith(".")) {
+        const file = this.moduleFile(located.file, statement.moduleSpecifier.text);
+        const declaration = file && this.declaration(file, expression.name.text);
+        if (file && declaration) {
+          const identity = `${file}:${expression.name.text}`;
+          if (seen.has(identity)) return `${this.name(file)} contains a circular source alias for "${expression.name.text}".`;
+          seen.add(identity);
+          return this.resolve({ file, expression: declaration }, seen);
+        }
+      }
+    }
+    if (!ts.isIdentifier(expression)) return { ...located, expression };
+
+    const identity = `${located.file}:${expression.text}`;
+    if (seen.has(identity)) return `${this.name(located.file)} contains a circular source alias for "${expression.text}".`;
+    seen.add(identity);
+
+    const local = this.declaration(located.file, expression.text);
+    if (local) return this.resolve({ file: located.file, expression: local }, seen);
+
+    const binding = this.importBinding(located.file, expression.text);
+    if (!binding) {
+      return `${this.name(located.file)} names "${expression.text}", which is neither declared nor imported there.`;
+    }
+    if (!binding.specifier.startsWith(".")) {
+      return `${this.name(located.file)} imports "${expression.text}" from "${binding.specifier}". A section module must be a relative import inside the repository, so its keys can be read.`;
+    }
+    const file = this.moduleFile(located.file, binding.specifier);
+    if (!file) {
+      return `${this.name(located.file)} imports "${expression.text}" from "${binding.specifier}", which does not resolve to a TypeScript file.`;
+    }
+    const declaration = this.declaration(file, binding.exported);
+    if (!declaration) {
+      return `${this.name(file)} does not declare a const "${binding.exported}". A section module must declare its map as an exported const object literal.`;
+    }
+    return this.resolve({ file, expression: declaration }, seen);
+  }
+
+  isFrameworkFactory(file: string, expression: ts.Expression, factory: string): boolean {
+    if (ts.isIdentifier(expression) && expression.text === factory) return true;
+    const binding = ts.isIdentifier(expression) ? this.importBinding(file, expression.text) : undefined;
+    if (binding?.specifier === "aws-studio/config" && binding.exported === factory) return true;
+    if (!ts.isPropertyAccessExpression(expression) || !ts.isIdentifier(expression.expression) || expression.name.text !== factory) return false;
+    const namespace = expression.expression.text;
+    return this.parse(file).statements.some(statement => ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) && statement.moduleSpecifier.text === "aws-studio/config" && !statement.importClause?.isTypeOnly && !!statement.importClause?.namedBindings && ts.isNamespaceImport(statement.importClause.namedBindings) && statement.importClause.namedBindings.name.text === namespace);
+  }
+}
+
+/** A property's key as written, or undefined when it is not a literal. */
+function literalKey(property: ts.ObjectLiteralElementLike): string | undefined {
+  const name = property.name;
+  if (!name) return undefined;
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
+  if (ts.isComputedPropertyName(name) && ts.isStringLiteralLike(name.expression)) {
+    return name.expression.text;
+  }
+  return undefined;
+}
+
+/**
+ * The same pass, returning what it read.
+ *
+ * A workflow has no source directory, so its id cannot come from a filesystem
+ * scan the way a task's or a handler's does. It comes from here instead: the
+ * literal `workflows` keys, read statically, *before* the config is imported —
+ * which is the only order that works, because `framework.config.ts` is typed
+ * against the generated union it would be producing.
+ *
+ * Reading rather than executing is also what keeps this safe to run first: no
+ * section module is evaluated, no graph helper runs, and a config that would
+ * throw on import still yields the ids needed to type it.
+ */
+export function readSectionKeys(
+  configFile: string,
+  options: AssertSectionModulesOptions = {},
+): SectionKeys {
+  const { sections } = locateConfigSource(configFile, options);
+  return Object.fromEntries(
+    Object.entries(sections).map(([section, entries]) => [section, entries.map((entry) => entry.key)]),
+  ) as unknown as SectionKeys;
+}
+
+/**
+ * The same pass again, keeping where each thing was written.
+ *
+ * Normalization names a declaration by its logical place, `http["/graphql"]`,
+ * because the merged config no longer knows which module wrote it. This is the
+ * other half: the module, and the span of the key and of the value, so a tool
+ * can point at a line rather than a section key. It refuses exactly what the
+ * key reader refuses, with the same messages, because it is the key reader.
+ *
+ * The configuration's other properties (`defaults`, `inputs`, `stacks`,
+ * `database`, `userPool`) follow source aliases the same way. They are not
+ * checked, so one that cannot be followed is simply left out.
+ */
+export function locateConfigSource(
+  configFile: string,
+  options: AssertSectionModulesOptions = {},
+): LocatedConfigSource {
+  const host = options.host ?? nodeHost;
+  const repositoryRoot = options.repositoryRoot ?? path.dirname(configFile);
+  const source = new ConfigSource(host, repositoryRoot);
+  const problems: string[] = [];
+  const sections: Record<CheckedSection, LocatedSectionEntry[]> = {
+    http: [], webSocket: [], events: [], services: [], tasks: [], workflows: [], tools: [], agents: [], gateways: [],
+  };
+  const properties: Record<string, LocatedConfigProperty> = {};
+  const networks: (LocatedConfigProperty & { id: string; exportName: string })[] = [];
+  const privateHostedZones: (LocatedConfigProperty & { id: string; exportName: string })[] = [];
+
+  /** A node's offsets and one-based position in the file that holds it. */
+  const position = (file: string, node: ts.Node) => {
+    const sourceFile = source.parse(file);
+    const start = node.getStart(sourceFile);
+    const { line, character } = sourceFile.getLineAndCharacterOfPosition(start);
+    return { span: { start, end: node.end }, line: line + 1, column: character + 1 };
+  };
+
+  /** Every module composed into one section, flattening the array literal. */
+  const modulesOf = (section: string, node: ts.Expression): Located[] => {
+    const expression = unwrap(node);
+    if (!ts.isArrayLiteralExpression(expression)) {
+      return [{ file: configFile, expression: node }];
+    }
+
+    const modules: Located[] = [];
+    for (const element of expression.elements) {
+      if (!ts.isSpreadElement(element)) {
+        modules.push({ file: configFile, expression: element });
+        continue;
+      }
+      // Spreading an array is safe where spreading a map is not: it
+      // concatenates instead of overwriting, so it is followed, not rejected.
+      const resolved = source.resolve({
+        file: configFile,
+        expression: element.expression,
+      });
+      if (typeof resolved === "string") {
+        problems.push(resolved);
+        continue;
+      }
+      const group = unwrap(resolved.expression);
+      if (!ts.isArrayLiteralExpression(group)) {
+        problems.push(
+          `${section} spreads "${element.expression.getText()}", which is not an array literal of section modules. Spread only an array, or list each module.`,
+        );
+        continue;
+      }
+      for (const inner of group.elements) {
+        modules.push({ file: resolved.file, expression: inner });
+      }
+    }
+    return modules;
+  };
+
+  const check = (section: string, node: ts.Expression): void => {
+    // Where each key was declared, so a collision can name both modules.
+    const declaredIn = new Map<string, string>();
+
+    for (const [moduleIndex, module] of modulesOf(section, node).entries()) {
+      const resolved = source.resolve(module);
+      if (typeof resolved === "string") {
+        problems.push(resolved);
+        continue;
+      }
+      const literal = unwrap(resolved.expression);
+      if (!ts.isObjectLiteralExpression(literal)) {
+        problems.push(
+          `${section} is composed from ${source.name(resolved.file)}, which does not declare it as an object literal, so its keys cannot be checked.`,
+        );
+        continue;
+      }
+
+      const file = source.name(resolved.file);
+      for (const property of literal.properties) {
+        if (ts.isSpreadAssignment(property)) {
+          problems.push(
+            `${section} composes keys with a spread in ${file}. A later spread can overwrite a key before validation sees it, so declare every entry literally and compose the modules as an array.`,
+          );
+          continue;
+        }
+        const key = literalKey(property);
+        if (key === undefined) {
+          problems.push(
+            `${section} uses a computed key in ${file}. Keys must be literal so conflicts are detectable.`,
+          );
+          continue;
+        }
+        const first = declaredIn.get(key);
+        if (first !== undefined) {
+          problems.push(
+            `${section} declares "${key}" in both ${first} and ${file}. A key may be declared by one module only.`,
+          );
+          continue;
+        }
+        declaredIn.set(key, file);
+        const value = ts.isPropertyAssignment(property)
+          ? property.initializer
+          : ts.isShorthandPropertyAssignment(property)
+            ? property.name
+            : property;
+        const at = position(resolved.file, property.name ?? property);
+        sections[section as CheckedSection]?.push({
+          section: section as CheckedSection,
+          key,
+          file: resolved.file,
+          keySpan: at.span,
+          valueSpan: position(resolved.file, value).span,
+          line: at.line,
+          column: at.column,
+          moduleIndex,
+        });
+      }
+    }
+  };
+
+  /** A property that is not a section: followed one hop, never refused. */
+  const locateProperty = (name: string, node: ts.Expression): void => {
+    const resolved = source.resolve({ file: configFile, expression: node });
+    if (typeof resolved === "string") return;
+    const expression = unwrap(resolved.expression);
+    const at = position(resolved.file, expression);
+    properties[name] = { name, file: resolved.file, span: at.span, line: at.line, column: at.column };
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      source.isFrameworkFactory(configFile, node.expression, "defineFrameworkConfig") &&
+      node.arguments[0]
+    ) {
+      const resolved = source.resolve({
+        file: configFile,
+        expression: node.arguments[0],
+      });
+      if (typeof resolved === "string") {
+        problems.push(resolved);
+      } else {
+        const argument = unwrap(resolved.expression);
+        if (ts.isObjectLiteralExpression(argument)) {
+          for (const property of argument.properties) {
+            if (ts.isSpreadAssignment(property)) {
+              problems.push(
+                "defineFrameworkConfig composes its sections with a spread. Pass each section explicitly.",
+              );
+              continue;
+            }
+            const name = literalKey(property);
+            if (name === undefined) continue;
+            const value = ts.isPropertyAssignment(property)
+              ? property.initializer
+              : ts.isShorthandPropertyAssignment(property)
+                ? property.name
+                : undefined;
+            if ((name === "networks" || name === "privateHostedZones") && value) {
+              const factory = name === "networks" ? "defineNetwork" : "definePrivateHostedZone";
+              const array = unwrap(value);
+              if (!ts.isArrayLiteralExpression(array)) { problems.push(`${name} must be a literal array of imported declarations.`); continue; }
+              for (const element of array.elements) {
+                if (ts.isSpreadElement(element)) { problems.push(`List each declaration explicitly in ${name}.`); continue; }
+                const item = source.resolve({ file: configFile, expression: element });
+                if (typeof item === "string") { problems.push(item); continue; }
+                const call = unwrap(item.expression);
+                const object = ts.isCallExpression(call) && call.arguments[0] ? unwrap(call.arguments[0]) : undefined;
+                const id = object && ts.isObjectLiteralExpression(object) ? object.properties.find(p => literalKey(p) === "id") : undefined;
+                const idValue = id && ts.isPropertyAssignment(id) && ts.isStringLiteral(id.initializer) ? id.initializer.text : undefined;
+                const exportName = source.networkExportName(item, factory);
+                if (!idValue || !exportName) { problems.push(`Each ${name} entry must be an exported const calling ${factory}({ id, ... }) imported from aws-studio/config, with a literal id.`); continue; }
+                const at = position(item.file, call);
+                (name === "networks" ? networks : privateHostedZones).push({ name: idValue, id: idValue, exportName, file: item.file, span: at.span, line: at.line, column: at.column });
+              }
+            }
+            if (!(CHECKED_SECTIONS as readonly string[]).includes(name)) {
+              if (value) locateProperty(name, value);
+              continue;
+            }
+            if (value) check(name, value);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(source.parse(configFile));
+
+  if (problems.length > 0) {
+    throw new Error(
+      `${source.name(configFile)} sections must be literal:\n  - ${problems.join("\n  - ")}`,
+    );
+  }
+
+  return { configFile, sections, properties, networks, privateHostedZones };
+}

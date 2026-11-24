@@ -1,0 +1,1460 @@
+import { usePublishSightline } from "../sightline/bridge";
+import { remapEntity } from "../../shared/naming";
+import { inspectorContextClasses } from "../inspector-ui";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
+import { CATEGORY_DESCRIPTION, CATEGORY_LABEL, type EdgeCategory } from "../lookup";
+import { buildScene, type Scene, type SceneNode } from "../scene/build";
+import { islandDrawOrder, islandSlabs } from "../scene/slabs";
+import {
+  DRAG_THRESHOLD,
+  fitBounds,
+  interpolate,
+  pan,
+  revealSelection,
+  resizeCamera,
+  screenToWorld,
+  wheelFactor,
+  worldToScreen,
+  zoomAt,
+  type Camera,
+  type Point,
+  type Viewport,
+} from "../scene/camera";
+import {
+  distanceToPolyline,
+  insidePolygon,
+  pickEntity,
+  pickIsland,
+  type CardHit,
+} from "../scene/picking";
+import { layoutAspect, type LayoutResult } from "../scene/layout-optimize";
+import { fitScene, selectionBounds } from "../scene/fit";
+import { connectionMidpoint } from "../scene/routing";
+import { pathBounds } from "../scene/layout-geometry";
+import { landscapeFocus, searchOpacity, searchScene } from "../scene/focus";
+import { filterSceneByTag } from "../scene/tag-filter";
+import { SceneRenderer, type Stage } from "../scene/render";
+import { connectionVisible, inLens, offLens } from "../scene/connections";
+import { EDGE_COLORS, wireCss } from "../scene/look";
+import { useStudioTheme } from "../theme";
+import { CircleAlert } from "lucide-react";
+import { cx } from "../ui/classes";
+import { reserveNotificationClearance } from "../ui/notification-clearance";
+import { mapFilterChipClasses, mapFilterSwatchClasses } from "./map-styles";
+import { catalogAvailability } from "../deployment";
+import { connectionHasSource, connectionLabel, missingConnectionInput } from "../connections";
+import { AddMenu } from "./AddMenu";
+import { useStudio } from "../studio";
+import { HoverContent, ResourceHoverContent } from "./ResourceHoverContent";
+import { InspectorContent } from "./Inspector";
+import { InspectorNavigationControls } from "./InspectorNavigation";
+import { ResourceBrowser, type BrowserMemory } from "./ResourceBrowser";
+import { ConnectionHoverContent } from "./ConnectionHoverContent";
+import { CanvasTooltip, ResourceTooltip } from "./ResourceTooltip";
+import { WorkspacePanel } from "./WorkspacePanel";
+import { MapEntityNavigator } from "./map/MapEntityNavigator";
+import { MapToolbar } from "./map/MapToolbar";
+import { ComposePreview } from "./map/ComposePreview";
+import { ThemeToggle } from "./map/ThemeToggle";
+import { tagGroups, tagKeys, UNTAGGED_FILTER } from "../tag-groups";
+
+const TAG_VIEW_STORAGE = "framework-studio:isometric-tag-filter";
+interface TagFilterPreference {
+  readonly key: string;
+  readonly value?: string | null;
+}
+const rememberedTagFilter = (): TagFilterPreference => {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(TAG_VIEW_STORAGE) ?? "null");
+    if (
+      value &&
+      typeof value.key === "string" &&
+      (value.value === undefined || value.value === null || typeof value.value === "string")
+    )
+      return value;
+  } catch {
+    /* Invalid preferences fall back to the whole topology. */
+  }
+  return { key: "" };
+};
+
+/**
+ * The landscape view: the same application, as a lit miniature you can fly over.
+ *
+ * Everything here is presentation. The scene comes from the model the other
+ * views read; selecting a building selects that entity everywhere, and the
+ * panel beside the canvas hosts the same inspector, with the same edits. Moving
+ * the camera changes nothing on disk.
+ */
+
+/**
+ * What the map's side panel shows. It is derived, never stored: a selection opens
+ * its inspector, and Resources is the layer beneath it.
+ */
+type PanelView = "closed" | "resources" | "inspector";
+const PANEL_ID = "map-workspace-panel";
+
+/** Where the camera was, so leaving the view and coming back keeps your place. */
+let rememberedCamera: Camera | undefined;
+
+interface Hover {
+  readonly kind: "node" | "edge" | "island" | "prop";
+  readonly id: string;
+  readonly x: number;
+  readonly y: number;
+  readonly band?: string;
+}
+
+interface Tween {
+  readonly from: Camera;
+  readonly to: Camera;
+  readonly start: number;
+  readonly duration: number;
+  readonly source?: "reveal";
+}
+
+const reducedMotion = () =>
+  typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Ownership and native references are context for inspection, not background activity.
+const CATEGORIES = (Object.keys(CATEGORY_LABEL) as EdgeCategory[]).filter(
+  (category) => category !== "structure",
+);
+
+export function Isometric() {
+  const {
+    model,
+    index,
+    snapshot,
+    selected,
+    select,
+    inspect: startInspection,
+    inspectorNavigation,
+    created,
+    draft,
+    entityAliases,
+    namingRevision,
+  } = useStudio();
+  const hasEntities =
+    model.targets.length > 0 || model.resources.length > 0 || !!model.networks?.length;
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const connectionBarRef = useRef<HTMLDivElement>(null);
+  const rendererRef = useRef<SceneRenderer | undefined>(undefined);
+  const [motion, setMotion] = useState(() => !reducedMotion());
+  const theme = useStudioTheme();
+  const [categories, setCategories] = useState<ReadonlySet<EdgeCategory>>(
+    () => new Set(),
+  );
+  // Starts on with every page load: errors show whatever the category filters hide.
+  const [errorsShown, setErrorsShown] = useState(true);
+  const [query, setQuery] = useState("");
+  const [resourceKind, setResourceKind] = useState("");
+  // Whether Resources is open beneath any inspector; a selection always shows its inspector.
+  const [browsing, setBrowsing] = useState(false);
+  const [resourcePreview, setResourcePreview] = useState<string>();
+  const view: PanelView = selected !== undefined ? "inspector" : browsing ? "resources" : "closed";
+  const browserMemory = useRef<BrowserMemory>({ scrollTop: 0 });
+  const appliedEntityRemap = useRef(entityAliases);
+  const backButton = useRef<HTMLButtonElement>(null);
+  const focusBack = useRef(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const tagKeyRef = useRef<HTMLSelectElement>(null);
+  const [tagFilter, setTagFilter] = useState(rememberedTagFilter);
+  const [hover, setHover] = useState<Hover | undefined>();
+  const [pointingAtEntity, setPointingAtEntity] = useState(false);
+  const tooltipId = useId();
+  const [keyboardAnchor, setKeyboardAnchor] = useState<HTMLButtonElement>();
+  const hoverCandidate = useRef<Hover | undefined>(undefined);
+  const visibleHover = useRef<Hover | undefined>(undefined);
+  visibleHover.current = hover;
+  const hoverOpenTimer = useRef<number | undefined>(undefined);
+  const hoverCloseTimer = useRef<number | undefined>(undefined);
+  const dismissedHover = useRef<string | undefined>(undefined);
+  const tooltipPointed = useRef(false);
+  const touchNavigator = useRef(false);
+  const [dragging, setDragging] = useState(false);
+  const [aspect, setAspect] = useState(16 / 9);
+  const previousLayout = useRef<LayoutResult | undefined>(undefined);
+  const pendingLayoutFit = useRef(false);
+  const aspectTimer = useRef<number | undefined>(undefined);
+  const appliedAspect = useRef(16 / 9);
+
+  const conditions = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(snapshot.source.catalog).map(([id, facts]) => [id, facts.condition]),
+      ),
+    [snapshot.source.catalog],
+  );
+  const resourceAvailability = useMemo(
+    () => catalogAvailability(snapshot.models),
+    [snapshot.models],
+  );
+  const availableTagKeys = useMemo(() => tagKeys(model, index), [model, index]);
+  const activeTagKey = model.tagging ? tagFilter.key : "";
+  const untaggedOnly = activeTagKey === UNTAGGED_FILTER;
+  const filterValue = untaggedOnly ? null : tagFilter.value;
+  const untaggedCount = useMemo(
+    () => tagGroups(model, UNTAGGED_FILTER, index)[0]!.members.length,
+    [model, index],
+  );
+  const groups = useMemo(
+    () => (activeTagKey ? tagGroups(model, activeTagKey, index) : []),
+    [model, activeTagKey, index],
+  );
+  const tagMatchCount = groups.find((group) => group.value === filterValue)?.members.length ?? 0;
+  const topology = useMemo(
+    () =>
+      buildScene(model, {
+        conditions,
+        resourceAvailability,
+        layoutModels: [snapshot.models.dev, snapshot.models.prod],
+        layoutSettings: {
+          aspect,
+          previous: previousLayout.current?.positions,
+          previousKey: previousLayout.current?.topologyKey,
+          previousFingerprints: previousLayout.current?.fingerprints,
+          preservePositions: namingRevision === snapshot.revision,
+        },
+      }),
+    [model, snapshot.models, conditions, resourceAvailability, aspect, namingRevision],
+  );
+  const scene = useMemo(
+    () =>
+      activeTagKey && filterValue !== undefined
+        ? filterSceneByTag(topology, model, activeTagKey, filterValue)
+        : topology,
+    [topology, model, activeTagKey, filterValue],
+  );
+  usePublishSightline("map", () => ({
+    search: query, resourceKind, categories: [...categories], errorsShown,
+    tagFilter: { key: activeTagKey, value: filterValue ?? null }, view,
+    islands: scene.islands.map(island => ({ id: island.id, title: island.title,
+      members: scene.nodes.filter(node => node.island === island.id).map(node => ({ id: node.id, name: node.label })) })),
+  }));
+  const visibleCategories = useMemo(
+    () =>
+      CATEGORIES.filter((category) =>
+        scene.edges.some((edge) => edge.categories.includes(category)),
+      ),
+    [scene],
+  );
+  // The Errors pill exists only while the viewed environment holds an error (`src/issues.ts` or a
+  // missing required input); the other environment's errors recede with it.
+  const errorCount = useMemo(() => {
+    const nodeOf = new Map(scene.nodes.map((node) => [node.id, node]));
+    return {
+      nodes: scene.nodes.filter((node) => inLens(node) && node.issues?.some((issue) => issue.severity === "error")).length,
+      edges: scene.edges.filter((edge) => missingConnectionInput(edge) && !offLens(edge, nodeOf.get(edge.from), nodeOf.get(edge.to))).length,
+    };
+  }, [scene]);
+  const hasErrors = errorCount.nodes + errorCount.edges > 0;
+  useLayoutEffect(() => {
+    previousLayout.current = scene.layout;
+  }, [scene]);
+  const visibleSelected = selected
+    ? (scene.representatives[selected] ??
+      scene.edges.find((edge) => connectionHasSource(edge, selected))?.id ??
+      selected)
+    : undefined;
+  const matches = useMemo(() => searchScene(scene, model, query), [scene, model, query]);
+  const nodes = useMemo(() => new Map(scene.nodes.map((node) => [node.id, node])), [scene]);
+  const resourceKinds = useMemo(
+    () => [...new Set(scene.nodes.map((node) => node.kindLabel.split(",")[0]!))].sort(),
+    [scene],
+  );
+  const navigatorNodes = useMemo(
+    () =>
+      scene.nodes
+        .filter(
+          (node) =>
+            (!matches || matches.nodes.has(node.id)) &&
+            (!resourceKind || node.kindLabel.split(",")[0] === resourceKind),
+        )
+        .sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id)),
+    [scene, matches, resourceKind],
+  );
+  const navigatorFixtures = useMemo(
+    () => (matches ? scene.props.filter((prop) => matches.props.has(prop.id)) : []),
+    [scene, matches],
+  );
+  const preview =
+    view === "resources" &&
+    (navigatorNodes.some((node) => node.id === resourcePreview) ||
+      navigatorFixtures.some((prop) => prop.id === resourcePreview))
+      ? resourcePreview
+      : undefined;
+  const focusState = useMemo(
+    () => landscapeFocus(scene, preview ?? visibleSelected, matches),
+    [scene, preview, visibleSelected, matches],
+  );
+  const slabs = useMemo(() => islandDrawOrder(islandSlabs(scene)), [scene]);
+  const arcs = useMemo(
+    () =>
+      scene.edges.map((edge) => {
+        const points = scene.routes[edge.id]!.points;
+        return {
+          edge,
+          points,
+          missing: missingConnectionInput(edge),
+          midpoint: connectionMidpoint(points),
+          ...pathBounds(points),
+        };
+      }),
+    [scene],
+  );
+  const silhouettes = useMemo(
+    () => scene.nodes.map((node) => ({ id: node.id, hull: node.geometry.hull })),
+    [scene],
+  );
+
+  // Everything the frame loop reads, without re-subscribing it on every render.
+  const live = useRef({
+    scene,
+    camera: rememberedCamera ?? { x: 0, y: 0, zoom: 1 },
+    viewport: { width: 1, height: 1 } as Viewport,
+    /** The viewport's top-left in the window, so a panel opening beside it leaves the map still. */
+    origin: { x: 0, y: 0 } as Point,
+    /** The map's span with any side panel, so the atmosphere stays still with it. */
+    stage: { left: 0, width: 1 } as Stage,
+    selected: visibleSelected,
+    preview,
+    inspectedSelection: visibleSelected,
+    hovered: undefined as string | undefined,
+    hoveredEdge: undefined as string | undefined,
+    hoveredIsland: undefined as string | undefined,
+    motion,
+    theme,
+    categories,
+    errors: errorsShown,
+    focus: focusState,
+    tween: undefined as Tween | undefined,
+    cards: [] as readonly CardHit[],
+    badges: [] as readonly CardHit[],
+    frame: undefined as number | undefined,
+    fitted: rememberedCamera !== undefined,
+    samples: [] as number[],
+    frames: 0,
+  });
+  // A confirmed rename changes identity without changing this person's place on the map.
+  if (appliedEntityRemap.current !== entityAliases) {
+    if (browserMemory.current.returnTo)
+      browserMemory.current.returnTo = remapEntity(browserMemory.current.returnTo, entityAliases);
+    if (live.current.inspectedSelection)
+      live.current.inspectedSelection = remapEntity(live.current.inspectedSelection, entityAliases);
+    appliedEntityRemap.current = entityAliases;
+  }
+  live.current.scene = scene;
+  live.current.selected = visibleSelected;
+  live.current.preview = preview;
+  live.current.motion = motion;
+  live.current.theme = theme;
+  live.current.categories = categories;
+  live.current.errors = errorsShown && hasErrors;
+  live.current.focus = focusState;
+
+  const draw = useCallback(() => {
+    const state = live.current;
+    state.frame = undefined;
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    const now = performance.now();
+    if (state.tween) {
+      const t =
+        state.tween.duration <= 0
+          ? 1
+          : Math.min(1, (now - state.tween.start) / state.tween.duration);
+      state.camera = interpolate(state.tween.from, state.tween.to, t);
+      if (t >= 1) state.tween = undefined;
+    }
+    rememberedCamera = state.camera;
+    renderer.setScene(state.scene);
+    renderer.setTheme(state.theme);
+    const renderSelected = state.preview ?? state.selected;
+    const result = renderer.render({
+      camera: state.camera,
+      viewport: state.viewport,
+      stage: state.stage,
+      dpr: window.devicePixelRatio || 1,
+      ...(renderSelected ? { selected: renderSelected } : {}),
+      ...(state.hovered ? { hovered: state.hovered } : {}),
+      ...(state.hoveredEdge ? { hoveredEdge: state.hoveredEdge } : {}),
+      ...(state.hoveredIsland ? { hoveredIsland: state.hoveredIsland } : {}),
+      time: now / 1000,
+      motion: state.motion,
+      categories: state.categories,
+      errors: state.errors,
+      focus: state.focus,
+    });
+    state.cards = result.cards;
+    state.badges = result.badges;
+    state.frames += 1;
+    // Keep frame timings in diagnostics without triggering React renders.
+    state.samples = [...state.samples.slice(-59), result.ms];
+    if (result.animating || state.tween) state.frame = requestAnimationFrame(draw);
+  }, []);
+
+  const schedule = useCallback(() => {
+    if (live.current.frame === undefined) live.current.frame = requestAnimationFrame(draw);
+  }, [draw]);
+
+  const moveCamera = useCallback(
+    (to: Camera, animate = true) => {
+      const state = live.current;
+      if (animate && !reducedMotion())
+        state.tween = { from: state.camera, to, start: performance.now(), duration: 450 };
+      else {
+        state.tween = undefined;
+        state.camera = to;
+      }
+      schedule();
+    },
+    [schedule],
+  );
+
+  /** Aims within the canvas left showing, for the whole canvas that runs on beneath the tray. */
+  const aimVisible = useCallback((aim: (visible: Viewport) => Camera) => {
+    const { viewport } = live.current;
+    const visible = visibleViewport(containerRef.current, viewport);
+    return resizeCamera(aim(visible), visible, viewport);
+  }, []);
+
+  const overviewCamera = useCallback(() => {
+    const { scene, viewport } = live.current;
+    const container = containerRef.current;
+    const visible = visibleViewport(container, viewport);
+    const bar = connectionBarRef.current?.getBoundingClientRect();
+    const covered = bar?.height && container ? bar.bottom - container.getBoundingClientRect().top : 0;
+    // Fit below the connection controls, which can wrap independently of the canvas.
+    const top = covered > 0 && covered < visible.height ? covered : 0;
+    const frame = { ...visible, height: visible.height - top };
+    return pan(resizeCamera(fitScene(scene, frame), frame, viewport), 0, top);
+  }, []);
+
+  const fit = useCallback((animate = true) => moveCamera(overviewCamera(), animate), [moveCamera, overviewCamera]);
+
+  const focus = useCallback(
+    (id: string | undefined, zoom?: number) => {
+      const node = id
+        ? live.current.scene.nodes.find((candidate) => candidate.id === id)
+        : undefined;
+      if (!node) {
+        const island = islandSlabs(live.current.scene).find((slab) => slab.island.id === id);
+        if (island) moveCamera(aimVisible((visible) => fitBounds(island.bounds, visible, 60)));
+        return;
+      }
+      const camera = live.current.camera;
+      moveCamera(
+        aimVisible(() => ({
+          x: node.geometry.top.x,
+          y: node.geometry.top.y,
+          zoom: zoom ?? Math.max(camera.zoom, 0.9),
+        })),
+      );
+    },
+    [moveCamera, aimVisible],
+  );
+
+  useEffect(() => {
+    if (created) focus(scene.representatives[created.id] ?? created.id);
+  }, [created, focus]);
+
+  const resize = useCallback(() => {
+    const container = containerRef.current;
+    if (!container || !rendererRef.current) return;
+    const state = live.current;
+    const rect = container.getBoundingClientRect();
+    const previous = state.viewport;
+    const previousOrigin = state.origin;
+    const next = { width: Math.max(1, rect.width), height: Math.max(1, rect.height) };
+    const origin = { x: rect.left, y: rect.top };
+    const selectionChanged = state.selected !== state.inspectedSelection;
+    state.inspectedSelection = state.selected;
+    if (selectionChanged && state.tween?.source === "reveal") state.tween = undefined;
+    // Selection, the panel and Activity are presentation; use the containing workspace
+    // dimensions, with the tray's share restored, so none of them relayouts the architecture.
+    const workspace = container.closest("[data-studio-workspace]")?.getBoundingClientRect();
+    const traySlot = document.querySelector("[data-ui='activity-slot']")?.getBoundingClientRect();
+    const trayBar = document.querySelector("[data-ui='activity-bar']")?.getBoundingClientRect();
+    const traySpace = Math.max(0, (traySlot?.height ?? 0) - (trayBar?.height ?? 0) - 1);
+    const nextAspect = layoutAspect(
+      workspace?.width ?? next.width,
+      (workspace?.height ?? next.height) + traySpace,
+    );
+    window.clearTimeout(aspectTimer.current);
+    aspectTimer.current = window.setTimeout(() => {
+      if (appliedAspect.current === nextAspect) return;
+      appliedAspect.current = nextAspect;
+      previousLayout.current = undefined;
+      pendingLayoutFit.current = true;
+      setAspect(nextAspect);
+    }, 180);
+    // Only a side panel holds the map still; vertical changes (a wrapping toolbar, the panel
+    // stacked above a narrow map) keep the map anchored to the canvas's top, as before.
+    const moved = { x: origin.x - previousOrigin.x, y: 0 };
+    if (
+      state.fitted &&
+      next.width === previous.width &&
+      next.height === previous.height &&
+      !moved.x &&
+      !selectionChanged
+    )
+      return;
+    state.viewport = next;
+    state.origin = origin;
+    // The map's whole span, panel included, in viewport coordinates.
+    const span = container.closest("[data-landscape-content]")?.getBoundingClientRect();
+    state.stage = span
+      ? { left: span.left - rect.left, width: span.width }
+      : { left: 0, width: next.width };
+    if (!state.fitted) {
+      state.fitted = true;
+      state.camera = overviewCamera();
+    } else if (previous.width > 1) {
+      state.camera = resizeCamera(state.camera, previous, next, moved);
+      // An in-flight focus starts from the resized camera, without jumping back to its old origin,
+      // and takes precedence over revealing the selection.
+      if (state.tween)
+        state.tween = { ...state.tween, from: state.camera, start: performance.now() };
+      // A new selection from the map, the list or a link comes into view, however it was cut off.
+      const bounds =
+        selectionChanged && state.selected && !state.tween
+          ? selectionBounds(state.scene, state.selected)
+          : undefined;
+      // What the map showed before this change, in the new viewport's coordinates: wider than
+      // the viewport when a panel has just opened over part of it.
+      const shown = { left: -moved.x, right: previous.width - moved.x };
+      const visible = visibleViewport(container, next);
+      const revealed = bounds
+        ? revealSelection(resizeCamera(state.camera, next, visible), visible, bounds, shown)
+        : undefined;
+      if (revealed) {
+        state.tween = {
+          from: state.camera,
+          to: resizeCamera(revealed, visible, next),
+          start: performance.now(),
+          duration: reducedMotion() ? 0 : 450,
+          source: "reveal",
+        };
+      }
+    }
+    // A ResizeObserver runs before paint but after animation callbacks. Waiting for another
+    // animation frame would let CSS stretch the old bitmap for one frame when the panel opens.
+    if (state.frame !== undefined) cancelAnimationFrame(state.frame);
+    state.frame = undefined;
+    draw();
+  }, [draw, overviewCamera]);
+
+  // Mount before paint: the renderer, the canvas's size, and web fonts arriving late.
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+    rendererRef.current = new SceneRenderer(canvas, schedule);
+    const observer = new ResizeObserver(resize);
+    observer.observe(container);
+    resize();
+    let disposed = false;
+    void document.fonts?.ready.then(() => {
+      if (disposed) return;
+      rendererRef.current?.fontsChanged();
+      schedule();
+    });
+    return () => {
+      disposed = true;
+      window.clearTimeout(aspectTimer.current);
+      observer.disconnect();
+      if (live.current.frame !== undefined) cancelAnimationFrame(live.current.frame);
+      live.current.frame = undefined;
+      rendererRef.current?.dispose();
+      rendererRef.current = undefined;
+    };
+  }, [schedule, resize, hasEntities]);
+
+  useEffect(schedule, [schedule, scene, selected, motion, theme, focusState, categories, errorsShown]);
+  useEffect(() => {
+    if (pendingLayoutFit.current) {
+      pendingLayoutFit.current = false;
+      fit();
+    }
+  }, [scene, fit]);
+
+  // Opening/closing the panel changes CSS layout during this commit. Resize and paint
+  // now, rather than leaving a stretched frame until the observer's next animation callback.
+  useLayoutEffect(() => {
+    resize();
+  }, [visibleSelected, view, resize]);
+
+  /** Opens an inspector in the panel, from the list, the map or the keyboard entity list. */
+  const inspect = useCallback(
+    (id: string, fromPanel = false) => {
+      focusBack.current = fromPanel;
+      startInspection(id, fromPanel);
+    },
+    [startInspection],
+  );
+  /** Back to Resources: end the selection and return to the list as it was, at the row it opened. Pending edits ask first. */
+  const back = () =>
+    draft.requestNavigation(() => {
+      const origin = inspectorNavigation.origin ?? selected;
+      browserMemory.current.returnTo = origin
+        ? (scene.representatives[origin] ?? origin)
+        : undefined;
+      setBrowsing(true);
+      select(undefined);
+    });
+  /** Close Panel: collapse it, end the selection and hand the keyboard back to the map. */
+  const close = (focusMap = true) => {
+    const proceed = () => {
+      setBrowsing(false);
+      if (selected) select(undefined);
+      if (focusMap) canvasRef.current?.focus({ preventScroll: true });
+    };
+    if (selected !== undefined) draft.requestNavigation(proceed);
+    else proceed();
+  };
+  const toggleResources = () => {
+    if (view === "resources") close(false);
+    else if (view === "inspector") back();
+    else setBrowsing(true);
+  };
+  // Opening a row keeps keyboard users in the panel; a map click leaves focus on the map.
+  useEffect(() => {
+    if (view !== "inspector" || !focusBack.current) return;
+    focusBack.current = false;
+    backButton.current?.focus({ preventScroll: true });
+  }, [view, selected]);
+
+  /** Node controls keep their inspector; connections take precedence over terrain. */
+  const pick = useCallback(
+    (screen: Point): Hover | undefined => {
+      const state = live.current;
+      const world = screenToWorld(state.camera, state.viewport, screen);
+      const entity = pickEntity(screen, world, [...state.badges, ...state.cards], silhouettes);
+      if (entity) return { kind: "node", id: entity, ...screen };
+      for (const arc of arcs) {
+        if (
+          !arc.missing ||
+          !connectionVisible(arc.edge, state.categories, state.preview ?? state.selected, state.errors)
+        )
+          continue;
+        const marker = worldToScreen(state.camera, state.viewport, arc.midpoint);
+        if (Math.hypot(marker.x - screen.x, marker.y - screen.y) <= 12)
+          return { kind: "edge", id: arc.edge.id, ...screen };
+      }
+      for (let position = scene.props.length - 1; position >= 0; position -= 1) {
+        if (insidePolygon(world.x, world.y, scene.props[position]!.geometry.hull))
+          return { kind: "prop", id: scene.props[position]!.id, ...screen };
+      }
+      const tolerance = 6 / state.camera.zoom;
+      let best: { id: string; distance: number } | undefined;
+      for (const arc of arcs) {
+        if (!connectionVisible(arc.edge, state.categories, state.preview ?? state.selected, state.errors))
+          continue;
+        if (
+          world.x < arc.minX - tolerance ||
+          world.x > arc.maxX + tolerance ||
+          world.y < arc.minY - tolerance ||
+          world.y > arc.maxY + tolerance
+        )
+          continue;
+        const distance = distanceToPolyline(world, arc.points);
+        if (distance < tolerance && (!best || distance < best.distance))
+          best = { id: arc.edge.id, distance };
+      }
+      if (best) return { kind: "edge", id: best.id, ...screen };
+      const island = pickIsland(world, slabs);
+      if (island) return { kind: "island", ...island, ...screen };
+      for (const frame of scene.frames) {
+        if (
+          [frame.geometry.top, frame.geometry.left, frame.geometry.right].some((polygon) =>
+            insidePolygon(world.x, world.y, polygon),
+          )
+        )
+          return { kind: "island", id: frame.members[0]!, ...screen };
+      }
+      return undefined;
+    },
+    [scene, slabs, arcs, silhouettes],
+  );
+
+  const setHovered = useCallback(
+    (next: Hover | undefined, immediate = false) => {
+      setPointingAtEntity(!!next);
+      const state = live.current;
+      const hovered = next?.kind === "node" ? next.id : undefined;
+      const hoveredEdge = next?.kind === "edge" ? next.id : undefined;
+      const hoveredIsland = next?.kind === "island" ? next.id : undefined;
+      if (
+        hovered !== state.hovered ||
+        hoveredEdge !== state.hoveredEdge ||
+        hoveredIsland !== state.hoveredIsland
+      ) {
+        state.hovered = hovered;
+        state.hoveredEdge = hoveredEdge;
+        state.hoveredIsland = hoveredIsland;
+        schedule();
+      }
+      const previous = hoverCandidate.current;
+      hoverCandidate.current = next;
+      window.clearTimeout(hoverCloseTimer.current);
+      if (!next) {
+        window.clearTimeout(hoverOpenTimer.current);
+        dismissedHover.current = undefined;
+        if (!tooltipPointed.current)
+          hoverCloseTimer.current = window.setTimeout(() => setHover(undefined), 120);
+        return;
+      }
+      if (dismissedHover.current && dismissedHover.current !== next.id)
+        dismissedHover.current = undefined;
+      if (dismissedHover.current === next.id) return;
+      if (
+        visibleHover.current?.kind === next.kind &&
+        visibleHover.current.id === next.id &&
+        visibleHover.current.band === next.band
+      )
+        return;
+      if (
+        !immediate &&
+        previous?.kind === next.kind &&
+        previous.id === next.id &&
+        previous.band === next.band
+      )
+        return;
+      window.clearTimeout(hoverOpenTimer.current);
+      setHover(undefined);
+      if (immediate) setHover(next);
+      else
+        hoverOpenTimer.current = window.setTimeout(() => {
+          if (hoverCandidate.current?.id === next.id && dismissedHover.current !== next.id)
+            setHover(next);
+        }, 220);
+    },
+    [schedule],
+  );
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(hoverOpenTimer.current);
+      window.clearTimeout(hoverCloseTimer.current);
+    },
+    [],
+  );
+  const keepTooltip = useCallback(() => {
+    tooltipPointed.current = true;
+    window.clearTimeout(hoverCloseTimer.current);
+    if (visibleHover.current) setHovered(visibleHover.current, true);
+  }, [setHovered]);
+  const leaveTooltip = useCallback(() => {
+    tooltipPointed.current = false;
+    if (!keyboardAnchor) setHovered(undefined);
+  }, [keyboardAnchor, setHovered]);
+  // Escape dismisses additional information without moving the reader or ending inspection.
+  useEffect(() => {
+    if (!hover || resourcePreview) return;
+    const dismiss = (event: KeyboardEvent) => {
+      if (
+        (event.key === "PageDown" || event.key === "PageUp") &&
+        (keyboardAnchor || document.activeElement === canvasRef.current)
+      ) {
+        const card = document.getElementById(tooltipId);
+        if (card && card.scrollHeight > card.clientHeight) {
+          event.preventDefault();
+          event.stopPropagation();
+          card.scrollTop += card.clientHeight * 0.8 * (event.key === "PageDown" ? 1 : -1);
+          return;
+        }
+      }
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      window.clearTimeout(hoverOpenTimer.current);
+      window.clearTimeout(hoverCloseTimer.current);
+      dismissedHover.current = hover.id;
+      tooltipPointed.current = false;
+      setHover(undefined);
+    };
+    document.addEventListener("keydown", dismiss, true);
+    return () => document.removeEventListener("keydown", dismiss, true);
+  }, [hover, resourcePreview, keyboardAnchor, tooltipId]);
+  useLayoutEffect(() => {
+    if (!keyboardAnchor || !hover) return;
+    keyboardAnchor.setAttribute("aria-describedby", tooltipId);
+    return () => keyboardAnchor.removeAttribute("aria-describedby");
+  }, [keyboardAnchor, hover, tooltipId]);
+
+  // High-rate pointers only need one hit test and tooltip position per paint.
+  const hoverFrame = useRef<number | undefined>(undefined);
+  const pendingHover = useRef<Point | undefined>(undefined);
+  const cancelHover = useCallback(() => {
+    if (hoverFrame.current !== undefined) cancelAnimationFrame(hoverFrame.current);
+    hoverFrame.current = undefined;
+    pendingHover.current = undefined;
+  }, []);
+  useEffect(() => cancelHover, [pick, cancelHover]);
+  const queueHover = (point: Point) => {
+    pendingHover.current = point;
+    if (hoverFrame.current !== undefined) return;
+    hoverFrame.current = requestAnimationFrame(() => {
+      hoverFrame.current = undefined;
+      const point = pendingHover.current;
+      pendingHover.current = undefined;
+      if (point) {
+        const current = visibleHover.current;
+        const next = pick(point);
+        // The short corridor between trigger and card must not switch to terrain underneath it.
+        const card = current && document.getElementById(tooltipId)?.getBoundingClientRect();
+        const canvas = canvasRef.current?.getBoundingClientRect();
+        const crossing =
+          current &&
+          card &&
+          canvas &&
+          next?.id !== current.id &&
+          point.x >= Math.min(current.x - 6, card.left - canvas.left - 6) &&
+          point.x <= Math.max(current.x + 6, card.right - canvas.left + 6) &&
+          point.y >= Math.min(current.y - 6, card.top - canvas.top - 6) &&
+          point.y <= Math.max(current.y + 6, card.bottom - canvas.top + 6);
+        if (!crossing) setHovered(next);
+      }
+    });
+  };
+
+  // Pointer input: a press that travels less than the threshold is a click.
+  const pointers = useRef(new Map<number, Point>());
+  const gesture = useRef<
+    { start: Point; last: Point; dragging: boolean; pinch?: number } | undefined
+  >(undefined);
+
+  const local = (event: { clientX: number; clientY: number }): Point => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  };
+
+  const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (event.button !== 0 && event.pointerType === "mouse") return;
+    cancelHover();
+    window.clearTimeout(hoverOpenTimer.current);
+    window.clearTimeout(hoverCloseTimer.current);
+    setHover(undefined);
+    setKeyboardAnchor(undefined);
+    canvasRef.current!.setPointerCapture(event.pointerId);
+    const point = local(event);
+    pointers.current.set(event.pointerId, point);
+    live.current.tween = undefined;
+    if (pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      gesture.current = {
+        start: point,
+        last: point,
+        dragging: true,
+        pinch: Math.hypot(a!.x - b!.x, a!.y - b!.y),
+      };
+      setDragging(true);
+    } else {
+      gesture.current = { start: point, last: point, dragging: false };
+    }
+  };
+
+  const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const point = local(event);
+    const current = gesture.current;
+    if (!current || !pointers.current.has(event.pointerId)) {
+      if (event.pointerType !== "touch") queueHover(point);
+      return;
+    }
+    pointers.current.set(event.pointerId, point);
+    const state = live.current;
+    if (pointers.current.size >= 2 && current.pinch) {
+      const [a, b] = [...pointers.current.values()];
+      const distance = Math.hypot(a!.x - b!.x, a!.y - b!.y);
+      const middle = { x: (a!.x + b!.x) / 2, y: (a!.y + b!.y) / 2 };
+      state.camera = zoomAt(state.camera, state.viewport, middle, distance / current.pinch);
+      current.pinch = distance;
+      schedule();
+      return;
+    }
+    if (
+      !current.dragging &&
+      Math.hypot(point.x - current.start.x, point.y - current.start.y) >= DRAG_THRESHOLD
+    ) {
+      current.dragging = true;
+      setDragging(true);
+      setHovered(undefined);
+    }
+    if (current.dragging) {
+      state.camera = pan(state.camera, point.x - current.last.x, point.y - current.last.y);
+      schedule();
+    }
+    current.last = point;
+  };
+
+  const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const current = gesture.current;
+    pointers.current.delete(event.pointerId);
+    if (pointers.current.size > 0) return;
+    gesture.current = undefined;
+    setDragging(false);
+    if (!current || current.dragging) return;
+    const hit = pick(local(event));
+    // Clicking the inspected entity again ends its inspection.
+    if (hit) {
+      if (hit.id === selected) select(undefined);
+      else inspect(hit.id);
+    } else select(undefined);
+  };
+
+  const onPointerCancel = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    cancelHover();
+    pointers.current.delete(event.pointerId);
+    if (pointers.current.size === 0) {
+      gesture.current = undefined;
+      setDragging(false);
+    }
+  };
+
+  const onDoubleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const point = local(event);
+    const hit = pick(point);
+    if (hit?.kind === "node") {
+      // Its two clicks toggled the selection on and off again; a double-click means this one.
+      inspect(hit.id);
+      focus(hit.id, Math.max(1.3, live.current.camera.zoom));
+    } else moveCamera(zoomAt(live.current.camera, live.current.viewport, point, 1.8));
+  };
+
+  // Wheel: zoom about the pointer. Registered by hand, because React's wheel
+  // listener is passive and could not stop the page from scrolling.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      setHovered(undefined);
+      setHover(undefined);
+      const state = live.current;
+      state.tween = undefined;
+      const point = local(event);
+      if (event.ctrlKey || Math.abs(event.deltaY) >= Math.abs(event.deltaX)) {
+        state.camera = zoomAt(
+          state.camera,
+          state.viewport,
+          point,
+          wheelFactor(event.deltaY, event.deltaMode, state.viewport.height),
+        );
+      } else {
+        state.camera = pan(state.camera, -event.deltaX, 0);
+      }
+      schedule();
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [schedule, hasEntities, setHovered]);
+
+  const zoomBy = (factor: number) => {
+    const state = live.current;
+    moveCamera(
+      zoomAt(
+        state.camera,
+        state.viewport,
+        { x: state.viewport.width / 2, y: state.viewport.height / 2 },
+        factor,
+      ),
+    );
+  };
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
+    const state = live.current;
+    const step = 80;
+    const moves: Record<string, [number, number]> = {
+      ArrowLeft: [step, 0],
+      ArrowRight: [-step, 0],
+      ArrowUp: [0, step],
+      ArrowDown: [0, -step],
+    };
+    const move = moves[event.key];
+    if (move) {
+      moveCamera(pan(state.camera, move[0], move[1]));
+    } else if (event.key === "+" || event.key === "=") zoomBy(1.25);
+    else if (event.key === "-" || event.key === "_") zoomBy(0.8);
+    else if (event.key === "0") fit();
+    else if (event.key === "f" || event.key === "F") focus(visibleSelected);
+    else if (event.key === "Escape") select(undefined);
+    else return;
+    event.preventDefault();
+  };
+
+  const changeTagFilter = (value: TagFilterPreference) => {
+    setTagFilter(value);
+    try {
+      if (value.key) window.localStorage.setItem(TAG_VIEW_STORAGE, JSON.stringify(value));
+      else window.localStorage.removeItem(TAG_VIEW_STORAGE);
+    } catch {
+      /* View preferences do not block the map. */
+    }
+  };
+
+  // Test and console access to where things are drawn. Read-only.
+  useEffect(() => {
+    const debug = {
+      camera: () => live.current.camera,
+      viewport: () => live.current.viewport,
+      screenOf: (id: string) => {
+        const node = nodes.get(id) ?? scene.props.find((prop) => prop.id === id);
+        if (!node) return undefined;
+        const card = live.current.cards.find((candidate) => candidate.id === id);
+        return {
+          building: worldToScreen(live.current.camera, live.current.viewport, node.geometry.top),
+          card: card ? { x: card.x + card.width / 2, y: card.y + card.height / 2 } : undefined,
+        };
+      },
+      pickAt: (x: number, y: number) => pick({ x, y }),
+      cards: () => live.current.cards,
+      badges: () => live.current.badges,
+      connections: () =>
+        scene.edges.map((connection) => ({
+          id: connection.id,
+          from: connection.from,
+          to: connection.to,
+          members: connection.members.flatMap((member) => member.sourceIds ?? [member.edge.id]),
+          availability: connection.availability,
+          label: connectionLabel(connection),
+          style: connection.style,
+          points: scene.routes[connection.id]!.points.map((point) =>
+            worldToScreen(live.current.camera, live.current.viewport, point),
+          ),
+          midpoint: worldToScreen(
+            live.current.camera,
+            live.current.viewport,
+            connectionMidpoint(scene.routes[connection.id]!.points),
+          ),
+        })),
+      hullOf: (id: string) => {
+        const node = nodes.get(id) ?? scene.props.find((prop) => prop.id === id);
+        if (!node) return undefined;
+        const points: Point[] = [];
+        for (let index = 0; index < node.geometry.hull.length; index += 2) {
+          points.push(
+            worldToScreen(live.current.camera, live.current.viewport, {
+              x: node.geometry.hull[index]!,
+              y: node.geometry.hull[index + 1]!,
+            }),
+          );
+        }
+        return points;
+      },
+      stats: () => ({
+        tiles: scene.tiles.length,
+        nodes: scene.nodes.length,
+        edges: scene.edges.length,
+        drawn: rendererRef.current?.drawnItems,
+        lastFrameMs: live.current.samples.at(-1),
+        frames: live.current.frames,
+        focus: live.current.focus.kind,
+      }),
+      search: () => ({
+        active: live.current.focus.kind === "search",
+        nodes: [...live.current.focus.nodes],
+        props: [...live.current.focus.props],
+        opacityOf: (id: string) => searchOpacity(live.current.focus, "nodes", id),
+      }),
+      tagFilter: () => ({
+        key: activeTagKey,
+        value: tagFilter.value,
+        muted: scene.nodes.filter((node) => node.tagFiltered).map((node) => node.id),
+      }),
+    };
+    (window as unknown as { __studioLandscape?: typeof debug }).__studioLandscape = debug;
+    return () => {
+      delete (window as unknown as { __studioLandscape?: typeof debug }).__studioLandscape;
+    };
+  }, [nodes, pick, scene, activeTagKey, tagFilter.value]);
+
+  // Hover coordinates and the timing readout must not rebuild hundreds of
+  // hidden controls. Selection, source and scene updates still refresh them.
+  const accessibleEntities = useMemo(
+    () => (
+      <MapEntityNavigator
+        scene={scene}
+        index={index}
+        selected={visibleSelected}
+        onInspect={(id) => {
+          setHover(undefined);
+          inspect(id);
+        }}
+        onPointerDownCapture={(event) => {
+          touchNavigator.current = event.pointerType === "touch";
+        }}
+        onFocusCapture={(event) => {
+          const button = (event.target as HTMLElement).closest("button");
+          if (!button) return;
+          const kind = button.dataset.hoverKind as Hover["kind"] | undefined;
+          const id = button.dataset.hoverId;
+          if (!kind || !id || touchNavigator.current) return;
+          dismissedHover.current = undefined;
+          setKeyboardAnchor(button);
+          setHovered(
+            { kind, id, x: live.current.viewport.width / 2, y: live.current.viewport.height / 2 },
+            true,
+          );
+        }}
+        onBlurCapture={(event) => {
+          if (
+            event.relatedTarget instanceof Node &&
+            event.currentTarget.contains(event.relatedTarget)
+          )
+            return;
+          setKeyboardAnchor(undefined);
+          setHovered(undefined);
+        }}
+        onKeyDown={(event) => {
+          touchNavigator.current = false;
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            canvasRef.current?.focus();
+            return;
+          }
+          const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button")];
+          const current = items.indexOf(event.target as HTMLButtonElement);
+          if (current < 0) return;
+          const next =
+            event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? items.length - 1
+                : event.key === "ArrowDown"
+                  ? (current + 1) % items.length
+                  : event.key === "ArrowUp"
+                    ? (current - 1 + items.length) % items.length
+                    : undefined;
+          if (next === undefined) return;
+          event.preventDefault();
+          items[next]?.focus();
+        }}
+      />
+    ),
+    [scene, visibleSelected, index, inspect, setHovered],
+  );
+
+  if (!hasEntities) {
+    return (
+      <div data-ui="landscape-workspace" className="flex h-full min-h-0 flex-col">
+        <p data-ui="empty">
+          The {model.mode === "dev" ? "development" : "production"} graph did not load. Open
+          configuration health for the reason.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div data-ui="landscape-workspace" className="flex h-full min-h-0 flex-col">
+      <MapToolbar
+        search={{
+          query,
+          matches,
+          selected,
+          inputRef: searchRef,
+          onChange: setQuery,
+          onClearSelection: () => select(undefined),
+        }}
+        tags={{
+          key: activeTagKey,
+          value: filterValue,
+          enabled: !!model.tagging,
+          mode: model.mode,
+          availableKeys: availableTagKeys,
+          groups,
+          untaggedCount,
+          matchCount: tagMatchCount,
+          keyRef: tagKeyRef,
+          onChange: changeTagFilter,
+        }}
+        camera={{
+          motion,
+          onZoom: zoomBy,
+          onFit: () => fit(),
+          onFocus: () => focus(visibleSelected),
+          onToggleMotion: () => setMotion((current) => !current),
+        }}
+        resources={{ open: view === "resources", panelId: PANEL_ID, onToggle: toggleResources }}
+      />
+      <div
+        data-ui="landscape-content"
+        data-landscape-content
+        className="flex min-h-0 min-w-0 flex-1 activity-open:overflow-clip vp-800:flex-col"
+      >
+        <div
+          data-ui="landscape"
+          className={cx(
+            "relative flex-1 overflow-hidden bg-map-ground text-map-ink",
+            // Activity opens over the map: the canvas keeps its height and runs on beneath the
+            // tray, so nothing here moves. A panel stacked under a narrow map sits in between.
+            "activity-open:h-[calc(100%+min(var(--activity-drawer-visible,var(--activity-drawer)),max(0px,calc(var(--activity-slot-max,100dvh)-var(--activity-bar-height,40px)-1px))))]",
+            view === "closed" && "activity-open:vp-800:flex-none",
+            // Keep the dock clear of wrapped connection filters when a phone panel opens.
+            model.mode === "dev" ? "min-h-50 vp-800:min-h-70" : "min-h-0 vp-800:min-h-45",
+          )}
+          ref={containerRef}
+        >
+          <canvas
+            ref={canvasRef}
+            data-ui="landscape-canvas"
+            className="absolute inset-0 block size-full touch-none outline-none focus-visible:shadow-[inset_0_0_0_2px_light-dark(var(--map-focus),rgba(135,137,255,0.8))] forced-colors:focus-visible:outline-solid forced-colors:focus-visible:outline-2 forced-colors:focus-visible:-outline-offset-2 forced-colors:focus-visible:outline-[Highlight]"
+            tabIndex={0}
+            aria-label="Isometric landscape of the application. Use the list of entities below, or arrow keys to pan, plus and minus to zoom, 0 to fit, F to focus the selection."
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerCancel}
+            onPointerLeave={() => {
+              cancelHover();
+              if (!gesture.current) setHovered(undefined);
+            }}
+            onDoubleClick={onDoubleClick}
+            onKeyDown={onKeyDown}
+            style={{ cursor: dragging ? "grabbing" : pointingAtEntity ? "pointer" : "grab" }}
+          />
+          <div
+            ref={connectionBarRef}
+            data-ui="landscape-bar landscape-connection-bar"
+            className="pointer-events-none absolute right-(--workspace-gutter) left-(--workspace-gutter) flex flex-wrap gap-3 top-3 z-3 items-start"
+          >
+            <div
+              data-ui="landscape-chips"
+              className="pointer-events-none flex min-w-0 max-w-full flex-1 flex-wrap gap-2 vp-700:basis-full"
+              role="group"
+              aria-label="Background connections"
+              aria-describedby="connection-filter-help"
+            >
+              <span id="connection-filter-help" className="sr-only">
+                Filter background connections. Selecting or previewing a resource always shows its
+                connections.
+              </span>
+              {visibleCategories.map((category) => (
+                <button
+                  key={category}
+                  data-ui="landscape-chip"
+                  className={cx(mapFilterChipClasses, mapFilterSwatchClasses)}
+                  aria-pressed={categories.has(category)}
+                  style={{ "--swatch": wireCss(theme, EDGE_COLORS[category]) } as CSSProperties}
+                  title={`${categories.has(category) ? "Hide" : "Show"} ${CATEGORY_DESCRIPTION[category]}. Selected resources keep all their connections.`}
+                  onClick={() => {
+                    setCategories((current) => {
+                      const next = new Set(current);
+                      if (next.has(category)) next.delete(category);
+                      else next.add(category);
+                      return next;
+                    });
+                    setHovered(undefined);
+                  }}
+                >
+                  {CATEGORY_LABEL[category]}
+                </button>
+              ))}
+              {hasErrors ? (
+                <button
+                  data-ui="landscape-chip landscape-errors-chip"
+                  className={mapFilterChipClasses}
+                  aria-pressed={errorsShown}
+                  title={`${errorsShown ? "Hide" : "Show"} errors: ${[
+                    errorCount.nodes ? `${errorCount.nodes} ${errorCount.nodes === 1 ? "resource" : "resources"}` : "",
+                    errorCount.edges ? `${errorCount.edges} ${errorCount.edges === 1 ? "connection" : "connections"} with missing values` : "",
+                  ].filter(Boolean).join(" and ")}. When on, resource error badges and labels are highlighted, their connections show whatever the other filters hide, and their names stay fully visible at every zoom.`}
+                  onClick={() => {
+                    setErrorsShown((current) => !current);
+                    setHovered(undefined);
+                  }}
+                >
+                  <CircleAlert
+                    size={14}
+                    aria-hidden
+                    className="flex-none text-map-error opacity-45 group-aria-pressed:opacity-100"
+                  />
+                  Errors
+                </button>
+              ) : null}
+            </div>
+            {/* The side panel takes the stats' corner, so they hide rather than shift beside it. */}
+            {view === "closed" ? (
+              <span
+                data-ui="landscape-stats"
+                className="pointer-events-auto ml-auto max-w-full py-1 text-right text-step-minus1 text-map-muted vp-700:order-first vp-700:w-full vp-700:text-caption"
+              >
+                {scene.nodes.length} resources · {scene.edges.length} connections
+                {activeTagKey && filterValue !== undefined ? (
+                  <>
+                    {" "}
+                    ·{" "}
+                    <strong className="font-medium text-map-text">
+                      {tagMatchCount} {tagMatchCount === 1 ? "matches" : "match"} the tag filter
+                    </strong>
+                  </>
+                ) : null}
+              </span>
+            ) : null}
+          </div>
+          <div
+            ref={reserveNotificationClearance}
+            data-ui="landscape-bar landscape-bottom"
+            className={cx(
+              "pointer-events-none absolute right-(--workspace-gutter) left-(--workspace-gutter) flex gap-3 bottom-3 items-end",
+              // Fade before hiding, then return as the closing tray clears the dock.
+              // Visibility removes covered controls from the tab order after the exit fade.
+              "visible opacity-100",
+              motion
+                ? "transition-[opacity,visibility] duration-[220ms,0ms] delay-[80ms,80ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+                : "transition-none",
+              view === "closed"
+                ? "activity-expanded:invisible activity-expanded:opacity-0 activity-expanded:duration-[140ms,0ms] activity-expanded:delay-[0ms,140ms] activity-expanded:[&_*]:pointer-events-none"
+                : "activity-expanded:not-vp-800:invisible activity-expanded:not-vp-800:opacity-0 activity-expanded:not-vp-800:duration-[140ms,0ms] activity-expanded:not-vp-800:delay-[0ms,140ms] activity-expanded:not-vp-800:[&_*]:pointer-events-none",
+            )}
+          >
+            <div className="flex min-w-0 max-w-[calc(100%-104px)] flex-col items-start gap-2">
+              <ComposePreview motion={motion} present={model.mode === "dev"} />
+            </div>
+            <span className="pointer-events-none flex-1" />
+            <ThemeToggle motion={motion} />
+            <AddMenu />
+          </div>
+          {hover && !resourcePreview ? (
+            <HoverCard
+              hover={hover}
+              scene={scene}
+              nodes={nodes}
+              viewport={live.current.viewport}
+              id={tooltipId}
+              anchor={keyboardAnchor}
+              onPointerEnter={keepTooltip}
+              onPointerLeave={leaveTooltip}
+            />
+          ) : null}
+          {accessibleEntities}
+        </div>
+        {view !== "closed" ? (
+          <WorkspacePanel
+            id={PANEL_ID}
+            label={view === "inspector" ? "Inspector" : "Resources"}
+            onClose={() => close()}
+            bodyClassName={view === "inspector" ? inspectorContextClasses : "overflow-hidden"}
+            heading={
+              view === "inspector" ? (
+                <InspectorNavigationControls onResources={back} buttonRef={backButton} />
+              ) : (
+                <>
+                  <h2
+                    data-ui="workspace-panel-title"
+                    className="m-0 font-sans text-label leading-[1.3] font-semibold"
+                  >
+                    Resources
+                  </h2>
+                  <span
+                    data-ui="section-count"
+                    className="ml-0 text-caption font-normal text-graphite"
+                    title={`${scene.nodes.length} resources on the map`}
+                  >
+                    {scene.nodes.length}
+                  </span>
+                </>
+              )
+            }
+          >
+            {view === "inspector" && selected !== undefined ? (
+              <InspectorContent selected={selected} />
+            ) : (
+              <ResourceBrowser
+                scene={scene}
+                nodes={navigatorNodes}
+                fixtures={navigatorFixtures}
+                total={scene.nodes.length}
+                kinds={resourceKinds}
+                kind={resourceKind}
+                onKind={setResourceKind}
+                filtered={!!matches || !!resourceKind}
+                onClearFilters={() => {
+                  setQuery("");
+                  setResourceKind("");
+                }}
+                memory={browserMemory}
+                onPreview={setResourcePreview}
+                onInspect={(id) => inspect(id, true)}
+              />
+            )}
+          </WorkspacePanel>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** The canvas above whatever covers its foot: Activity opens over the map, not by resizing it. */
+function visibleViewport(container: HTMLElement | null, viewport: Viewport): Viewport {
+  const top = container?.getBoundingClientRect().top;
+  const bottom = container?.closest("[data-landscape-content]")?.getBoundingClientRect().bottom;
+  if (top === undefined || bottom === undefined) return viewport;
+  return { ...viewport, height: Math.max(1, Math.min(viewport.height, bottom - top)) };
+}
+
+/** What the pointer is over, in words: an entity, a relationship, a place, or furniture. */
+function HoverCard(props: {
+  readonly hover: Hover;
+  readonly scene: Scene;
+  readonly nodes: ReadonlyMap<string, SceneNode>;
+  readonly viewport: Viewport;
+  readonly id: string;
+  readonly anchor?: HTMLElement;
+  readonly onPointerEnter: () => void;
+  readonly onPointerLeave: () => void;
+}) {
+  const { hover: current } = props;
+  let content;
+  const resource =
+    current.kind === "node"
+      ? props.nodes.get(current.id)
+      : current.kind === "prop"
+        ? props.scene.props.find((prop) => prop.id === current.id)
+        : undefined;
+  if (current.kind === "node" || current.kind === "prop") {
+    if (!resource) return null;
+    content = <ResourceHoverContent resource={resource} />;
+  } else if (current.kind === "edge") {
+    const sceneEdge = props.scene.edges.find((candidate) => candidate.id === current.id);
+    const edge = sceneEdge?.edge;
+    if (!edge) return null;
+    content = <ConnectionHoverContent connection={sceneEdge} />;
+  } else {
+    const island = props.scene.islands.find((candidate) => candidate.id === current.id);
+    if (!island) return null;
+    const band =
+      props.scene.mode === "prod" && island?.bands.length && island.bands.length > 1
+        ? island.bands.find((band) => band.id === current.band)
+        : undefined;
+    content = (
+      <HoverContent
+        title={`${island.title}${band ? `: ${band.title}` : ""}`}
+        lines={[...(island.caption ?? []), ...(band?.caption ?? [])]}
+      />
+    );
+  }
+  const events = { onPointerEnter: props.onPointerEnter, onPointerLeave: props.onPointerLeave };
+  const key = `${current.kind}:${current.id}:${current.band ?? ""}`;
+  return props.anchor ? (
+    <ResourceTooltip key={key} id={props.id} anchor={props.anchor} {...events}>
+      {content}
+    </ResourceTooltip>
+  ) : (
+    <CanvasTooltip key={key} id={props.id} point={current} viewport={props.viewport} {...events}>
+      {content}
+    </CanvasTooltip>
+  );
+}

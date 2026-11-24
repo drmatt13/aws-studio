@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1152 634" role="img" aria-labelledby="title description">
+  <title id="title">AWS Studio architecture</title>
+  <desc id="description">Studio 1.0.0 on Node 26.13.0 bundles Framework 1.0.0. Studio inspects and reviews changes to an independent application, using the application's Node 24.22.2 runtime. A new application copies reference-app from the starter repository into its own Git repository. The application pins Framework 1.0.0, which requires Studio 1.0.0.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" viewBox="0 0 8 8">
+      <path d="M 0 0 L 7 4 L 0 8 Z" fill="#334155"/>
+    </marker>
+    <style>
+      text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; fill: #17243c; }
+      .heading { font-size: 37px; font-weight: 700; }
+      .summary { font-size: 19px; fill: #384962; }
+      .name { font-size: 24px; font-weight: 700; }
+      .detail { font-size: 16px; fill: #384962; }
+      .runtime { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 15px; font-weight: 600; fill: #213351; }
+      .connection { font-size: 16px; font-weight: 600; fill: #334155; }
+      .edge { fill: none; stroke: #334155; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1152" height="634" rx="24" fill="#f4f7fc"/>
+  <text x="40" y="65" class="heading">AWS Studio architecture</text>
+  <text x="40" y="102" class="summary">A local Studio install and an independent application use separate runtimes.</text>
+
+  <rect x="40" y="148" width="320" height="140" rx="16" fill="#fff" stroke="#a5b7d6"/>
+  <rect x="40" y="168" width="5" height="100" rx="2.5" fill="#314f92"/>
+  <text x="64" y="186" class="name">Studio 1.0.0</text>
+  <text x="64" y="218" class="detail">Local editor and operations interface</text>
+  <rect x="64" y="237" width="248" height="29" rx="6" fill="#e8eefb"/>
+  <text x="74" y="257" class="runtime">Node 26.13.0 / npm 11.20.0</text>
+
+  <rect x="772" y="148" width="340" height="140" rx="16" fill="#fff" stroke="#a5b7d6"/>
+  <rect x="772" y="168" width="5" height="100" rx="2.5" fill="#314f92"/>
+  <text x="796" y="186" class="name">Framework 1.0.0</text>
+  <text x="796" y="218" class="detail">Application library, CDK and local runtime</text>
+  <text x="796" y="254" class="runtime">Minimum Studio 1.0.0</text>
+
+  <rect x="40" y="416" width="320" height="178" rx="16" fill="#fff" stroke="#a3bfb4"/>
+  <rect x="40" y="436" width="5" height="138" rx="2.5" fill="#28725d"/>
+  <text x="64" y="454" class="name">Starter repository</text>
+  <text x="64" y="486" class="detail">Provides the reference application</text>
+  <rect x="64" y="506" width="150" height="29" rx="6" fill="#e4f0eb"/>
+  <text x="74" y="526" class="runtime">reference-app</text>
+
+  <rect x="772" y="416" width="340" height="178" rx="16" fill="#fff" stroke="#a3bfb4"/>
+  <rect x="772" y="436" width="5" height="138" rx="2.5" fill="#28725d"/>
+  <text x="796" y="454" class="name">Independent application</text>
+  <text x="796" y="486" class="detail">Own Git repository, source and lockfile</text>
+  <rect x="796" y="506" width="248" height="29" rx="6" fill="#e4f0eb"/>
+  <text x="806" y="526" class="runtime">Node 24.22.2 / npm 11.19.1</text>
+  <text x="796" y="565" class="detail">Pins the exact framework archive</text>
+
+  <path d="M 360 210 H 763" class="edge"/>
+  <text x="561" y="196" class="connection" text-anchor="middle">Bundles the framework archive</text>
+  <path d="M 360 260 H 457 V 354 H 706 V 449 H 763" class="edge"/>
+  <text x="581" y="340" class="connection" text-anchor="middle">Opens and reviews edits</text>
+  <path d="M 941 288 V 407" class="edge"/>
+  <text x="957" y="351" class="connection">Installs from pin</text>
+  <path d="M 360 505 H 763" class="edge"/>
+  <text x="561" y="491" class="connection" text-anchor="middle">Copies the starter into a new project</text>
+</svg>

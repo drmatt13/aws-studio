@@ -1,0 +1,167 @@
+name: Verify supported platforms
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    name: Check source metadata and documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.2
+          package-manager-cache: false
+      - name: Check platform lock and documentation
+        run: |
+          node scripts/check-lockfile-platforms.mjs
+          node docs/aws-studio-knowledge/check.mjs
+          python3 docs/check-links.py
+      - name: Describe starter fixture configuration
+        if: vars.AWS_STUDIO_PUBLIC_STARTER_REPOSITORY == ''
+        run: echo '::notice::The native and PostgreSQL gates run when AWS_STUDIO_PUBLIC_STARTER_REPOSITORY names a public starter repository.'
+
+  local-database:
+    name: Fresh-clone PostgreSQL startup and retained data
+    if: vars.AWS_STUDIO_PUBLIC_STARTER_REPOSITORY != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AWS_STUDIO_STARTERS: ${{ github.workspace }}/aws-studio-starter-projects
+    defaults:
+      run:
+        working-directory: source
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.2
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - name: Read the pinned starter commit
+        id: starter
+        run: node .github/scripts/export-starter-pin.mjs
+      - name: Check out the public starter fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ vars.AWS_STUDIO_PUBLIC_STARTER_REPOSITORY }}
+          ref: ${{ steps.starter.outputs.commit }}
+          path: aws-studio-starter-projects
+          persist-credentials: false
+      - name: Prepare the generated peer from the recorded local starter
+        run: node scripts/bootstrap-test-peer.mjs
+      - name: Install the platform dependencies
+        run: npm ci
+      - name: Pull the development PostgreSQL image
+        run: docker pull postgres:16
+      - name: Exercise first start, restart, retained data and unsafe-state refusal
+        env:
+          FRAMEWORK_LOCAL_DATABASE_TEST: '1'
+        run: node .github/scripts/local-database-live-tests.mjs
+      - name: Build the development image and verify fresh Compose startup twice
+        run: node .github/scripts/local-database-compose-smoke.mjs
+      - name: Clean up this run's Compose fixture after success or failure
+        if: always()
+        run: node .github/scripts/local-database-compose-smoke.mjs --cleanup
+      - name: Verify startup preserved the checkout source
+        run: git diff --exit-code
+
+  verify:
+    name: Node 24 / ${{ matrix.os }}
+    if: vars.AWS_STUDIO_PUBLIC_STARTER_REPOSITORY != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15-intel, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      AWS_STUDIO_STARTERS: ${{ github.workspace }}/aws-studio-starter-projects
+    defaults:
+      run:
+        working-directory: AWS Studio é
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: AWS Studio é
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.2
+          cache: npm
+          cache-dependency-path: |
+            AWS Studio é/package-lock.json
+            AWS Studio é/scripts/starters.json
+      - name: Check the bundled toolchain
+        run: node --version && npm --version
+      - name: Read the pinned starter commit
+        id: starter
+        run: node .github/scripts/export-starter-pin.mjs
+      - name: Check out the public starter fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ vars.AWS_STUDIO_PUBLIC_STARTER_REPOSITORY }}
+          ref: ${{ steps.starter.outputs.commit }}
+          path: aws-studio-starter-projects
+          persist-credentials: false
+      - name: Prepare the generated peer from the recorded local starter
+        run: node scripts/bootstrap-test-peer.mjs
+      - name: Install without rewriting source or lockfile
+        run: npm install && git diff --exit-code
+      - name: Clean dependency installation
+        run: npm ci && git diff --exit-code
+      - name: Acquire locked dependencies for the pinned starter
+        id: starter-cache
+        run: node .github/scripts/release-smoke.mjs acquire
+      - name: Test Windows startup permissions without changing the token
+        if: runner.os == 'Windows'
+        run: node --import tsx --test client-app/test/windows-security.test.ts
+      - name: Verify Studio and the release against the pinned starter
+        if: runner.os != 'Windows'
+        run: npm run verify
+      - name: Verify Studio and the release against the pinned starter on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ./.github/scripts/windows-user-owner.ps1
+          npm run verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Set up the independent Studio host runtime
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.starter-cache.outputs.studio_node_version }}
+          package-manager-cache: false
+      - name: Pack and verify an offline Studio install
+        if: runner.os != 'Windows'
+        env:
+          AWS_STUDIO_CI_PROJECT_NODE: ${{ steps.starter-cache.outputs.project_node }}
+          npm_config_cache: ${{ steps.starter-cache.outputs.npm_cache }}
+        run: node .github/scripts/release-smoke.mjs verify
+      - name: Pack and verify an offline Studio install on Windows
+        if: runner.os == 'Windows'
+        env:
+          AWS_STUDIO_CI_PROJECT_NODE: ${{ steps.starter-cache.outputs.project_node }}
+          npm_config_cache: ${{ steps.starter-cache.outputs.npm_cache }}
+        shell: pwsh
+        run: |
+          # This CI shell's owner adjustment is scoped to its descendants.
+          # Qualify ordinary unelevated NTFS installations separately.
+          & ./.github/scripts/windows-user-owner.ps1
+          node .github/scripts/release-smoke.mjs verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

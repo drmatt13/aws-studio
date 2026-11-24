@@ -1,0 +1,397 @@
+import { editorLink } from "../lookup";
+import { buttonClasses } from "../ui/Button";
+import { cx } from "../ui/classes";
+import {
+  checkClasses,
+  checkGridClasses,
+  checkMessageClasses,
+  checkTitleClasses,
+  dialogClasses,
+  dialogHeaderClasses,
+  dialogSubtitleClasses,
+  dialogTitleClasses,
+  dialogBodyClasses,
+  dialogBodyHeadingClasses,
+  dialogFooterClasses,
+  dialogPrimaryActionClasses,
+} from "../inspector-ui";
+import { AlertTriangle, Check, ExternalLink, MessageSquare } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { SourceDiff } from "./SourceDiff";
+import type { Review } from "../draft";
+import { useStudio } from "../studio";
+import { api } from "../api";
+import { openCodingTask } from "../coding-task-navigation";
+
+
+export function EditDialog({ review }: { readonly review: Review | undefined }) {
+  const { snapshot, draft, draftState, applyDraft } = useStudio();
+  const dialog = useRef<HTMLDialogElement>(null);
+  const transferRequest = useRef<{ planId: string; requestKey: string } | undefined>(undefined);
+  const transferRunning = useRef(false);
+  const [transferring, setTransferring] = useState(false);
+  const [transferError, setTransferError] = useState<string>();
+  useEffect(() => {
+    const element = dialog.current!;
+    element.showModal();
+    return () => element.close();
+  }, []);
+  const checking = draftState.busy === "review";
+  const activatesDependencies = review?.kind === "batch" && review.plan.activatesDependencies;
+  const applying = draftState.busy === "apply";
+  const writing = applying || transferring;
+  const transferToCoding = async () => {
+    if (transferRunning.current || review?.kind !== "batch" || activatesDependencies || !review.plan.ok || checking || writing || draftState.error || draft.invalid || draft.conflict) return;
+    transferRunning.current = true; setTransferring(true); setTransferError(undefined);
+    const planId = review.plan.planId;
+    if (transferRequest.current?.planId !== planId) transferRequest.current = { planId, requestKey: crypto.randomUUID() };
+    try {
+      const task = await api.codingReviewBatch(planId, transferRequest.current.requestKey);
+      draft.backToEditing();
+      openCodingTask(snapshot.repositoryRoot, task);
+    } catch (error) { setTransferError(error instanceof Error ? error.message : String(error)); }
+    finally { transferRunning.current = false; setTransferring(false); }
+  };
+  const comments = review?.kind === "batch" ? (review.plan.comments ?? []) : [];
+  const manualComments = comments.some((comment) => comment.manualReason);
+  return (
+    <dialog
+      ref={dialog}
+      className={dialogClasses()}
+      aria-labelledby="preview-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!writing) draft.backToEditing();
+      }}
+      data-slot="preview"
+    >
+      <header className={dialogHeaderClasses}>
+        <p className={dialogSubtitleClasses}>Inspector draft</p>
+        <h2 id="preview-title" className={dialogTitleClasses}>
+          Review {draft.count} {draft.count === 1 ? "change" : "changes"}
+        </h2>
+      </header>
+      <div className={dialogBodyClasses}>
+        {transferError ? <p role="alert" className="text-refuse wrap-anywhere">{transferError}</p> : null}
+        {transferring ? <p role="status">Submitting reviewed changes for validation…</p> : null}
+        {checking ? (
+          <p role="status">
+            {review
+              ? "Updating the diff and checking your choices… Apply will be available when validation finishes."
+              : "Checking all changes… The review will appear here when validation finishes."}
+          </p>
+        ) : null}
+        {draftState.error ? (
+          <p className="text-refuse wrap-anywhere" role="alert">
+            {draftState.error}
+          </p>
+        ) : null}
+        {draftState.error && review ? (
+          <p className="text-caption">
+            The diff below is from the last completed review. Retry to update it before applying.
+          </p>
+        ) : null}
+        {!checking && draftState.error ? (
+          <button
+            className={buttonClasses({ variant: "quiet" })}
+            disabled={draft.invalid || draft.conflict}
+            onClick={() => void draft.review()}
+          >
+            Retry Review
+          </button>
+        ) : null}
+        {draft.conflict ? (
+          <div className="text-refuse wrap-anywhere" role="alert">
+            <p>
+              Source changed since this review. Your draft is preserved.{" "}
+              {draftState.entries.some((entry) => entry.kind === "environment")
+                ? "Choose Back to Editing to preserve your values, then reload that inspector before reviewing."
+                : "Reload saved source to review these changes again."}
+            </p>
+            {!comments.length &&
+            !draftState.entries.some((entry) => entry.kind === "environment") ? (
+              <button
+                className={buttonClasses({ variant: "quiet" })}
+                disabled={checking || writing || draft.invalid}
+                onClick={() => void draft.refreshAndReview()}
+              >
+                Refresh source and retry
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {review ? (
+          <>
+            {review.kind === "batch" && review.plan.rename ? (
+              <section
+                className="rounded-md border border-rule bg-wash p-4"
+                aria-label="Rename impact"
+              >
+                <h3 className="mt-0">
+                  Rename <code>{review.plan.rename.from}</code> to{" "}
+                  <code>{review.plan.rename.to}</code>
+                </h3>
+                <p className="mb-0 text-caption">
+                  Updates {review.plan.rename.referenceCount}{" "}
+                  {review.plan.rename.referenceCount === 1 ? "reference" : "references"} across{" "}
+                  {review.plan.rename.fileCount}{" "}
+                  {review.plan.rename.fileCount === 1 ? "file" : "files"} in both environments.
+                  Explicit environment variable names and cloud identities are preserved.
+                </p>
+              </section>
+            ) : null}
+            {review.kind === "batch" && review.plan.renameIssues?.length ? (
+              <section
+                className="rounded-md border border-rule bg-wash p-4"
+                aria-label="Resolve rename in source"
+              >
+                <h3 className="mt-0">Resolve these references in VS Code</h3>
+                <p className="text-caption">
+                  The diff remains available below. Make each reference explicit using its current
+                  saved code name, save valid source, then refresh this review. Applying the
+                  reviewed rename updates it to the new name. Your draft is preserved.
+                </p>
+                <ul className="grid gap-3 pl-5">
+                  {review.plan.renameIssues.map((issue, at) => (
+                    <li key={at}>
+                      <p className="m-0 text-caption">{issue.message}</p>
+                      <a
+                        className="inline-flex items-center gap-1 text-caption underline underline-offset-2"
+                        href={editorLink(snapshot.repositoryRoot, issue.source)}
+                      >
+                        {issue.source.file}:{issue.source.line}
+                        <ExternalLink size={12} aria-hidden />
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  className={buttonClasses({ variant: "quiet" })}
+                  disabled={checking || writing || draft.invalid}
+                  onClick={() => void draft.refreshAndReview()}
+                >
+                  Refresh source and retry
+                </button>
+              </section>
+            ) : null}
+            {comments.length ? (
+              <section
+                aria-labelledby="source-comments-title"
+                className="min-w-0 rounded-md border border-rule bg-wash p-4"
+              >
+                <h3
+                  id="source-comments-title"
+                  className="m-0 flex items-center gap-2 text-label font-semibold"
+                >
+                  <MessageSquare size={16} aria-hidden />
+                  Comments in this edit
+                </h3>
+                <p className="mt-2 mb-3 text-caption">
+                  Comments are kept by default. Choose which to remove with the code; the diff below
+                  shows the exact result.
+                </p>
+                <div
+                  className="grid max-h-64 gap-3 overflow-auto"
+                  role="region"
+                  aria-label="Source comment choices"
+                  tabIndex={0}
+                >
+                  {comments.map((comment, at) => (
+                    <div
+                      key={comment.id}
+                      className="min-w-0 rounded-md border border-rule bg-sheet p-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                        <span className="min-w-0 font-mono text-meta wrap-anywhere">
+                          {comment.file}:{comment.line}
+                        </span>
+                        <a
+                          className="inline-flex items-center gap-1 text-caption underline underline-offset-2"
+                          href={comment.vscodeUrl}
+                        >
+                          Open in VS Code
+                          <ExternalLink size={12} aria-hidden />
+                        </a>
+                      </div>
+                      <pre className="my-2 whitespace-pre-wrap font-mono text-meta wrap-anywhere">
+                        {comment.text}
+                      </pre>
+                      {comment.manualReason ? (
+                        <p className="m-0 text-caption wrap-anywhere">{comment.manualReason}</p>
+                      ) : (
+                        <label
+                          className={cx(
+                            "flex min-h-8 cursor-pointer items-center gap-2 text-caption",
+                            (checking || writing || draft.conflict) && "cursor-default opacity-60",
+                          )}
+                        >
+                          <input
+                            type="checkbox"
+                            className="size-4 shrink-0 accent-[var(--ink)]"
+                            checked={
+                              (draftState.commentResolutions?.[comment.id] ??
+                                comment.resolution) === "remove"
+                            }
+                            disabled={writing || draft.conflict}
+                            aria-disabled={checking || writing || draft.conflict}
+                            onChange={(event) => {
+                              if (!checking)
+                                void draft.setCommentResolution(
+                                  comment.id,
+                                  event.target.checked ? "remove" : "keep",
+                                );
+                            }}
+                            aria-label={`Remove this comment (${at + 1}, ${comment.file}:${comment.line})`}
+                          />
+                          Remove this comment
+                        </label>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <details className="mt-3 text-caption" open={manualComments || undefined}>
+                  <summary className="cursor-pointer font-medium">
+                    {manualComments
+                      ? "Resolve in VS Code to continue"
+                      : "Prefer to resolve this in VS Code?"}
+                  </summary>
+                  <ol className="my-2 grid gap-1 pl-5">
+                    <li>Open the linked source location.</li>
+                    <li>
+                      Move or remove the comment, keeping any explanation you need, then save the
+                      file.
+                    </li>
+                    <li>
+                      Return here and refresh. Your pending settings will be reviewed against the
+                      saved source.
+                    </li>
+                  </ol>
+                  <button
+                    className={buttonClasses({ variant: "quiet" })}
+                    disabled={checking || writing || draft.invalid}
+                    onClick={() => void draft.refreshAndReview()}
+                  >
+                    Refresh source and retry
+                  </button>
+                </details>
+              </section>
+            ) : null}
+            <div className={checkGridClasses} data-slot="checks">
+              {review.kind === "environment" ? (
+                <div className={checkClasses("ok")} data-slot="check">
+                  <strong className={checkTitleClasses}>
+                    <Check size={16} aria-hidden />
+                    Dotenv syntax and file revision checked
+                  </strong>
+                  <p className={checkMessageClasses} data-slot="message">
+                    Values are hidden in this review. Check values in the inspector before applying.
+                    Synthesis validates infrastructure separately.
+                  </p>
+                </div>
+              ) : (
+                (["dev", "prod"] as const).map((mode) => (
+                  <div
+                    key={mode}
+                    className={checkClasses(review.plan.preflight[mode].ok ? "ok" : "refused")}
+                    data-slot="check"
+                  >
+                    <strong className={checkTitleClasses}>
+                      {review.plan.preflight[mode].ok ? (
+                        <Check size={16} aria-hidden />
+                      ) : (
+                        <AlertTriangle size={16} aria-hidden />
+                      )}
+                      {mode === "dev" ? "Development" : "Production"} graph:{" "}
+                      {review.plan.preflight[mode].ok ? "accepted" : "refused"}
+                    </strong>
+                    {review.plan.preflight[mode].diagnostics.map((item, at) => (
+                      <p className={checkMessageClasses} key={at} data-slot="message">
+                        {item.message}
+                      </p>
+                    ))}
+                  </div>
+                ))
+              )}
+            </div>
+            <h3 className={dialogBodyHeadingClasses}>Pending changes</h3>
+            <ul className="m-0 pl-4.5" data-slot="impact">
+              {review.plan.summaries.map((summary, at) => (
+                <li key={at}>{summary}</li>
+              ))}
+            </ul>
+            {review.kind === "batch" ? (
+              <ul className="m-0 pl-4.5" data-slot="impact">
+                {review.plan.impact.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            ) : null}
+            {review.plan.changes.map((change) => (
+              <SourceDiff
+                key={change.file}
+                file={change.file}
+                lines={change.diff.lines}
+                note={"operation" in change && change.operation === "create" ? "New file" : undefined}
+              />
+            ))}
+            <p className="text-caption text-graphite">
+              {review.kind === "environment"
+                ? "Only these variables are saved, in the files listed. Every other line stays unchanged, and nothing is deployed."
+                : activatesDependencies
+                  ? "Apply saves the reviewed source and activates its dependency installation. Deployments are started separately."
+                  : "Only the reviewed source changes will be written. Validation covers the complete proposed configuration; deployment is a separate action."}
+            </p>
+            {review.kind === "batch" && !activatesDependencies ? <p className="text-caption text-graphite">Check these exact edits in a private copy, then review the results in Coding before applying. Your inspector draft stays available.</p> : null}
+          </>
+        ) : null}
+      </div>
+      <footer className={dialogFooterClasses}>
+        {review && !review.plan.ok ? (
+          <span className="mr-auto text-caption text-refuse wrap-anywhere vp-540:w-full">
+            {manualComments
+              ? "Resolve the source comment, then refresh this review."
+              : "Resolve the rejected settings before applying."}
+          </span>
+        ) : null}
+        <button
+          className={buttonClasses({ variant: "quiet" })}
+          disabled={writing}
+          autoFocus
+          onClick={() => draft.backToEditing()}
+        >
+          Back to Editing
+        </button>
+        <button
+          className={buttonClasses({ variant: "quiet" })}
+          disabled={writing}
+          onClick={() => draft.discard()}
+        >
+          Discard All
+        </button>
+        <button
+          hidden={review?.kind !== "batch" || activatesDependencies === true}
+          className={buttonClasses({ variant: "quiet" })}
+          disabled={!review?.plan.ok || checking || writing || !!draftState.error || draft.invalid || draft.conflict}
+          onClick={() => void transferToCoding()}
+        >
+          {transferring ? "Submitting for validation…" : "Validate reviewed changes"}
+        </button>
+        <button
+          className={buttonClasses({ variant: "primary", className: dialogPrimaryActionClasses })}
+          disabled={
+            !review?.plan.ok ||
+            checking ||
+            writing ||
+            !!draftState.error ||
+            draft.invalid ||
+            draft.conflict
+          }
+          onClick={() => void applyDraft()}
+          data-variant="primary"
+        >
+          {applying ? "Applying…" : "Apply All"}
+        </button>
+      </footer>
+    </dialog>
+  );
+}

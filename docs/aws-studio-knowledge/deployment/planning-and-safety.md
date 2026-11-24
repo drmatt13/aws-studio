@@ -1,0 +1,93 @@
+---
+id: deployment.planning-safety
+summary: Exact deployment plan/apply gates, ownership enforcement, confirmation and failure boundaries.
+read_when:
+  - Fixing approval, ownership, change-set, staleness, or recovery behavior
+source:
+  - client-app/server/deploy/preparation.ts
+  - client-app/server/deploy/plans.ts
+  - client-app/server/deploy/registry.ts
+  - client-app/shared/deploy-findings.ts
+  - client-app/server/operations/adapter.ts
+  - packages/aws-studio/cli/deploy.ts
+  - packages/aws-studio/cli/deployment-plan.ts
+  - packages/aws-studio/cli/deployment-guard.ts
+  - packages/aws-studio/cli/deployment-cognito-domains.ts
+  - packages/aws-studio/cli/deployment-workspace.ts
+  - packages/aws-studio/cli/deployment-integrity.ts
+  - packages/aws-studio/cli/deployment-artifact.ts
+  - packages/aws-studio/cli/atomic-replace.cjs
+  - packages/aws-studio/src/deploy/classify.ts
+related:
+  - deployment.lifecycle
+  - deployment.environments
+  - deployment.secrets
+  - deployment.operations
+---
+# Planning, approval and cloud safety
+
+This page owns infrastructure plan/apply. Database application, identity operations and
+frontend publication have independent review/effect boundaries described in the
+[operational lifecycle](lifecycle.md).
+
+Use the [production procedure](../../playbooks/prod-deployment.md) for authorized operations. Source work or this wiki never authorizes deployment. A template plan can be read-oriented, but change-set preparation writes AWS review objects; `--create-secrets` also writes new secrets.
+
+The enforcement core is [packages/aws-studio/cli/deploy.ts](../../../packages/aws-studio/cli/deploy.ts), not only the Studio buttons:
+
+| Gate | Enforcement / result |
+| --- | --- |
+| Select/synthesize | `prepare`: resolve mode/target/input file; synth assembly or reopen reviewed assembly; compare selection and synthesized identity |
+| Lock/account | Per-checkout `acquireDeploymentLock` in [deployment-workspace.ts](../../../packages/aws-studio/cli/deployment-workspace.ts), then STS account comparison; shared with saved teardown; unknown/dead locks require inspected manual recovery, and release checks a unique token. It is not distributed coordination across checkouts/machines |
+| Ownership/status | `assertDeploymentAllowed` in [deployment-guard.ts](../../../packages/aws-studio/cli/deployment-guard.ts) consumes [deployment classification](../../../packages/aws-studio/src/deploy/classify.ts); unknown ownership, other mode/account/region and in-progress/stuck states refuse before secret reads/writes |
+| Stateful references | [stateful-references.ts](../../../packages/aws-studio/cli/stateful-references.ts) validates saved-template physical identities, released ownership, exact original DB network/KMS/secret or Cognito client/domain/trigger prerequisites before writes; managed/reference transitions refuse implicit identity loss. [Physical reference locks](../../../packages/aws-studio/cli/stateful-reference-locks.ts) exclude concurrent operations across different deployment names in this checkout, with sorted acquisition and failed-attempt cleanup; they are not distributed locks |
+| Production flags | `unsafeProductionFlags` rejects hotswap/express/no-rollback/yes/unreviewed approval bypasses; direct production deploy forces CDK broadening review |
+| Legacy development Cognito domains | Compare exact owned deployed/next domain templates before secret writes. Direct removal/replacement refuses; saved review must include the domain and authentication consequence and require typed deployment name. Apply repeats comparison and rejects older reviews without it; [domain guide](../../framework-studio/identity-and-domains.md) |
+| Managed parameters | Handwritten overrides of framework-managed secret ARN parameters are rejected |
+| Plan | Save staged assembly bytes, inspectable template/security diffs, stack fingerprints, retained deployed stacks, secret names/actions and uncertainty; failed analysis blocks apply; default prod change-set review, dev template review |
+| Confirmation | `confirmationLevel` in [deployment-plan.ts](../../../packages/aws-studio/cli/deployment-plan.ts) always requires an explicit click in dev and derives click/name in prod from first deploy, stateful/destructive/replacement/security/export impact; consequential prod changes require typed deployment name |
+| Apply | Refuse used/expired (24-hour) plans, missing secret binding, altered assembly digest/identity, changed stack fingerprints, unavailable change sets or secret-write mismatch |
+| Local runtime | Studio development apply, destroy, export/repoint and cloud-writing preparation require local compute confirmed off, including partial/paused containers and watch/client processes; acceptance and detached-worker execution repeat the check. Ordinary template synthesis/review and production remain independent |
+| Finish | Verify observed stack completion/identity/template; write advisory deployment record, result status and dev export when applicable |
+
+Template comparison cannot determine replacement certainty or drift. Change-set review uses CloudFormation's resource change details but still cannot predict custom-resource effects or every service-resolved value. Cross-stack imports from newly created/deferred dependencies postpone those consumers: apply can finish **partial**, requiring another plan after dependencies exist.
+
+`plan` records `preparing.json` before preparing each change set, so interrupted preparation can be discarded. New stacks can remain `REVIEW_IN_PROGRESS`; expected plan-owned review stacks are handled specially. `discard` cleans prepared reviews, not an executed deployment. Missing secrets produce `needs-secrets` until explicit creation is allowed; creation must not update existing secrets. [Secret binding](secrets.md) defines the reviewed-value checks.
+
+`apply` deploys the **saved assembly without resynthesis or loading current declarations**. Discard also remains available with broken current source, shares the deployment lock, and targets exact saved StackIds; an ambiguous interrupted placeholder stays preserved for investigation. The saved target/inputs, STS account, ownership and secret guards still apply. Checks and account/ownership validation rerun. CloudFormation rollback governs infrastructure, but secret writes occur before stack changes and can already affect readers. Cancellation of a local CLI/job does not guarantee AWS cancellation or rollback. The wrapper reports updates already performed. `UPDATE_ROLLBACK_FAILED`/`DELETE_FAILED` need explicit recovery; some failed creates/paused updates are classified as CDK-recoverable. Never automate recovery by deleting identity checks.
+
+Studio's **Synthesize** action prepares a saved template review without applying it.
+During a matching saved-plan apply, Deploy presents first-create stacks whose
+CloudFormation identity is not published yet as pending, using the review's new-stack
+names and exact profile/account/region. This is presentation only: classification and
+all ownership/write guards remain strict. Completed, unexpected, other-destination or
+contradictory stacks still show ownership conflicts, as does any unresolved identity
+after the operation ends.
+The newest plan is offered for review on its own card; older plans remain in an explicit
+history disclosure. **Deploy development/production** appears inside the review and uses
+that saved assembly, without resynthesizing or automatically applying after synthesis.
+The review centers on **Changes by stack**: each expandable stack contains its resource
+changes and inspectable before/after properties in one card. It omits raw security/template
+diffs, the generic IAM-broadening banner and the synthesis-details disclosure. Specific
+replacement, removal, data and imported-export warnings remain, as do analysis problem
+messages and the confirmation derived from the saved plan. This presentation does not
+change security analysis, plan artifacts or any apply gate.
+A private sidecar binds the saved plan to source,
+handler/asset bytes, dependencies, selected inputs and AWS configuration. Source changes
+during preparation make the result stale. Only freshness booleans and an explanatory
+message reach the browser. Normal deployment sends `currentSource: true`, checked both
+before operation acceptance and again by the worker. Explicit saved-review recovery
+retains the existing ability to deploy reviewed bytes with broken or newer current source;
+it does not claim to deploy the current declarations. Existing assembly integrity,
+ownership, principal, secret and AWS stack-fingerprint checks apply to both paths.
+
+Safeguards are local-tool contracts, not protection against a user bypassing the wrapper or tampering with all local artifacts. `assemblyDigest` in `packages/aws-studio/cli/deployment-integrity.ts` hashes every saved manifest, template and staged asset byte plus entry types, internal symlink targets and executable/file permissions and rejects links outside the assembly. Phase/result records use atomic writes and file fsync; an attempt without a terminal record is surfaced as interrupted, never blindly retried. Removed whole stacks are explicitly listed as retained outside the selected assembly; a no-change result covers current assembly templates only, not drift or full convergence. Stack fingerprints bind immutable StackIds plus observed status/timestamps, not a distributed lock or complete drift proof. [Operations](operations.md) owns status/drift and identity-scoped teardown.
+
+On Windows, journal replacement retries only sharing-related rename failures for
+at most five seconds. The same atomic rename preserves the previous record until
+success; exhausted/permanent errors still fail. No unlink/permission fallback or
+cloud request replay is introduced. Tests cover byte preservation and bounded
+failure in [deployment artifact tests](../../../packages/aws-studio/test/cdk/deployment-artifact.test.ts).
+
+Tests: [plan](../../../packages/aws-studio/test/cdk/deployment-plan.test.ts), [plan/apply](../../../packages/aws-studio/test/cdk/deployment-plan-apply.test.ts), [guard](../../../packages/aws-studio/test/cdk/deployment-guard.test.ts), [interrupt](../../../packages/aws-studio/test/cdk/deployment-interrupt.test.ts), [secret review](../../../packages/aws-studio/test/cdk/deployment-secret-review.test.ts), Studio [plans](../../../client-app/test/deploy-plans.test.ts). Preserve refusal-before-write assertions, saved-assembly identity and typed approval across CLI/UI changes.
+
+Stateful intent is the literal per-mode source policy (`framework-config/deployment/stateful-resources.ts` in the app), with absent values preserving legacy shared inputs. Actual deployed policies govern teardown: [dependency analysis](../../../packages/aws-studio/cli/stateful-teardown.ts) refuses retained RDS dependency deletion and retained pool trigger removal. [Retained evidence](../../../packages/aws-studio/cli/retained-resources.ts) records physical identities/relationships locally before the first deletion and preserves failed/completed attempts beyond removed source/stacks. It proves observed history, never current availability or distributed ownership. See [canonical retention/reuse contract](../../FRAMEWORK.md#stateful-retention-and-explicit-reuse) and the [Studio lifecycle workflow](../../framework-studio/stateful-resources.md).

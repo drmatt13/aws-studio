@@ -1,0 +1,310 @@
+import type { DeployLane } from "aws-studio/config";
+import type { IConstruct } from "constructs";
+import type { ApplicationListener } from "aws-cdk-lib/aws-elasticloadbalancingv2";
+import type { IGrantable } from "aws-cdk-lib/aws-iam";
+import type { IFunction } from "aws-cdk-lib/aws-lambda";
+import type { TaskDefinition } from "aws-cdk-lib/aws-ecs";
+import type { IStateMachine } from "aws-cdk-lib/aws-stepfunctions";
+import { markInfrastructure } from "./framework-inventory";
+import { frameworkLambdaInvocation } from "./framework-lambda";
+import {
+  createTargetAvailability,
+  getFrameworkTargets,
+  parseTargetReference,
+  toTargetReference,
+  type CloudMode,
+  type FrameworkConfig,
+  type LambdaTarget,
+  type ServiceTarget,
+  type TargetKind,
+  type TargetReference,
+  type TaskTarget,
+  type WorkflowTarget,
+} from "aws-studio/config";
+
+export type FrameworkLambdaTarget = {
+  readonly kind: "lambda";
+  readonly function: IFunction;
+};
+
+export type FrameworkServiceTarget = {
+  readonly kind: "service";
+  readonly url: string;
+  /**
+   * The load balancer's listener when it is internal: the HTTP API reaches it
+   * over a VPC link rather than at its URL.
+   */
+  readonly listener?: ApplicationListener;
+};
+
+/**
+ * The resolved launch specification, as CDK values.
+ *
+ * The same object the runtime descriptor and the workflow's `.sync` step are
+ * both projected from, so a direct `runTask` and a workflow step can never
+ * launch the same task two different ways. Every field may be a token.
+ */
+export interface FrameworkTaskLaunch {
+  readonly region: string;
+  /** Cluster ARN, which is also what the RunTask grant is conditioned on. */
+  readonly cluster: string;
+  /**
+   * The family, which RunTask resolves to its latest ACTIVE revision. Never a
+   * revision ARN: every change to a task registers a new revision, and a caller
+   * in another stack holding one could not deploy past it (see grantRunTask).
+   */
+  readonly taskDefinitionFamily: string;
+  readonly containerName: string;
+  readonly launchType: "FARGATE";
+  readonly platformVersion: string;
+  readonly subnets: readonly string[];
+  readonly securityGroups: readonly string[];
+  readonly assignPublicIp: boolean;
+}
+
+export type FrameworkTaskTarget = {
+  readonly kind: "task";
+  readonly launch: FrameworkTaskLaunch;
+  readonly taskDefinition: TaskDefinition;
+  /**
+   * Applies `ecs:RunTask` on this task's family plus `iam:PassRole` on both
+   * roles, each with its own condition. Owned by the task's own stack so a
+   * caller cannot widen it, and so there is one implementation for Lambda
+   * callers, container callers and the workflow role alike.
+   */
+  readonly grantRun: (grantee: IGrantable) => void;
+};
+
+export type FrameworkWorkflowTarget = {
+  readonly kind: "workflow";
+  readonly stateMachine: IStateMachine;
+  /** `states:StartExecution` on this machine only. */
+  readonly grantStart: (grantee: IGrantable) => void;
+};
+
+export type FrameworkAgentTarget = {
+  readonly kind: "agent";
+  readonly arn: string;
+  readonly region: string;
+  /**
+   * Whether the agent has users. Its Runtime then accepts only a user's
+   * Cognito token, so a caller forwards one and holds no IAM grant.
+   */
+  readonly auth: boolean;
+  /** `bedrock-agentcore:InvokeAgentRuntime` on this Runtime only. */
+  readonly grantInvoke: (grantee: IGrantable) => void;
+};
+
+export type FrameworkCdkTarget =
+  | FrameworkLambdaTarget
+  | FrameworkServiceTarget
+  | FrameworkTaskTarget
+  | FrameworkWorkflowTarget
+  | FrameworkAgentTarget;
+
+export class FrameworkTargetRegistry {
+  private readonly targetMap = new Map<TargetReference, FrameworkCdkTarget>();
+
+  public lambda<T extends IFunction>(id: string, fn: T): T {
+    markInfrastructure(fn, `lambda:${id}`);
+    markInfrastructure(fn.role, `lambda:${id}`, "supporting");
+    this.register(`lambda:${id}`, { kind: "lambda", function: frameworkLambdaInvocation(fn) });
+    return fn;
+  }
+
+  public service(id: string, url: string, listener?: ApplicationListener): string {
+    this.register(`service:${id}`, { kind: "service", url, ...(listener ? { listener } : {}) });
+    return url;
+  }
+
+  public task(id: string, target: Omit<FrameworkTaskTarget, "kind">): void {
+    markInfrastructure(target.taskDefinition, `task:${id}`);
+    markInfrastructure(target.taskDefinition.taskRole, `task:${id}`, "supporting");
+    markInfrastructure(target.taskDefinition.executionRole, `task:${id}`, "supporting");
+    this.register(`task:${id}`, { kind: "task", ...target });
+  }
+
+  public workflow(
+    id: string,
+    target: Omit<FrameworkWorkflowTarget, "kind">,
+  ): void {
+    markInfrastructure(target.stateMachine, `workflow:${id}`);
+    markInfrastructure((target.stateMachine as unknown as { role?: unknown }).role, `workflow:${id}`, "supporting");
+    this.register(`workflow:${id}`, { kind: "workflow", ...target });
+  }
+
+  public agent(id: string, target: Omit<FrameworkAgentTarget, "kind">): void {
+    this.register(`agent:${id}`, { kind: "agent", ...target });
+  }
+
+  public requireAgent(id: string): FrameworkAgentTarget {
+    const target = this.require(`agent:${id}`);
+    if (target.kind !== "agent") throw new Error(`agent:${id} is not an AgentCore Runtime.`);
+    return target;
+  }
+
+  public merge(...registries: readonly FrameworkTargetRegistry[]): this {
+    for (const registry of registries) {
+      for (const [reference, target] of registry.entries()) {
+        this.register(reference, target);
+      }
+    }
+    return this;
+  }
+
+  public get(reference: TargetReference): FrameworkCdkTarget | undefined {
+    return this.targetMap.get(reference);
+  }
+
+  public requireLambda(reference: LambdaTarget): IFunction {
+    const target = this.require(reference);
+    if (target.kind !== "lambda") {
+      throw new Error(`Framework target "${reference}" is not a Lambda function.`);
+    }
+    return target.function;
+  }
+
+  public requireService(reference: ServiceTarget): FrameworkServiceTarget {
+    const target = this.require(reference);
+    if (target.kind !== "service") {
+      throw new Error(`Framework target "${reference}" is not an HTTP service.`);
+    }
+    return target;
+  }
+
+  public requireTask(reference: TaskTarget): FrameworkTaskTarget {
+    const target = this.require(reference);
+    if (target.kind !== "task") {
+      throw new Error(`Framework target "${reference}" is not an ECS task.`);
+    }
+    return target;
+  }
+
+  public requireWorkflow(reference: WorkflowTarget): FrameworkWorkflowTarget {
+    const target = this.require(reference);
+    if (target.kind !== "workflow") {
+      throw new Error(`Framework target "${reference}" is not a workflow.`);
+    }
+    return target;
+  }
+
+  public entries(): IterableIterator<[TargetReference, FrameworkCdkTarget]> {
+    return this.targetMap.entries();
+  }
+
+  private require(reference: TargetReference): FrameworkCdkTarget {
+    const target = this.get(reference);
+    if (!target) {
+      throw new Error(`Framework target "${reference}" is not registered in CDK.`);
+    }
+    return target;
+  }
+
+  private register(
+    reference: TargetReference,
+    target: FrameworkCdkTarget,
+  ): void {
+    parseTargetReference(reference);
+    if (this.targetMap.has(reference)) {
+      throw new Error(`Framework target "${reference}" is registered more than once.`);
+    }
+    this.targetMap.set(reference, target);
+  }
+}
+
+const permissionTargetRegistries = new WeakMap<IConstruct, FrameworkTargetRegistry>();
+/** The composed target inventory is published before deferred permission resolution. */
+export function registerPermissionTargets(scope: IConstruct, targets: FrameworkTargetRegistry): void {
+  permissionTargetRegistries.set(scope.node.root, targets);
+}
+export function permissionTargets(scope: IConstruct): FrameworkTargetRegistry {
+  const targets = permissionTargetRegistries.get(scope.node.root);
+  if (!targets) throw new Error("Compose and register framework targets before resolving targetArn() permissions.");
+  return targets;
+}
+
+/** Declared targets this graph deliberately does not contain, by reason. */
+export interface SkippedTargets {
+  /** Removed by their own `deploy` token. The author asked for this. */
+  readonly disabled: readonly TargetReference[];
+  /**
+   * Enabled for the cloud, but not held by this deployment. Only a dev
+   * deployment produces these, and only for targets a developer invokes.
+   */
+  readonly notInThisDeployment: readonly TargetReference[];
+  readonly conditionNotMet: readonly TargetReference[];
+}
+
+/**
+ * Ensures config declarations and CDK registrations stay complete in both
+ * directions, for the graph this mode actually builds.
+ *
+ * There is no per-kind exception any more. Services used to be skipped by name
+ * because Compose owns them locally; that is now one instance of the general
+ * rule, which `isTargetDeployed` answers for every kind: a dev deployment holds
+ * only what AWS invokes.
+ */
+export function assertFrameworkTargetsComplete(
+  config: FrameworkConfig,
+  registry: FrameworkTargetRegistry,
+  options: {
+    readonly mode: CloudMode;
+    /** Inputs for conditional workload selection. */
+    readonly inputs?: DeployLane;
+  },
+): SkippedTargets {
+  const disabled: TargetReference[] = [];
+  const notInThisDeployment: TargetReference[] = [];
+  const conditionNotMet: TargetReference[] = [];
+  const availability = createTargetAvailability(config);
+  const declaredIds: Record<TargetKind, string[]> = { lambda: [], service: [], task: [], workflow: [], agent: [] };
+  for (const target of getFrameworkTargets(config)) declaredIds[target.kind].push(target.id);
+  for (const kind of ["lambda", "service", "task", "workflow", "agent"] as const) {
+    for (const id of declaredIds[kind]) {
+      const reference = toTargetReference(kind, id);
+      // A target that was built anyway is the more dangerous half of both
+      // checks below: the point is to remove the resource, not just the route
+      // that points at it.
+      const registered = Boolean(registry.get(reference));
+      if (!availability.enabled(kind, id, "cloud", "unconditioned")) {
+        if (registered) {
+          throw new Error(
+            `Framework target "${reference}" is disabled for the cloud scope in framework.config.ts but a stack registered it.`,
+          );
+        }
+        disabled.push(reference);
+        continue;
+      }
+      if (!availability.enabled(kind, id, "cloud", options.inputs)) {
+        if (registered) throw new Error(`Framework target "${reference}" was built although its deployment condition is false.`);
+        conditionNotMet.push(reference);
+        continue;
+      }
+      if (!availability.deployed(kind, id, options.mode, { inputs: options.inputs })) {
+        if (registered) {
+          throw new Error(
+            `Framework target "${reference}" is not built by a ${options.mode} deployment but a stack registered it. A ${options.mode} deployment holds only what AWS invokes; everything else runs under Docker Compose.`,
+          );
+        }
+        notInThisDeployment.push(reference);
+        continue;
+      }
+      if (!registered) {
+        throw new Error(
+          `Framework target "${reference}" is declared in framework.config.ts but no stack registered it.`,
+        );
+      }
+    }
+  }
+
+  for (const [reference] of registry.entries()) {
+    const { kind, id } = parseTargetReference(reference);
+    if (!declaredIds[kind].includes(id)) {
+      throw new Error(
+        `Framework target "${reference}" is registered in CDK but is not declared in framework.config.ts.`,
+      );
+    }
+  }
+
+  return { disabled, notInThisDeployment, conditionNotMet };
+}

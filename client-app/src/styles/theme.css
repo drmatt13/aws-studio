@@ -1,0 +1,318 @@
+/* Owner: Studio design system. Runtime CSS variables are authoritative for UI,
+ * including saved/OS themes and editor integrations. Tailwind aliases resolve at use.
+ * Scene material/geometry palettes remain in TypeScript; map DOM tokens are
+ * available at the document root so portal content shares the same palette. */
+/* The shell animates one length shared by the drawer and the map beneath it. */
+@property --activity-drawer-visible {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+
+/* Barlow is served from public/fonts, not Google Fonts. Google sends Windows a
+ * hinted build that snaps the dot of i and j onto the stem at 12–13px, so
+ * "Cognito" reads "Cognlto". These are Google's unhinted Latin files, the same
+ * outlines without the grid-fitting; display and code faces stay on Google. */
+@font-face {
+  font-family: "Barlow";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/barlow-400.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Barlow";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/barlow-500.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Barlow";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/barlow-600.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  color-scheme: light dark;
+  /* Paper is the workspace canvas. Sheets carry content, fields are inset,
+   * and wash marks quiet grouping and hover. Selection has its own tint. */
+  --paper: light-dark(#eef2f6, #12161c);
+  --sheet: light-dark(#ffffff, #181d24);
+  --wash: light-dark(#e8edf5, #1f252e);
+  --field: light-dark(#f8fafd, var(--paper));
+  --ink: light-dark(#172332, #e4e8ee);
+  --graphite: light-dark(#4e5e73, #a2aab5);
+  --faint: light-dark(#5c6a7f, #727b87);
+  --rule: light-dark(#dbe2eb, #2b323c);
+  --rule-strong: light-dark(#b8c4d3, #3b434f);
+  --field-rule: light-dark(#7e8ca0, var(--rule-strong));
+  --selected: light-dark(#e5edfc, var(--wash));
+  --selected-ink: light-dark(#285191, var(--ink));
+  --selected-rule: light-dark(#7588aa, var(--rule-strong));
+
+  --local: light-dark(#93590e, #e0a43a);
+  --dev: light-dark(#006b73, #2fb3bc);
+  --prod: light-dark(#424fa5, #8789ff);
+
+  --access-owner: light-dark(#965500, #ffc36b);
+  --access-members: light-dark(#7a40c4, #bf94ff);
+  --access-via: light-dark(#006c76, #32d7df);
+  /* Access directives, by what a token is about. Each keeps 4.5:1 on --sheet and --wash. */
+  --access-identity: light-dark(#9a5500, #ffc36b);
+  --access-role: light-dark(#7a40c4, #c3a0ff);
+  --access-path: light-dark(#007780, #3fd6de);
+  --access-state: light-dark(#2457b5, #8ab8ff);
+  --access-limit: light-dark(#b42318, #ff8a7e);
+
+  --refuse: light-dark(#b32622, #ff7b6e);
+  --refuse-wash: light-dark(#fcecea, #3a1c1a);
+  --accept: light-dark(#256744, #6cc483);
+  --accept-wash: light-dark(#e7f4eb, #18301f);
+  --caution-wash: light-dark(#fff3de, var(--wash));
+  --info-wash: light-dark(#e6f3f5, #6699bb10);
+  /* Status text. Both resolve per theme and keep 4.5:1 at 11px on --wash. */
+  --caution: color-mix(in srgb, var(--local) 65%, var(--ink));
+  --quiet: color-mix(in srgb, var(--graphite) 85%, var(--ink));
+  --added: light-dark(#e4f4e9, #173022);
+  --removed: light-dark(#fbe9e7, #3a1d1c);
+
+  /* The map and everything drawn over it. Its canvas paints the same two looks
+   * (scene/look.ts MAP_LOOK); these are the DOM's half: cards, chips, docks, popovers. */
+  --map-ground: light-dark(#e9edf5, #0a0d13);
+  --map-surface: light-dark(#ffffff, #0e131b);
+  --map-panel: light-dark(#f5f7fb, #131b27);
+  --map-ink: light-dark(#172332, #e4e8ee);
+  --map-title: light-dark(#121d2a, #f0f2f5);
+  --map-text: light-dark(#344359, #c9d1dc);
+  --map-muted: light-dark(#516176, #9ba8b8);
+  --map-focus: light-dark(#2457b5, #a7d7ff);
+  --map-rule: light-dark(#c6d0df, #3c485a);
+  --map-row: light-dark(#e7eef9, #26364b);
+  /* Hairlines and borders over the map, as ink on light and light on dark. */
+  --map-hairline: light-dark(#223d6614, #ffffff14);
+  --map-edge: light-dark(#223d6633, #ffffff24);
+  --map-edge-strong: light-dark(#60789d, #ffffff45);
+  --map-hover: light-dark(#223d660d, #ffffff12);
+  /* Option tiles inside map popovers. */
+  --map-tile: light-dark(#ffffff, #1a2534);
+  --map-tile-rule: light-dark(#d9e0eb, #2c394b);
+  --map-tile-rule-hover: light-dark(#71849e, #7791b0);
+  /* Floating controls in the map's docks. */
+  --map-float-from: light-dark(#ffffffeb, #29313ecc);
+  --map-float-to: light-dark(#f1f5fbe6, #151c28e6);
+  --map-float-hover-from: light-dark(#ffffff, #343f50e6);
+  --map-float-hover-to: light-dark(#e8effbf2, #202b3be6);
+  --map-knob: light-dark(#ffffff, #e4e8ee);
+  --map-compose: light-dark(#1769d6, #3b9bff);
+  --map-compose-deep: #1d63ed;
+  --map-compose-light: light-dark(#5aa5f2, #a9d5ff);
+  /* Issues on the map: rules and glyphs match scene/look.ts ISSUE_COLOR (dark) and ISSUE_COLOR_LIGHT; text is a readable tint. */
+  --map-error: light-dark(#c9303d, #ff5f6d);
+  --map-error-text: light-dark(#a72932, #ff8f97);
+  --map-warning: light-dark(#b7791f, #f0b96b);
+  --map-warning-text: light-dark(#82500c, #f5cf94);
+
+  --sans: "Barlow", system-ui, sans-serif;
+  --condensed: "Barlow Semi Condensed", "Barlow", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+
+  /* A compact 4px rhythm shared by canvas chrome, panels, forms and dialogs. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --text-body: 14px;
+  --text-label: 13px;
+  --text-caption: 12px;
+  --control-height: 32px;
+  --control-height-sm: 28px;
+  --control-height-lg: 36px;
+  /* Shared controls also render outside inspector/dialog contexts. */
+  --panel-control-height: var(--control-height);
+  --panel-icon-target: var(--control-height);
+  --panel-caption-target: 24px;
+  --control-padding: 12px;
+  --select-icon-size: 14px;
+  --select-icon-inset: 12px;
+  --select-text-gap: 10px;
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 8px;
+  --panel-padding: 20px;
+  --workspace-gutter: 16px;
+  --workspace-page-max: 1280px;
+  --toolbar-padding: 12px;
+  --toolbar-height: 57px;
+  --motion-fast: 120ms;
+  /* Springs sampled from a damped oscillator (damping ratio 0.7 and 0.55). A
+   * transition using one settles exactly at the end of its duration. */
+  --spring: linear(0, 0.006 1.3%, 0.028 2.8%, 0.064 4.3%, 0.109 5.8%, 0.162 7.2%, 0.219 8.8%, 0.48 15%, 0.588 17.8%, 0.695 20.8%, 0.779 23.5%, 0.851 26.3%, 0.909 29%, 0.958 32%, 0.994 35%, 1.017 37.8%, 1.033 40.8%, 1.043 44%, 1.046 47.5%, 1.042 53%, 1.015 67.8%, 1.004 76.5%, 0.998 88.5%, 1);
+  --spring-bounce: linear(0, 0.006 1%, 0.03 2.3%, 0.069 3.5%, 0.131 5%, 0.192 6.3%, 0.26 7.5%, 0.553 12.5%, 0.679 14.8%, 0.792 17%, 0.89 19.3%, 0.969 21.5%, 1.031 23.8%, 1.076 26%, 1.105 28.2%, 1.119 30%, 1.125 31.8%, 1.126 33.5%, 1.121 35.5%, 1.103 39%, 1.043 47.3%, 1.019 51.2%, 0.999 55.8%, 0.988 60.5%, 0.984 67.5%, 1 87.5%, 1);
+  --elevation-card: 0 1px 2px light-dark(#2239580b, transparent);
+  --elevation-popover: 0 12px 36px light-dark(#233c602e, #0005);
+  --elevation-dialog: 0 24px 80px light-dark(#2238584d, rgb(0 0 0 / .35));
+  --dialog-scrim: light-dark(#20345245, rgb(5 9 15 / .6));
+  --bar: 52px;
+  --inspector: clamp(380px, 32vw, 480px);
+  --activity-drawer: min(340px, 42dvh);
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2385909c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+@theme inline {
+  --spacing: 4px;
+  --color-paper: var(--paper);
+  --color-sheet: var(--sheet);
+  --color-ink: var(--ink);
+  --color-graphite: var(--graphite);
+  --color-faint: var(--faint);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-wash: var(--wash);
+  --color-field: var(--field);
+  --color-field-rule: var(--field-rule);
+  --color-selected: var(--selected);
+  --color-selected-ink: var(--selected-ink);
+  --color-selected-rule: var(--selected-rule);
+  --color-local: var(--local);
+  --color-dev: var(--dev);
+  --color-prod: var(--prod);
+  --color-refuse: var(--refuse);
+  --color-refuse-wash: var(--refuse-wash);
+  --color-accept: var(--accept);
+  --color-accept-wash: var(--accept-wash);
+  --color-caution: var(--caution);
+  --color-caution-wash: var(--caution-wash);
+  --color-info-wash: var(--info-wash);
+  --color-quiet: var(--quiet);
+  --color-added: var(--added);
+  --color-removed: var(--removed);
+  --color-access-identity: var(--access-identity);
+  --color-access-role: var(--access-role);
+  --color-access-path: var(--access-path);
+  --color-access-state: var(--access-state);
+  --color-access-limit: var(--access-limit);
+  --color-map-ground: var(--map-ground);
+  --color-map-surface: var(--map-surface);
+  --color-map-panel: var(--map-panel);
+  --color-map-ink: var(--map-ink);
+  --color-map-title: var(--map-title);
+  --color-map-text: var(--map-text);
+  --color-map-muted: var(--map-muted);
+  --color-map-focus: var(--map-focus);
+  --color-map-rule: var(--map-rule);
+  --color-map-hairline: var(--map-hairline);
+  --color-map-edge: var(--map-edge);
+  --color-map-edge-strong: var(--map-edge-strong);
+  --color-map-hover: var(--map-hover);
+  --color-map-tile: var(--map-tile);
+  --color-map-tile-rule: var(--map-tile-rule);
+  --color-map-tile-rule-hover: var(--map-tile-rule-hover);
+  --color-map-knob: var(--map-knob);
+  --color-map-compose: var(--map-compose);
+  --color-map-compose-deep: var(--map-compose-deep);
+  --color-map-compose-light: var(--map-compose-light);
+  /* The resting whale: map-muted mixed into map-ground, opaque so draining water never shows through. */
+  --color-map-compose-off: color-mix(in srgb, var(--map-muted) 55%, var(--map-ground));
+  --color-map-compose-off-hover: color-mix(in srgb, var(--map-muted) 70%, var(--map-ground));
+  --color-map-row: var(--map-row);
+  --color-map-error: var(--map-error);
+  --color-map-error-text: var(--map-error-text);
+  --color-map-warning: var(--map-warning);
+  --color-map-warning-text: var(--map-warning-text);
+  --font-sans: var(--sans);
+  --font-condensed: var(--condensed);
+  --font-mono: var(--mono);
+  --text-body: 14px;
+  --text-label: 13px;
+  --text-caption: 12px;
+  --text-meta: 11px;
+  --text-micro: 10px;
+  --text-step-minus1: var(--step--1);
+  --text-step0: var(--step-0);
+  --text-step1: var(--step-1);
+  --text-step2: var(--step-2);
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --shadow-popover: var(--elevation-popover);
+  --shadow-compose: 0 10px 30px -10px light-dark(#1d63ed40, #1d63ed80), inset 0 1px 0 light-dark(#ffffff, #ffffff0d);
+  --shadow-compose-rest: 0 4px 16px light-dark(#1b24301a, #0003), inset 0 1px 0 light-dark(#ffffff, #ffffff06);
+  --shadow-map-float: 0 3px 12px light-dark(#1b24301f, #0004), inset 0 1px 0 light-dark(#ffffff, #ffffff0a);
+  --shadow-compose-glow: 0 0 14px #3b9bff47;
+  --animate-deploy-pulse: deploy-pulse 1.4s ease-in-out infinite;
+  --animate-ws-pulse: ws-pulse 1.6s ease-in-out infinite;
+  /* Local runtime switch (views/map/ComposePreview.tsx). State changes are
+   * transitions there; these are only its idle loops and one-shot accents. */
+  --animate-compose-bob: compose-bob 4.2s ease-in-out 1s infinite;
+  --animate-compose-drift: compose-drift 2.6s linear infinite;
+  --animate-compose-ripple: compose-ripple 1s cubic-bezier(.2,.7,.3,1) both;
+  --animate-compose-spout: compose-spout 900ms cubic-bezier(.2,.7,.3,1) both;
+  --animate-compose-sweep: compose-sweep 1.2s cubic-bezier(.45,.05,.25,1) both;
+  /* Stopping: the whale's colour and the water's light ebb together while it winds down.
+   * Slow and shallow on purpose: it should read as resting breath, not a warning. */
+  --animate-compose-breathe: compose-breathe 3.6s cubic-bezier(.45,0,.55,1) infinite;
+  --animate-compose-ebb: compose-ebb 3.6s cubic-bezier(.45,0,.55,1) infinite;
+  @keyframes compose-breathe {
+    0%, 100% { color: var(--color-map-compose); }
+    50% { color: color-mix(in srgb, var(--color-map-compose) 62%, var(--color-map-compose-off)); }
+  }
+  @keyframes compose-ebb { 50% { opacity: .65; } }
+  @keyframes compose-bob {
+    0%, 100% { translate: 0 0; rotate: 0deg; }
+    50% { translate: 0 -1px; rotate: -1.2deg; }
+  }
+  /* The wave paths repeat every 22 units, so this loops seamlessly. */
+  @keyframes compose-drift { to { translate: 22px 0; } }
+  @keyframes compose-ripple {
+    0% { scale: .3; opacity: 0; }
+    12% { opacity: .9; }
+    100% { scale: 1.3; opacity: 0; }
+  }
+  @keyframes compose-spout {
+    0% { translate: 0 0; scale: .3; opacity: 0; }
+    18% { opacity: 1; }
+    60% { translate: calc(var(--spout-x, 0px) * .6) -9px; scale: 1; opacity: .95; }
+    100% { translate: var(--spout-x, 0px) -7px; scale: .8; opacity: 0; }
+  }
+  @keyframes compose-sweep {
+    0% { --compose-sweep: 200deg; opacity: 0; }
+    14%, 70% { opacity: 1; }
+    100% { --compose-sweep: 560deg; opacity: 0; }
+  }
+  /* Contract-chain rail (views/graphql/GraphQLChainBand.tsx). While a check runs, one highlight crosses
+   * the four rail segments in turn: each segment's highlight moves during its quarter of the cycle,
+   * offset by animation-delay, and stays hidden for the rest. */
+  --animate-chain-scan: chain-scan 2.4s linear infinite;
+  @keyframes chain-scan {
+    0% { translate: -100% 0; opacity: 1; }
+    25% { translate: 0 0; opacity: 1; }
+    25.01%, 100% { translate: 0 0; opacity: 0; }
+  }
+  @keyframes deploy-pulse { 50% { opacity: 0.35; } }
+  @keyframes ws-pulse { 50% { opacity: 0.5; } }
+}
+
+/* Registered so the Local runtime switch's border light can rotate its conic gradient. */
+@property --compose-sweep {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 200deg;
+}

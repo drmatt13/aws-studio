@@ -1,0 +1,516 @@
+import { createSnapshotFixture } from "./support/source-fixture";
+import { applicationVpc as fixtureVpc } from "../../scripts/test-project-declarations";
+import assert from "./support/assert";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { after, before, test } from "node:test";
+import { defineDatabase, defineFrameworkConfig, INTERFACE_ENDPOINT_SERVICES, defineNetwork, defineStacks, dynamodb, invokeLambda, invokesAgent, stack, runsTask, sequence, startsWorkflow, trigger, workflow, type FrameworkConfig } from "aws-studio/config";
+import type { IDatabaseInstance } from "aws-cdk-lib/aws-rds";
+import type { UserPool } from "aws-cdk-lib/aws-cognito";
+import type { ITable } from "aws-cdk-lib/aws-dynamodb";
+import { defaults } from "../../scripts/test-project-declarations";
+import type { Snapshot } from "../shared/model";
+import { projectModel } from "../server/model/project";
+import { SnapshotBuilder, type StudioState } from "../server/snapshot";
+import { fieldEditability, SourceFiles } from "../server/source";
+import { locateConfigSource } from "aws-studio/source-index";
+import { ROOT_ENV_STACK_OUTPUTS } from "aws-studio/cli/root-env-outputs";
+import { withExportStacks } from "../server/source/export-stacks";
+import { developmentLogScope } from "../shared/development-log-scope";
+import { indexModel } from "../src/lookup";
+import { aggregateConnections } from "../src/connections";
+import { presentConnection, presentRelationship } from "../src/connection-presentation";
+
+/**
+ * The model is the framework's answers, reshaped. These tests hold it to the
+ * real repository — where the relationships are known — and to small configs
+ * whose lanes and placement can be predicted from the framework's rules alone.
+ */
+
+let repositoryRoot: string;
+let fixture: ReturnType<typeof createSnapshotFixture>;
+let builder: SnapshotBuilder;
+let state: StudioState;
+let snapshot: Snapshot;
+
+before(async () => {
+  fixture = createSnapshotFixture(); repositoryRoot = fixture.root; builder = new SnapshotBuilder(repositoryRoot);
+  state = await builder.refresh();
+  snapshot = state.snapshot;
+});
+after(async () => { await builder?.dispose(); fixture?.dispose(); });
+
+test("the repository's synchronous workflow Lambda has local log scope without event replay", () => {
+  const model = snapshot.models.dev, step = model.targets.find(target => target.ref === "lambda:invocation-test-step")!;
+  assert.equal(step.role, "event"); assert.equal(step.compute.kind === "lambda" && step.compute.localReplay, undefined);
+  assert.ok(model.workflows.some(workflow => workflow.targets.includes(step.ref)));
+  assert.equal(developmentLogScope(model, step.ref)?.kind, "partial");
+  assert.equal(developmentLogScope(model, "lambda:cognito-pre-signup-trigger")?.kind, "unsupported");
+});
+
+test("all current connection titles use action/value presentation in both environments", () => {
+  for (const model of Object.values(snapshot.models)) {
+    const index = indexModel(model);
+    for (const edge of model.edges) {
+      const result = presentRelationship(edge, index);
+      assert.match(result.title, /^[^:\r\n]+: \S/, `${model.mode} ${edge.relation}: ${result.title}`);
+      assert.equal(result.title, `${result.action}: ${result.value}`);
+    }
+    for (const group of aggregateConnections(model, Object.values(snapshot.models))) {
+      assert.match(presentConnection(group, model.mode, index).title, /^[^:\r\n]+: \S/);
+    }
+    for (const [relation, action] of [["startsWorkflow", "Starts workflow"], ["runsTask", "Runs task"], ["usesTool", "Exposes tool"]] as const) {
+      const connection = model.edges.find(edge => edge.relation === relation)!;
+      assert.ok(connection);
+      assert.equal(presentRelationship(connection, index).title, `${action}: ${index.targets.get(connection.to)!.title}`);
+    }
+  }
+});
+
+test("managed output stacks match the root exporter, reuse catalog ids, and carry only public symbolic outputs", () => {
+  for (const model of Object.values(snapshot.models)) {
+    const stacks = model.resources.filter((item) => item.kind === "stack" && item.stackOutputs?.length);
+    for (const stack of stacks) assert.equal(new Set(stack.stackOutputs!.map(output => output.name)).size, stack.stackOutputs!.length, `${stack.stackClass} exposes each symbolic output once`);
+    assert.deepEqual(stacks.map((item) => item.stackClass).sort(), Object.keys(ROOT_ENV_STACK_OUTPUTS).sort());
+    assert.equal(stacks.find((item) => item.stackClass === "CognitoStack")?.id, "resource:cognito");
+    assert.equal(stacks.find((item) => item.stackClass === "RdsStack")?.id, "resource:rds");
+    assert.equal(stacks.find((item) => item.stackClass === "DevLambdaReplayStack")?.absent, model.mode !== "dev");
+    assert.equal(stacks.find((item) => item.stackClass === "FrontendWebsiteS3Stack")?.absent, model.mode !== "prod");
+    assert.equal(stacks.find((item) => item.stackClass === "HttpApiGatewayStack")?.absent, model.mode !== "prod");
+    const webSocketBuilt = model.targets.some((target) => (target.role === "webSocket" || target.role === "webSocketAuthorizer") && (model.mode === "dev" ? target.lanes.dev : target.lanes.prod));
+    assert.equal(stacks.find((item) => item.stackClass === "WebSocketApiStack")?.absent, !webSocketBuilt);
+    assert.ok(stacks.every((item) => item.frameworkManaged && snapshot.source.entities[item.id]?.key));
+    assert.ok(!model.resources.some((item) => item.stackClass === "AsynchronousLambdaFunctionsStack" || item.stackClass === "EcsTasksStack"));
+    assert.ok(!stacks.flatMap((item) => item.stackOutputs!).some((output) => output.name === "ReplayDeadLetterQueueUrl" || output.name === "FrontendWebsiteBucketArn"));
+  }
+});
+
+test("declaring a displayed framework stack in the catalog reuses its resource id and clears the missing-catalog flag", () => {
+  const model = snapshot.models.dev;
+  const original = model.resources.find((item) => item.stackClass === "DevLambdaReplayStack")!;
+  assert.equal(original.frameworkStack, true);
+  const { frameworkStack: _origin, ...catalogFields } = original;
+  const catalogEntry = { ...catalogFields, id: "resource:replay", path: ["replay"] };
+  const projected = withExportStacks({ ...model, resources: model.resources.map((item) => item.id === original.id ? catalogEntry : item) }, state.built.exportStacks);
+  const matches = projected.resources.filter((item) => item.stackClass === "DevLambdaReplayStack");
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]!.id, "resource:replay");
+  assert.equal(matches[0]!.frameworkStack, undefined);
+  assert.equal(matches[0]!.stackUsage?.status, "referenced", "CDK construction is independent of catalog membership");
+  assert.equal(model.resources.find((item) => item.stackClass === "RdsStack")?.frameworkStack, undefined, "a development-absent database is still declared in the catalog");
+});
+
+test("both modes of the real repository evaluate without a diagnostic", () => {
+  for (const mode of ["dev", "prod"] as const) {
+    const model = snapshot.models[mode];
+    assert.equal(model.status, "ok", JSON.stringify(model.diagnostics));
+    assert.ok(model.targets.length > 0);
+  }
+});
+
+test("replay permissions point to the public bucket, including catalog stack identities", () => {
+  for (const model of Object.values(snapshot.models)) {
+    const replay = model.resources.find((item) => item.stackClass === "DevLambdaReplayStack")!;
+    const enabled = model.targets.filter((target) => target.role === "event" && target.compute.kind === "lambda" && target.compute.localReplay);
+    const edges = model.edges.filter((edge) => edge.relation === "localReplay");
+    assert.deepEqual(edges.map((edge) => edge.from).sort(), enabled.map((target) => target.ref).sort());
+    assert.ok(edges.length > 0);
+    assert.ok(edges.every((edge) => edge.to === `${replay.id}.bucket` && edge.provenance === "derived"));
+    assert.ok(edges.every(edge => edge.authorization?.grants.every(grant => grant.scope === `${replay.id}.bucket`)));
+    const members = model.resources.filter(resource => resource.parent === replay.id);
+    assert.deepEqual(members.map(resource => resource.path.at(-1)).sort(), ["bucket", "deadLetterQueue", "queue"]);
+    assert.ok(members.every(member => member.absent === replay.absent && snapshot.source.entities[member.id]?.key));
+    assert.equal(replay.absent, model.mode !== "dev");
+    for (const target of model.targets) assert.equal(!!model.fields[target.ref]?.some((fact) => fact.field === "events.localReplay"), target.role === "event");
+    const projected = withExportStacks({ ...model, resources: model.resources.map((item) => item.id === replay.id ? { ...item, id: "resource:replay", frameworkStack: undefined } : item) }, state.built.exportStacks);
+    assert.equal(projected.edges.filter((edge) => edge.relation === "localReplay").length, edges.length);
+    assert.ok(projected.edges.filter((edge) => edge.relation === "localReplay").every((edge) => edge.to === "resource:replay.bucket"));
+  }
+});
+
+test("database consumer facts preserve normalized reader, direct and per-process pool policy", () => {
+  const catalog = defineStacks({ db: stack<{ database: IDatabaseInstance }>() });
+  const database = defineDatabase({ id: "primary", resource: catalog.db.database, vpc: fixtureVpc, subnet: "isolated", engine: "postgres", databaseName: "app_db" });
+  const config = defineFrameworkConfig({ networks: [fixtureVpc], stacks: catalog, database,
+    defaults: { ...defaults, database: { pool: { maxConnections: 17 } } }, http: [], webSocket: [], services: [],
+    events: [{ reader: { directory: "compute/test/fixtures/workload-handler", localReplay: true, vpc: fixtureVpc, subnet: "isolated", database: { readers: true, pool: { maxConnections: 3 } } } }],
+    tasks: [{ migrate: { directory: "compute/test/fixtures/task-worker", deploy: "cloud-only", cloud: { vpc: fixtureVpc }, database: { connection: "direct" } } }],
+  });
+  for (const mode of ["dev", "prod"] as const) {
+    const model = projectModel(config, { mode, });
+    const consumers = model.managedDatabase!.consumers!;
+    assert.equal(consumers.length, 2);
+    assert.deepEqual(consumers.find(item => item.target === "lambda:reader"), { target: "lambda:reader", title: "reader", connection: "application", readers: true, maxConnections: 3 });
+    assert.deepEqual(consumers.find(item => item.target === "task:migrate"), { target: "task:migrate", title: "migrate", connection: "direct", readers: false, maxConnections: 17 });
+  }
+});
+
+test("relationships are the framework's, with their own relation", () => {
+  const edges = snapshot.models.dev.edges;
+  const has = (relation: string, from: string, to: string) =>
+    edges.some((edge) => edge.relation === relation && edge.from === from && edge.to === to);
+  assert.ok(has("routes", "route:http:/graphql", "lambda:graphql-api"));
+  assert.ok(has("usesGateway", "agent:example-agent", "gateway:agentcore:example-gateway"));
+  assert.ok(has("usesTool", "gateway:agentcore:example-gateway", "lambda:add-numbers"));
+  assert.ok(has("usesTool", "gateway:agentcore:example-gateway", "lambda:multiply-numbers"));
+  assert.equal(edges.some(edge => edge.from === "agent:example-agent" && edge.relation === "usesTool"), false);
+  const gateway = snapshot.models.dev.gateways!.find(item => item.protocol === "agentcore")!;
+  assert.equal(gateway.id, "gateway:agentcore:example-gateway");
+  assert.equal(gateway.protocol === "agentcore" && gateway.constructId, "ExampleAgent");
+  const adapter = snapshot.models.dev.targets.find(item => item.ref === "agent:example-agent")!.environment.find(item => item.name === "FRAMEWORK_AGENTCORE_ADAPTER");
+  assert.equal(adapter?.via, "agentcore");
+  assert.ok(has("database", "lambda:graphql-api", "local:postgres"));
+  assert.ok(snapshot.models.prod.edges.some((edge) => edge.relation === "database" && edge.from === "lambda:graphql-api" && edge.to === "resource:rds.database"));
+  assert.ok(has("grant", "lambda:mfa", "resource:cognito.userPool"));
+  const userPool = edges.find((edge) => edge.from === "lambda:graphql-api" && edge.label === "USER_POOL_ID");
+  assert.equal(userPool?.provenance, "derived", "handed by userPool: true, not written by the author");
+});
+
+test("read connections locate authored entries, field declarations, assignments and linking", () => {
+  for (const model of Object.values(snapshot.models)) {
+    const edge = model.edges.find((item) => item.from === "lambda:sign-out" && item.label === "TRUSTED_FRONTEND_ORIGINS")!;
+    assert.ok(edge);
+    const evidence = edge.evidence!;
+    for (const [role, text] of [["declared", "TRUSTED_FRONTEND_ORIGINS: stacks.cognito.trustedOriginsCsv"], ["field", "public readonly trustedOriginsCsv: string"], ["assigned", "this.trustedOriginsCsv ="], ["linked", "linkResources(this, stacks.cognito)"]] as const) {
+      const item = evidence.find((item) => item.role === role)!;
+      assert.ok(item?.excerpt?.includes(text), `${role}: ${JSON.stringify(evidence)}`);
+      const line = readFileSync(path.join(repositoryRoot, item.location.file), "utf8").split("\n")[item.location.line - 1]!;
+      assert.ok(line.includes(text));
+    }
+    const derived = model.edges.find((item) => item.from === "lambda:graphql-api" && item.label === "USER_POOL_ID")!;
+    assert.ok(derived.evidence?.some((item) => item.role === "derived" && item.excerpt?.includes("userPool: true")));
+    for (const item of model.edges.filter((edge) => ["env", "secret", "grant"].includes(edge.relation))) {
+      assert.ok(item.evidence?.some((evidence) => evidence.role === "declared" || evidence.role === "derived"), `${item.id}: ${JSON.stringify(item.evidence)}`);
+      assert.ok(item.evidence?.every((evidence) => evidence.location.file.endsWith(".ts") && !evidence.excerpt?.includes("\n")), item.id);
+    }
+  }
+});
+
+test("task, workflow and integration relationships come from an isolated config", () => {
+  const catalog = defineStacks({ data: stack<{ readonly records: ITable }>() });
+  const config = defineFrameworkConfig({ networks: [fixtureVpc],
+    stacks: catalog, defaults, webSocket: [], services: [],
+    http: [{ "/process": { directory: "compute/test/fixtures/caller", methods: ["POST"], cloud: { bindings: [runsTask("worker"), startsWorkflow("process"), invokesAgent("assistant")] } } }],
+    events: [{ worker: { directory: "compute/test/fixtures/workload-handler" } }],
+    tasks: [{ worker: { cloud: { vpc: fixtureVpc }, directory: "compute/test/fixtures/task-worker", deploy: "both" } }],
+    agents: [{ assistant: {} }],
+    workflows: [{ process: workflow(() => sequence(invokeLambda("worker"), dynamodb.put(catalog.data.records, { item: { pk: "example" } })), { timeoutSeconds: 60 }) }],
+  });
+  const model = projectModel(config as unknown as FrameworkConfig, { mode: "dev", });
+  for (const [relation, from, to] of [
+    ["runsTask", "lambda:caller", "task:worker"],
+    ["startsWorkflow", "lambda:caller", "workflow:process"],
+    ["invokesAgent", "lambda:caller", "agent:assistant"],
+    ["step", "workflow:process", "lambda:worker"],
+    ["integration", "workflow:process", "resource:data.records"],
+  ]) assert.ok(model.edges.some((edge) => edge.relation === relation && edge.from === from && edge.to === to), relation);
+  const launchPermission = model.edges.find((edge) => edge.relation === "runsTask")!;
+  assert.equal(launchPermission.label, "Launch ECS task");
+  assert.equal(launchPermission.detail, 'runsTask("worker")');
+  assert.ok(launchPermission.authorization?.grants.some(grant => grant.actions?.includes("ecs:RunTask")));
+  assert.ok(launchPermission.authorization?.grants.some(grant => grant.actions?.includes("iam:PassRole")));
+  assert.equal(model.edges.find(edge => edge.relation === "startsWorkflow")?.detail, 'startsWorkflow("process")');
+  assert.equal(model.edges.find(edge => edge.relation === "invokesAgent")?.detail, 'invokesAgent("assistant")');
+});
+
+test("lanes carry the framework's special rules", () => {
+  const target = (ref: string) => snapshot.models.dev.targets.find((candidate) => candidate.ref === ref)!;
+  const tool = target("lambda:add-numbers");
+  assert.equal(tool.lanes.origin, "derived");
+  assert.deepEqual(tool.lanes.derivedFrom, ["gateway:agentcore:example-gateway"]);
+  const event = target("lambda:cognito-pre-signup-trigger");
+  assert.equal(event.lanes.origin, "default");
+  assert.equal(event.lanes.dev, true, "AWS invokes it, so the dev graph holds it");
+  const service = target("service:example-service");
+  assert.equal(service.lanes.deploy, "local-only");
+  assert.deepEqual([service.lanes.local, service.lanes.dev, service.lanes.prod], [true, false, false]);
+  const http = target("lambda:graphql-api");
+  assert.deepEqual([http.lanes.local, http.lanes.dev, http.lanes.prod], [true, false, true]);
+});
+
+test("the frontend workflow has its authenticated starter and both execution steps", () => {
+  for (const model of Object.values(snapshot.models)) {
+    const route = model.routes.find((route) => route.path === "/test/start-workflow");
+    assert.equal(route?.target, "lambda:test-start-workflow");
+    assert.equal(route?.auth, true);
+    assert.equal(model.targets.find((target) => target.ref === route?.target)?.userPool, true);
+    for (const [relation, from, to] of [
+      ["startsWorkflow", "lambda:test-start-workflow", "workflow:invocation-test-workflow"],
+      ["step", "workflow:invocation-test-workflow", "lambda:invocation-test-step"],
+      ["step", "workflow:invocation-test-workflow", "task:invocation-test-task"],
+    ]) assert.ok(model.edges.some((edge) => edge.relation === relation && edge.from === from && edge.to === to), `${model.mode}: ${relation}`);
+  }
+});
+
+test("the frontend task starter invokes the shared task directly", () => {
+  for (const model of Object.values(snapshot.models)) {
+    const route = model.routes.find((route) => route.path === "/test/run-task");
+    assert.equal(route?.target, "lambda:test-run-task");
+    assert.equal(route?.auth, true);
+    assert.equal(model.targets.find((target) => target.ref === route?.target)?.userPool, true);
+    const bindings = model.edges.filter((edge) => edge.from === route?.target && ["runsTask", "startsWorkflow"].includes(edge.relation));
+    assert.deepEqual(bindings.map((edge) => [edge.relation, edge.to]), [["runsTask", "task:invocation-test-task"]]);
+    assert.equal(model.targets.filter((target) => target.ref === "task:invocation-test-task").length, 1);
+  }
+});
+
+test("an absent catalog entry is absent in the graph that leaves it out, and only there", () => {
+  const absent = (mode: "dev" | "prod", id: string) =>
+    snapshot.models[mode].resources.find((resource) => resource.id === id)?.absent;
+  assert.equal(absent("dev", "resource:rds"), true);
+  assert.equal(absent("prod", "resource:rds"), false);
+  assert.equal(snapshot.source.catalog["resource:rds"]?.condition, "PROD_DEPLOYMENT");
+});
+
+test("a stack's members come from its class, including ones nothing reads yet", () => {
+  const bucket = snapshot.models.dev.resources.find((resource) => resource.id === "resource:referenceExamples.documentsBucket");
+  assert.equal(bucket?.memberSource, "class");
+  assert.equal(bucket?.typeText, "s3.Bucket");
+  assert.ok(snapshot.source.links.referenceExamples?.[0]?.file.endsWith("reference-example-stack.ts"));
+});
+
+test("referenceExamples exposes source-backed CDK flow in both graphs", () => {
+  for (const mode of ["dev", "prod"] as const) {
+    const edges = snapshot.models[mode].edges.filter((edge) => edge.relation === "cdk");
+    for (const [from, to, label] of [
+      ["documentsBucket", "notificationsTopic", "EventBridge rule"],
+      ["notificationsTopic", "processingQueue", "SNS subscription"],
+      ["processingQueue", "deadLetterQueue", "Dead-letter queue"],
+    ]) {
+      const edge = edges.find((item) => item.from === `resource:referenceExamples.${from}` && item.to === `resource:referenceExamples.${to}`);
+      assert.equal(edge?.label, label);
+      assert.equal(edge?.provenance, "source");
+      assert.ok(edge?.source?.file.endsWith("reference-example-stack.ts"));
+    }
+  }
+  const cached = JSON.parse(readFileSync(path.join(repositoryRoot, ".cache/framework-studio/cdk-links.json"), "utf8"));
+  assert.equal(cached.version, 2);
+  assert.ok(cached.edges.length >= 3);
+  assert.ok(Object.keys(cached.files).includes("cdk-app/lib/app/reference-example-stack.ts"));
+});
+
+test("the native Cognito hooks connect the public pool to their events in both lenses", () => {
+  for (const model of Object.values(snapshot.models)) {
+    const hooks = model.edges.filter((edge) => edge.relation === "trigger");
+    assert.deepEqual(hooks.map((edge) => [edge.from, edge.to, edge.label]).sort(), [
+      ["resource:cognito.userPool", "lambda:cognito-pre-signup-trigger", "preSignUp"],
+      ["resource:cognito.userPool", "lambda:cognito-custom-message", "customMessage"],
+      ["resource:cognito.userPool", "lambda:cognito-post-confirmation-trigger", "postConfirmation"],
+      ["resource:cognito.userPool", "lambda:cognito-pre-token-generation", "preTokenGeneration"],
+    ].sort());
+    for (const edge of hooks) {
+      assert.ok(edge.source);
+      assert.ok(edge.source.file.endsWith("cognito-stack.ts"));
+      const line = readFileSync(path.resolve(repositoryRoot, edge.source.file), "utf8").split(/\r?\n/)[edge.source.line - 1];
+      assert.ok(line?.includes(`${edge.label}: eventFunction(this, "${edge.to.replace("lambda:", "")}"`), `Hook evidence must locate its current native declaration: ${edge.label}`);
+    }
+    assert.ok(hooks.every((edge) => edge.evidence?.some((item) => item.role === "wired")));
+  }
+});
+
+test("typed trigger descriptors normalize to declared resource-to-event edges with adapter metadata", () => {
+  const catalog = defineStacks({ identity: stack<{ pool: UserPool }>() });
+  const config = defineFrameworkConfig({ networks: [fixtureVpc], stacks: catalog, defaults, http: [], webSocket: [], services: [], events: [{ event: { directory: "compute/test/fixtures/workload-handler", triggers: [trigger.cognito(catalog.identity.pool, { id: "signup", operation: "preSignUp", accepts: "cognito" })] } }] });
+  for (const mode of ["dev", "prod"] as const) {
+    const model = projectModel(config as unknown as FrameworkConfig, { mode, });
+    const edge = model.edges.find((edge) => edge.relation === "trigger")!;
+    assert.equal(edge.from, "resource:identity.pool");
+    assert.equal(edge.to, "lambda:event");
+    assert.equal(edge.provenance, "declared");
+    assert.equal(edge.attachment, "identity.pool/signup");
+    assert.equal(model.triggers?.[0]?.key, edge.attachment);
+    assert.ok(model.triggerAdapters?.some((adapter) => adapter.kind === "cognito"));
+  }
+});
+
+test("every target and route is located, and its key is what the source writes there", () => {
+  const model = snapshot.models.dev;
+  assert.deepEqual(snapshot.source.problems, []);
+  for (const entity of [...model.targets.map((target) => target.ref), ...model.routes.map((route) => route.id)]) {
+    const source = snapshot.source.entities[entity];
+    assert.ok(source, `${entity} has a source location`);
+    const text = readFileSync(path.join(repositoryRoot, source.key.file), "utf8").slice(source.key.start, source.key.end);
+    const key = /\["(.+?)"\]/.exec(source.origin)?.[1];
+    const chain = source.origin.split("].")[1];
+    assert.equal(text.replace(/^["']|["']$/g, ""), chain ?? key, entity);
+  }
+});
+
+test("an editable literal is one the evaluated config agrees with", () => {
+  const editability = snapshot.source.editability;
+  assert.deepEqual(editability["service:example-service"]?.deploy, { kind: "literal", text: '"local-only"' });
+  assert.deepEqual(editability["lambda:graphql-api"]?.["lambda.memorySize"], { kind: "literal", text: "512" });
+  assert.deepEqual(editability["lambda:graphql-api"]?.deploy, { kind: "absent" });
+  assert.deepEqual(editability["lambda:add-numbers"]?.deploy, { kind: "absent" }, "a tool follows its agents until a Deploy override is authored");
+});
+
+test("shared defaults locate imported source and keep computed defaults read-only", () => {
+  const group = "defaults:lambda";
+  const fact = snapshot.models.dev.fields[group].find((fact) => fact.field === "defaults.lambda.bundling.minify")!;
+  const source = snapshot.source.entities[group].value;
+  assert.equal(source.file, "framework-config/defaults.ts");
+  assert.equal(snapshot.source.editability[group][fact.field].kind, "literal");
+  assert.ok(fact.usage!.inherited > 0);
+  assert.equal(snapshot.models.dev.fields["defaults:webSocket"].find((fact) => fact.field.endsWith("timeoutSeconds"))!.effective, 3);
+  assert.equal(snapshot.models.dev.fields["defaults:database"].find((fact) => fact.field.endsWith("maxConnections"))!.effective, 10);
+  const file = path.join(repositoryRoot, source.file);
+  const original = readFileSync(file, "utf8");
+  assert.ok(original.includes("minify: true"));
+  const files = new SourceFiles(new Map([[file, original.replace("minify: true", "minify: true && true")]]));
+  assert.ok(state.built.located);
+  const located = locateConfigSource(path.join(repositoryRoot, "framework.config.ts"), { repositoryRoot, host: files.host() });
+  const result = fieldEditability(files, located, "defaults", fact);
+  assert.equal(result.kind, "computed");
+});
+
+test("Lambda build details and editable fields distinguish TypeScript bundles from Dockerfile images", () => {
+  const model = snapshot.models.dev;
+  const node = model.targets.find((target) => target.ref === "lambda:graphql-api")!;
+  assert.equal(node.compute.kind, "lambda");
+  if (node.compute.kind !== "lambda") return;
+  assert.equal(node.compute.implementation, "typescript");
+  assert.equal(node.compute.runtime, "nodejs24");
+  assert.equal(node.compute.handler, "lambdaHandler");
+  assert.deepEqual(node.compute.bundling, { minify: true, sourceMap: false });
+  const architecture = model.fields[node.ref]!.find((fact) => fact.field === "lambda.architecture")!;
+  assert.equal(architecture.effective, "arm64");
+  assert.equal(architecture.provenance, "defaults.lambda.architecture");
+  const container = model.targets.find((target) => target.ref === "lambda:python-example")!;
+  assert.equal(container.compute.kind === "lambda" && container.compute.implementation, "container");
+  assert.ok(container.compute.kind === "lambda" && container.compute.runtime === undefined && container.compute.handler === undefined);
+  assert.ok(model.fields[container.ref]!.some((fact) => fact.field === "lambda.architecture"));
+  assert.ok(!model.fields[container.ref]!.some((fact) => fact.field === "lambda.runtime" || fact.field.startsWith("lambda.bundling.")));
+});
+
+test("Cognito event Lambda build settings are editable and an outdated registry has a distinct diagnostic", () => {
+  const ref = "lambda:cognito-pre-signup-trigger";
+  for (const field of ["lambda.architecture", "lambda.packaging", "lambda.runtime", "lambda.bundling.minify", "lambda.bundling.sourceMap", "lambda.logRetentionDays"]) {
+    assert.deepEqual(snapshot.source.editability[ref]?.[field], { kind: "absent" }, field);
+  }
+  assert.equal(snapshot.source.entities[ref]?.key.file, "framework-config/workloads/events.ts");
+  assert.ok(state.built.located);
+  const fact = snapshot.models.dev.fields[ref]![0]!;
+  const result = fieldEditability(new SourceFiles(), state.built.located, 'events["cognito-pre-signup-trigger"]', { ...fact, field: "lambda.unloadedSetting" });
+  assert.equal(result.kind, "unsupported");
+  if (result.kind === "unsupported") assert.match(result.reason, /Restart Studio/);
+});
+
+test("Lambda settings inherit section defaults and Python has no Node bundling controls", () => {
+  const config = defineFrameworkConfig({ networks: [fixtureVpc],
+    defaults: {
+      lambda: { runtime: "nodejs24", packaging: "zip", architecture: "arm64", memorySize: 128, timeoutSeconds: 10, bundling: { minify: true } },
+      http: { architecture: "x86_64", runtime: "nodejs22", logRetentionDays: 14, bundling: { minify: false } },
+    },
+    http: {
+      "/node": { directory: "compute/http/node", methods: ["POST"], bundling: { sourceMap: false } },
+      "/python": { directory: "compute/http/python", methods: ["POST"], runtime: "python3.13", handler: "app.handle" },
+    },
+    webSocket: {}, events: {}, services: {}, tasks: {},
+  }) as unknown as FrameworkConfig;
+  const model = projectModel(config, { mode: "dev", });
+  const facts = model.fields["lambda:node"]!;
+  assert.equal(facts.find((fact) => fact.field === "lambda.architecture")?.provenance, "defaults.http.architecture");
+  assert.equal(facts.find((fact) => fact.field === "lambda.runtime")?.effective, "nodejs22");
+  assert.equal(facts.find((fact) => fact.field === "lambda.logRetentionDays")?.effective, 14);
+  assert.equal(facts.find((fact) => fact.field === "lambda.bundling.minify")?.effective, false);
+  const sourceMap = facts.find((fact) => fact.field === "lambda.bundling.sourceMap")!;
+  assert.equal(sourceMap.effective, false);
+  assert.deepEqual(sourceMap.inherited, { value: true, from: "the framework's default" });
+  const python = model.targets.find((target) => target.ref === "lambda:python")!;
+  assert.equal(python.compute.kind === "lambda" && python.compute.implementation, "python");
+  assert.equal(python.compute.kind === "lambda" && python.compute.handler, "app.handle");
+  assert.ok(!model.fields[python.ref]!.some((fact) => fact.field.startsWith("lambda.bundling.")));
+});
+
+test("Lambda concurrency is per-function, disabled by default and source editable", () => {
+  const concurrencyFields = ["lambda.reservedConcurrentExecutions", "lambda.provisionedConcurrentExecutions"];
+  for (const model of Object.values(snapshot.models)) {
+    for (const target of model.targets) {
+      for (const field of concurrencyFields) {
+        const fact = model.fields[target.ref]?.find((candidate) => candidate.field === field);
+        assert.equal(!!fact, target.kind === "lambda", `${target.ref} ${field}`);
+        if (!fact) continue;
+        assert.equal(fact.authored, undefined);
+        assert.equal(fact.effective, false);
+        assert.deepEqual(fact.inherited, { value: false, from: "the framework's default" });
+        const editability = snapshot.source.editability[target.ref]?.[field];
+        assert.equal(editability?.kind, fact.blocked ? "unsupported" : "absent");
+      }
+    }
+    for (const group of model.defaults ?? []) {
+      assert.ok(!model.fields[group.ref]?.some((fact) => concurrencyFields.some((field) => fact.field.endsWith(field.slice("lambda".length)))), `${group.ref} has no concurrency defaults`);
+    }
+  }
+  const config = defineFrameworkConfig({ networks: [fixtureVpc], defaults, http: [], webSocket: [], services: [],
+    events: [{ paused: { reservedConcurrentExecutions: 0 }, warm: { reservedConcurrentExecutions: 3, provisionedConcurrentExecutions: 2 } }],
+  });
+  const model = projectModel(config, { mode: "dev" });
+  const fact = (ref: string, key: string) => model.fields[ref]!.find((candidate) => candidate.field === `lambda.${key}`)!;
+  assert.equal(fact("lambda:paused", "reservedConcurrentExecutions").effective, 0);
+  assert.equal(fact("lambda:paused", "reservedConcurrentExecutions").authored, 0);
+  assert.equal(fact("lambda:paused", "provisionedConcurrentExecutions").effective, false);
+  assert.equal(fact("lambda:warm", "provisionedConcurrentExecutions").effective, 2);
+  assert.equal(fact("lambda:warm", "provisionedConcurrentExecutions").provenance, "declared on the entry");
+  const compute = model.targets.find((target) => target.ref === "lambda:warm")!.compute;
+  assert.equal(compute.kind === "lambda" && compute.reservedConcurrentExecutions, 3);
+  assert.equal(compute.kind === "lambda" && compute.provisionedConcurrentExecutions, 2);
+});
+
+test("the projection follows the framework's rules on a config of its own", () => {
+  // An isolated Lambda that runs a task reaches ECS only through its endpoint,
+  // which the framework refuses to leave out.
+  const network = defineNetwork({ id: "application", cloud: { constructId: "NetworkStack" }, cidr: "10.0.0.0/16", zones: 2, interfaceEndpoints: ["ecs"] });
+  const config = defineFrameworkConfig({
+    networks: [network],
+    defaults: { lambda: { runtime: "nodejs24", packaging: "zip", architecture: "arm64", memorySize: 128, timeoutSeconds: 10, bundling: {} } },
+    http: {
+      "/orders": { vpc: network,
+        directory: "compute/http/orders",
+        methods: ["POST"],
+        subnet: "isolated",
+        cloud: { bindings: [runsTask("rollup")] },
+      },
+    },
+    webSocket: {},
+    events: {},
+    services: {},
+    tasks: { rollup: { cloud: { vpc: network }, deploy: "both" } },
+  }) as unknown as FrameworkConfig;
+  const model = projectModel(config, { mode: "dev", });
+  assert.equal(model.status, "ok");
+  const orders = model.targets.find((target) => target.ref === "lambda:orders")!;
+  assert.deepEqual(orders.placement.kind === "vpc" && [orders.placement.subnet, orders.placement.egress], [
+    "isolated",
+    { ipv4: false, ipv6: false },
+  ]);
+  assert.equal(orders.lanes.origin, "default");
+  const task = model.targets.find((target) => target.ref === "task:rollup")!;
+  assert.equal(task.placement.kind === "vpc" && task.placement.subnet, "public");
+  assert.ok(model.edges.some((edge) => edge.relation === "runsTask" && edge.to === "task:rollup"));
+  const subnet = model.fields["lambda:orders"]?.find((fact) => fact.field === "lambda.subnet");
+  assert.deepEqual([subnet?.effective, subnet?.provenance, subnet?.authored], ["isolated", "declared on the entry", "isolated"]);
+  assert.equal(model.networks?.[0]?.monthlyCost.interfaceEndpoints, 14.6);
+});
+
+test("a VPC used only by WebSocket handlers follows the API deployment setting", () => {
+  const network = defineNetwork({ id: "realtime", cidr: "10.9.0.0/16", zones: 2 });
+  const config = defineFrameworkConfig({ networks: [network], defaults,
+    http: [], events: [], services: [],
+    webSocket: [{ $default: { directory: "compute/websocket/realtime", vpc: network, subnet: "private" } }],
+  });
+  {
+    const model = projectModel(config, { mode: "prod" });
+    assert.equal(model.status, "ok", JSON.stringify(model.diagnostics));
+    assert.equal(model.targets[0]!.lanes.prod, true);
+    assert.equal(model.networks![0]!.builtInProd, true, "network applicability agrees with its only consumer");
+  }
+});
+
+
+test("each mode exposes the complete framework endpoint catalog without gateway services", () => {
+  for (const model of Object.values(snapshot.models)) {
+    assert.deepEqual(model.interfaceEndpointServices, [...INTERFACE_ENDPOINT_SERVICES]);
+    assert.ok(!new Set<string>(model.interfaceEndpointServices).has("s3"));
+    assert.ok(!new Set<string>(model.interfaceEndpointServices).has("dynamodb"));
+  }
+});

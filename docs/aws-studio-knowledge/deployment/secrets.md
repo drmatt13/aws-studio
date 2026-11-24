@@ -1,0 +1,145 @@
+---
+id: deployment.secrets
+summary: Canonical private input storage, reviewed secret synchronization, and public metadata limits.
+read_when:
+  - Adding secrets/inputs or changing value editing, synchronization, or review artifacts
+source:
+  - packages/aws-studio/src/config/resources.ts
+  - packages/aws-studio/cdk/deployment.ts
+  - packages/aws-studio/src/config/requirements.ts
+  - client-app/server/deployment-inputs.ts
+  - packages/aws-studio/src/config/project-declarations.ts
+  - packages/aws-studio/cli/deployment-secrets.ts
+  - packages/aws-studio/cli/deployment-workspace.ts
+  - packages/aws-studio/cli/deploy.ts
+  - client-app/server/deployment-input-edits.ts
+related:
+  - runtime.environment
+  - deployment.planning-safety
+  - studio.editing
+---
+# Secrets and authored configuration
+
+Every secret has one catalog entry: `input.secret("NAME")` for a raw authored mode input, or a public ISecret member of `stack<T>()`. Raw authored values live only in the selected private input file (conventionally `cdk-app/.env.<mode>`), never config, templates, generated artifacts or pasted ARN maps. Do not expose a public string computed from secret contents. [Resource projections](../framework/resources-and-cdk.md) distinguish metadata/ARNs from values.
+
+Public catalog values have two distinct sources. `input.value("text")` (or a
+dev/prod value map) authors a nonsecret value in TypeScript; it has no dotenv key
+to fill or override. `input.fromEnv("NAME")` names an environment-linked input
+with explicit mode presence, defaults, choices and requirements. `resolveInput`
+owns their interpretation; downstream Studio, deployment and client export should
+consume that result instead of implementing another precedence rule. Deployment
+controls such as domains, frontend URL and the retention fallback are separately
+declared in `framework-config/inputs/deployment.ts`.
+They influence the graph rather than becoming workload variables automatically.
+
+The **CDK environment** inspector, under the **CDK environment files** island, lists both
+physical files' assignments as one set of variables with their declaration owners, including
+unknown or mode-inapplicable assignments. Editing does not change the map's Source or a named
+operational target; one private review writes whichever files changed, each checked against its
+own hash.
+
+The file editor derives sections from the input model's outermost parent groups and reuses their
+display names and saved descriptions; standalone inputs and secrets remain ungrouped. Every
+written assignment across both files, including blank assignments, must link to an environment
+input or secret in **Input parameters and secrets**. Unlinked variables are highlighted and produce
+a CDK environment resource error in both source modes. A declaration in either graph counts;
+mode-inapplicable assignments retain their separate **Not read** state. Source-only parameters
+have no environment link and cannot satisfy this requirement. Values are never needed for these errors.
+
+An undeclared variable is one issue across both files, listing each file that writes it. Its row
+offers an inline declaration form (name, input/secret type and an existing application input group
+or standalone placement) through the ordinary source creation review. Creation fixes the variable
+link, preserves authored values, and keeps the CDK environment selected after apply. Framework-managed
+groups are not creation destinations. Private value edits and declaration creation are reviewed
+separately. The row can instead stage removal from every file containing the variable, with undo
+before review; the private environment transaction removes all duplicate/multiline assignments,
+preserves unrelated bytes, redacts review values and rechecks every file hash before writing.
+
+Every variable the framework itself reads, rather than a workload, has exactly one owner: the
+deployment settings in `framework-config/inputs/deployment.ts`, the
+production database overrides (`DATABASE_SETTING_INPUTS`), or the local development tooling in
+`cdk-app/framework-inputs.ts` (Compose host ports, the local AWS
+profile and region, warm Lambda processes and the seeded test user). Studio projects them as three
+framework-managed input groups on the inputs island (`framework:deployment`, `framework:database`,
+`framework:local`), each entry an input with no default. `REQUIRED_FRAMEWORK_INPUTS` in that file lists
+the lines each environment's file must write (the uncommented framework lines of its template), so a
+file or template that drops one shows a missing value on its supply connection and an error on the
+group. Their reader, identity and environment policy stay read-only in Studio; values are edited in
+place through the file, like any input's. Literal enums in `framework-config/inputs/deployment.ts` and
+`cdk-app/framework-inputs.ts` can be edited through **Allowed values**, including removal of the
+restriction. This uses the guarded source review, preserves defaults/comments, and rejects lists
+that exclude declared defaults. Database choices follow the setting's type and remain read-only;
+computed declarations explain their source-owned boundary. Synthesis keeps the fallbacks its own declarations give. A catalog `fromEnv` or `secret` of
+the same name stays the catalog's. `client-app/test/framework-settings.test.ts` keeps both
+templates in step with the required list and requires every variable they name to belong to exactly
+one place.
+
+The sign-in providers are the one framework group declared in the catalog, because their client
+secrets are `input.secret` entries: `inputs.signInProviders` in
+`framework-config/auth/sign-in-providers.ts`
+holds each provider's client ID (and Microsoft's tenant ID) as inputs and its client secret as a
+secret. The entries declare no `managedBy`, so the application developer owns them, as it owns the
+Cognito stack that reads them. `frameworkInput: "authentication"` opens them in the framework
+input views and records an integration: Studio's Sign-in providers view relies on their names. A provider's lines are all or nothing per file, as
+`packages/aws-studio/cdk/deployment.ts` resolves them: once a file sets one, Studio requires the rest there, and a
+partly set provider is a missing value on its connection and stops synthesis. Google's secret keeps
+its earlier managed binding through `bindingPath: ["googleClientSecret"]`. A name appearing in
+that file does not make it a workload input or a public client field. Required
+inputs can be missing before deployment; Studio exposes the missing requirement
+and active consumers without including the value in its public snapshot. See
+[environment delivery](../runtime/environment.md) for resolution and generated files.
+
+| Value surface | Current contract |
+| --- | --- |
+| Public snapshot/review | Names, presence, required/default metadata and secret actions; excludes resolved secret values |
+| Protected Studio detail | Selected input/resource detail APIs can return values under local session guards/no-store; the whole Studio is not value-free |
+| Environment editing | [deployment-inputs.ts](../../../client-app/server/deployment-inputs.ts) fixes dev/prod paths and rejects symlinks; opening and synthesis preserve the files. Explicit setup creates each missing file privately from its own mode template. Setup failures and later deletions have an explicit retry. [deployment-input-edits.ts](../../../client-app/server/deployment-input-edits.ts) withholds sensitive values from the file inspector (`hidden`) and reveals one value per explicit request, into its own environment's field; newer source clears reveals and ignores stale responses |
+| Input transaction | [deployment-input-edits.ts](../../../client-app/server/deployment-input-edits.ts) keeps values in private in-memory plans, redacts review, checks revision/file hash, round-trips dotenv and replaces privately while preserving unrelated assignments/comments |
+| Catalog editing | `ResourceService` in [resources.ts](../../../client-app/server/resources.ts) and [resources-source.ts](../../../client-app/server/resources-source.ts) edit declaration kind/group/default, workload requirements (staged per Dev/Prod input in **Configuration and inputs**) and recognized consumer references; not a general code editor |
+
+Requirement ownership is explicit: the input's Required setting controls its resource and
+environment-file supply connection. A workload's extra requirement controls that workload and
+its consumption connection. It does not make an optional input's file-supply link an error.
+Workload requirements are edited independently per environment; differing policies are written
+using `FRAMEWORK_MODE`. Source-owned rules stay separate from requirements inherited from input
+declarations, so editing a workload does not copy an inherited requirement into source.
+
+`planDeploymentSecrets` in [deployment-secrets.ts](../../../packages/aws-studio/cli/deployment-secrets.ts) completes ownership/account/region/value reads before writes, compares values in memory and exposes create/update/unchanged actions plus ARNs. Existing secrets must have matching management tags and usable state. `createMissing` creates only missing secrets; it never updates an existing secret during review preparation.
+
+Saving an authored inputs file and refreshing Studio are separate outcomes. Once the
+reviewed dotenv bytes are saved, the response reports that save even if snapshot refresh
+fails, expires the plan and asks for a reload. Refresh diagnostics and input values are
+never echoed through that response; a refresh failure must not suggest the file was left
+unchanged or offer the accepted plan again.
+
+For reviewed apply, `bind(planId)` captures each action, existing ARN/current version and a keyed HMAC of authored values. `secretBindings` in [deployment-workspace.ts](../../../packages/aws-studio/cli/deployment-workspace.ts) stores the binding privately beside lock state, **outside the plan directory**, with private file/directory modes. The random key plus HMAC is sensitive material: it permits guessing low-entropy values if disclosed. Do not copy it into plan.json, Studio, logs or source control.
+
+[deploy.ts](../../../packages/aws-studio/cli/deploy.ts) reloads the secret plan before apply and requires its private binding. `mismatch` refuses changed actions/ARNs, changed AWS current version for an update, changed authored values for create/update, or drift in desired/current application tags. A reviewed value-and-tag update cannot become tags-only when the authored value is removed: its value binding still applies. Tags-only reviews need no authored value and never rewrite the secret contents. A plan moved to another checkout without its binding must be replanned. `--create-secrets` creates missing entries without synchronizing existing updates.
+
+Limitations: Secrets Manager has no conditional put in this path; a concurrent version change **after** validation and before write can race. Sequential secret writes and subsequent CloudFormation changes are not one transaction, and infrastructure rollback does not roll values back. The direct deployment path synchronizes current inputs without a saved review binding; retain its existing CLI safeguards/authorization. [Planning/safety](planning-and-safety.md) owns the ordering and failure reporting.
+
+Delivery differs by consumer: Lambda gets `.arn` plus read permission; containers get `.value`/`.field` through declared injection. [Environment resolution](../runtime/environment.md) owns the local/cloud mechanics. Input creation writes declarations/commented keys only, never actual values.
+
+## Operation log redaction
+
+The operations worker withholds values before anything reaches the durable log. Its set is
+narrow on purpose, because each entry is removed from every line of output:
+
+- Declared secrets: every literal `input.secret("NAME")` under `framework-config/`, read from
+  source so a half-edited declaration cannot stop an operation.
+- Credential keys: names matching `sensitiveName`, in the input files and the process environment,
+  unless the value is a plain switch such as `true`.
+- Passwords inside connection URLs, both from input values and in output itself.
+- AWS credentials and the assignment patterns in `redactCredentials`.
+
+Account ids, regions, deployment names, counts and other settings stay readable. Values under
+four characters are never scrubbed: they protect nothing, and removing them corrupts hashes,
+counts and paths. Classification fails closed: with no declarations to read, or a computed
+`input.secret(name)`, every value of four or more characters in the input files is withheld
+apart from plain switches. A variable that is neither declared nor credential-named is treated
+as public; Studio already reports it as an unlinked CDK environment error.
+[redaction.ts](../../../client-app/server/operations/redaction.ts) owns the mechanism and
+`privateValues` in [adapter.ts](../../../client-app/server/operations/adapter.ts) owns this
+policy. Logs already recorded are never rewritten.
+
+Tests: [secret review](../../../packages/aws-studio/test/cdk/deployment-secret-review.test.ts), [resource deployment](../../../packages/aws-studio/test/cdk/resource-deployment.test.ts), [input editing](../../../client-app/test/deployment-inputs.test.ts), [resources](../../../client-app/test/resources.test.ts). Validate redaction, zero-write refusal and exact reviewed writes with fake clients; never inspect real input values just to update documentation.
