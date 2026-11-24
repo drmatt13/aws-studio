@@ -9,7 +9,8 @@ import { platformRoot, readStarterFiles, readStarterSelection, writeStarterFiles
 const [mode, ...extra] = process.argv.slice(2);
 assert.ok((mode === "acquire" || mode === "verify") && !extra.length, "Choose acquire or verify.");
 const release = JSON.parse(readFileSync(path.join(platformRoot, "scripts/studio-release.json"), "utf8"));
-for (const version of [release.version, release.frameworkVersion, release.runtime.node, release.runtime.npm]) {
+const { version: studioVersion } = JSON.parse(readFileSync(path.join(platformRoot, "package.json"), "utf8"));
+for (const version of [studioVersion, release.frameworkVersion, release.runtime.node, release.runtime.npm]) {
   assert.match(version, /^\d+\.\d+\.\d+$/);
 }
 const temp = realpathSync(process.env.RUNNER_TEMP ?? tmpdir());
@@ -58,7 +59,7 @@ try {
     const evidence = path.join(scratch, "evidence");
     try {
       execFileSync(studio.node, [path.join(platformRoot, "scripts/verify-studio-distribution.mjs"),
-        path.join(output, `aws-studio-${release.version}-distribution.tar.gz`), studio.node, project.node, evidence], {
+        path.join(output, `aws-studio-${studioVersion}-distribution.tar.gz`), studio.node, project.node, evidence], {
         cwd: platformRoot, env, stdio: "inherit", windowsHide: true,
       });
     } finally {

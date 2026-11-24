@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const installation = new URL("../", import.meta.url);
+const { version } = JSON.parse(readFileSync(new URL("package.json", installation), "utf8"));
 const release = JSON.parse(readFileSync(new URL("scripts/studio-release.json", installation), "utf8"));
 const exactVersion = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 const compatibleNode = (minimum, current) => {
@@ -14,10 +15,10 @@ const compatibleNode = (minimum, current) => {
 };
 
 if (!compatibleNode(release.runtime?.node, process.versions.node)) {
-  process.stderr.write(`AWS Studio ${release.version} requires Node ${release.runtime.node} or later on its Node ${release.runtime.node.split(".")[0]}.x line. This executable is Node ${process.versions.node}.\n`);
+  process.stderr.write(`AWS Studio ${version} requires Node ${release.runtime.node} or later on its Node ${release.runtime.node.split(".")[0]}.x line. This executable is Node ${process.versions.node}.\n`);
   process.exitCode = 1;
 } else if (process.argv[2] === "--version" && process.argv.length === 3) {
-  console.log(`AWS Studio ${release.version} · framework ${release.frameworkVersion} · Node ${process.versions.node}`);
+  console.log(`AWS Studio ${version} · framework ${release.frameworkVersion} · Node ${process.versions.node}`);
 } else {
   const require = createRequire(import.meta.url);
   try {

@@ -6,9 +6,10 @@ import { IncompatibleProjectError } from "./project-errors";
 import { readFrameworkArchive } from "../../scripts/framework-archive";
 import { frameworkCompatibility, projectProtocol, releaseIsOlder, stableVersion, studioDistribution, type FrameworkCompatibility } from "../../scripts/release-compatibility";
 import release from "../../scripts/studio-release.json";
+import studioPackage from "../../package.json";
 
 export { projectProtocol, releaseIsOlder, type FrameworkCompatibility };
-export const studioDistributionMetadata = studioDistribution(release);
+export const studioDistributionMetadata = studioDistribution({ ...release, version: studioPackage.version });
 export const studioRelease = studioDistributionMetadata.version;
 export const bundledFrameworkVersion = studioDistributionMetadata.frameworkVersion;
 

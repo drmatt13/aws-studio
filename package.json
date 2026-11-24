@@ -1,5 +1,6 @@
 {
   "name": "aws-studio-workspace",
+  "version": "1.0.0",
   "author": "Matthew Sweeney",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,

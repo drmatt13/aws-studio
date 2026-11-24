@@ -48,8 +48,11 @@ For a single test command run from the repository root, preserve workspace condi
 
 ## Qualify Studio and framework releases
 
-Set the Studio distribution version, bundled framework version and host runtime in
-`scripts/studio-release.json`. The framework package declares its own version,
+Set Studio's version in the root `package.json`. From the Studio checkout,
+`npm version patch --no-git-tag-version` updates the version and lockfile together.
+The packer reads that version and records it in the installed package. Set the
+bundled framework version and host runtime in `scripts/studio-release.json`.
+The framework package declares its own version,
 runtime ranges, minimum Studio release, evaluator protocol and creator capabilities.
 Retain the exact framework archive when releasing a Studio-only change.
 `npm run pack:studio -- <destination> <retained-framework-archive>` packages that
