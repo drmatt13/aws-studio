@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { readDatabaseDraft, readDatabasePlacementDraft } from "../shared/managed-database";
 import { planDatabaseSettings } from "../server/edits/database";
+import { assessOwnership } from "../server/edits/ownership-guard";
 import { SourceFiles } from "../server/source";
 import { locateManagedDatabase } from "../server/source/database";
 import type { StudioState } from "../server/snapshot";
@@ -64,6 +65,23 @@ test("managed database source follows its imported declaration and changes only 
   assert.equal(readFileSync(file, "utf8"), before, "planning writes no source");
   const removal = planDatabaseSettings(root, state, "application", { instanceClass: "db.t3.micro", multiAz: false }, new SourceFiles());
   assert.equal(removal.after, before.replace("    proxyEnabled: false,\n", ""));
+}));
+
+test("the catalog database keeps project settings editable and reviews changes to its owner separately", () => fixture((root, file, before, state) => {
+  const id = "database:application";
+  const model = { ...state.snapshot.models.dev, targets: [], resources: [], ownership: { [id]: { managedBy: "framework", basis: "catalog", projectOverride: true } } };
+  const snapshot = { snapshot: { models: { dev: model, prod: model } }, built: {} } as unknown as StudioState;
+  const assess = (after: string) => assessOwnership(root, snapshot, [{ file, before, after }]);
+  assert.deepEqual(assess(before.replace("multiAz: false", "multiAz: true")), []);
+  assert.deepEqual(assess(before.replace("vpc: applicationVpc", 'vpc: analyticsVpc, subnet: "isolated"')), []);
+  assert.throws(() => assess(before.replace("resources.rds.database", "resources.other.database")), /platform maintains it/);
+  const override = before.replace('id: "application"', 'id: "application", managedBy: "developer"');
+  assert.deepEqual(assess(override).map(change => [change.entity, change.from, change.to]), [[id, "framework", "developer"]]);
+  assert.throws(() => assess(override.replace("multiAz: false", "multiAz: true")), /both its ownership.*and its definition/);
+  const explicitLock = override.replace('managedBy: "developer"', 'managedBy: "framework"');
+  assert.throws(() => assess(explicitLock.replace("multiAz: false", "multiAz: true")), /both its ownership.*and its definition/);
+  writeFileSync(file, override);
+  assert.deepEqual(assessOwnership(root, snapshot, [{ file, before: override, after: before }]).map(change => [change.from, change.to]), [["developer", "framework"]]);
 }));
 
 test("managed database source refuses hidden, computed, stale and unsupported settings", () => fixture((root, file, before, state) => {

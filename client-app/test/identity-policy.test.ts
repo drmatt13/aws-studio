@@ -39,9 +39,9 @@ test("bounded statement grammar rejects admin, wildcard accounts/actions, wrong 
 test("recognized native literal edit preserves unrelated bytes and has one policy authority; computed/custom source refuses", () => {
   const f = fixture();
   try {
-    // Without an owner record the stack's ownership is unresolved, and its source is not edited.
+    // Native edits require verified ownership for the selected stack.
     const unowned = { ...f.state, snapshot: { ...f.state.snapshot, models: { dev: { resources: f.state.snapshot.models.dev.resources }, prod: { resources: f.state.snapshot.models.prod.resources } } } } as unknown as typeof f.state;
-    assert.throws(() => identityPolicySource(f.directory, unowned, "resource:access"), /ownership is unresolved/);
+    assert.throws(() => identityPolicySource(f.directory, unowned, "resource:access"), /could not verify the owner of resource:access/);
     const before = readFileSync(f.file, "utf8"); const source = identityPolicySource(f.directory, f.state, "resource:access");
     assert.deepEqual(source.statements, [{ Effect: "Allow", Action: ["s3:GetObject"], Resource: [bucket] }]);
     const edits = new Map<string, string>(); const plan = planIdentityPolicy(f.directory, f.state, { kind: "identityPolicy", target: "resource:access", statements, allowUnauthenticated: true }, edits);

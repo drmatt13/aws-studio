@@ -94,11 +94,12 @@ card sits beside the row toward the map, or above/below it on narrow screens. Bo
 and map cards measure their actual content; list cards respect the visual viewport, and
 map cards respect its intersection with the visible canvas. Oversized member lists scroll
 within the card instead of being silently truncated or extending outside the viewport.
-The pointer can enter a card to read it. Escape dismisses the preview without changing
-selection or moving focus. Keyboard scrolling keeps a Resources preview with its focused
+In an input group's preview, hovering a row underlines its name. Clicking the row opens
+that entry in the Inspector. From a focused group, Tab moves through its entries and
+Enter or Space opens the focused one. Escape closes the preview and returns focus
+to its trigger when focus was inside the card. Keyboard scrolling keeps a Resources preview with its focused
 row; wheel scrolling the trigger list, filtering away the row or closing the panel clears
-it. Touch continues straight to the Inspector. A preview never changes selection or the
-camera. See [rendering and interaction](../aws-studio-knowledge/studio/rendering.md) for the current behavior.
+it. Touch continues straight to the Inspector. Hovering alone preserves selection and the camera. See [rendering and interaction](../aws-studio-knowledge/studio/rendering.md) for the current behavior.
 
 Every multi-member connection and input group lists its members with Dev/Prod pills beside
 each row, without a redundant group-level pair. Single connections retain the pair near

@@ -3,7 +3,7 @@ import { titleOf, type ModelIndex } from "../lookup";
 import { entryCount, groupEntries, groupUse, nameList } from "../input-groups";
 import type { SceneNode } from "./types";
 import type { Availability } from "../deployment";
-import { isFrameworkManaged, isOwnershipUnresolved } from "../../shared/framework-management";
+import { isFrameworkManaged, ownershipOf } from "../../shared/framework-management";
 import { FRAMEWORK_INPUT_GROUPS } from "../../shared/deployment-inputs";
 
 /**
@@ -23,8 +23,8 @@ export interface HoverFacts {
   /** A specific, expected reason nothing deploys it ("Not built: nothing is placed in the VPC"); only when `places` is empty. Problems are issues instead. */
   readonly notDeployed?: string;
   readonly frameworkManaged: boolean;
-  /** No owner can be established for its definition (and it is not framework managed in either graph). */
-  readonly ownershipUnresolved?: true;
+  /** Declarations explicitly disagree about who maintains this resource. */
+  readonly ownershipConflict?: true;
 }
 
 export type ModelIndexes = Readonly<Record<Mode, ModelIndex>>;
@@ -213,13 +213,13 @@ function combine(results: Readonly<Record<Mode, Where>>, managed: boolean): Hove
 
 const eachMode = (answer: (mode: Mode) => Where): Readonly<Record<Mode, Where>> => ({ dev: answer("dev"), prod: answer("prod") });
 
-/** Unresolved ownership is stated wherever the platform badge would be. */
-function withUnresolved(facts: HoverFacts, id: string, models: Readonly<Record<Mode, { readonly ownership?: ModeModel["ownership"] }>>): HoverFacts {
-  return !facts.frameworkManaged && MODES.some((mode) => isOwnershipUnresolved(models[mode], id)) ? { ...facts, ownershipUnresolved: true } : facts;
+/** A genuine conflict stays visible in either environment. */
+function withOwnershipConflict(facts: HoverFacts, id: string, models: Readonly<Record<Mode, { readonly ownership?: ModeModel["ownership"] }>>): HoverFacts {
+  return MODES.some((mode) => ownershipOf(models[mode], id).basis === "conflict") ? { ...facts, ownershipConflict: true } : facts;
 }
 
 export function nodeHoverFacts(node: Pick<SceneNode, "entity" | "id">, indexes: ModelIndexes): HoverFacts {
-  return withUnresolved(entityHoverFacts(node, indexes), node.id, indexes);
+  return withOwnershipConflict(entityHoverFacts(node, indexes), node.id, indexes);
 }
 
 function entityHoverFacts(node: Pick<SceneNode, "entity" | "id">, indexes: ModelIndexes): HoverFacts {
@@ -277,7 +277,7 @@ export function groupHoverLines(group: ModelResource, model: ModeModel, index: M
  * deployment builds it. A fixture follows its VPC declaration's owner. */
 export function propHoverFacts(models: Readonly<Record<Mode, ModeModel>>, id: string): HoverFacts {
   const frameworkManaged = MODES.some((mode) => isFrameworkManaged(models[mode], id));
-  return withUnresolved(models.prod.networks?.find(network => id.startsWith(`prop:vpc:${network.id}:`))?.builtInProd
+  return withOwnershipConflict(models.prod.networks?.find(network => id.startsWith(`prop:vpc:${network.id}:`))?.builtInProd
     ? { places: [{ env: "prod", where: "AWS VPC" }], frameworkManaged }
     : { places: [], notDeployed: "Not built: nothing is placed in the VPC", frameworkManaged }, id, models);
 }

@@ -1,4 +1,4 @@
-import { CircleHelp, FileQuestionMark, LockKeyhole } from "lucide-react";
+import { LockKeyhole, TriangleAlert } from "lucide-react";
 import type { ModelResource } from "../../shared/model";
 import { cx } from "../ui/classes";
 import { ownershipOf, ownershipReason } from "../../shared/framework-management";
@@ -86,8 +86,8 @@ export function FrameworkManagedStatus({
   );
 }
 
-/** Ownership Studio cannot establish, stated as plainly as the platform badge. */
-export function UnresolvedOwnershipStatus({
+/** Shown only when the ownership declarations disagree. */
+export function OwnershipConflictStatus({
   as: Tag = "p",
   title,
   placement = "header",
@@ -104,22 +104,17 @@ export function UnresolvedOwnershipStatus({
 } = {}) {
   return (
     <Tag
-      data-resource-status="ownership-unresolved"
+      data-resource-status="ownership-conflict"
       title={title}
-      className={cx(resourceStatusClasses(appearance === "map" ? "map" : placement, stacked, density === "compact"), "bg-sheet text-graphite")}
+      className={cx(resourceStatusClasses(appearance === "map" ? "map" : placement, stacked, density === "compact"), issueChipClasses.warning)}
     >
-      <CircleHelp size={density === "compact" ? 12 : 14} aria-hidden />
-      Ownership unresolved
+      <TriangleAlert size={density === "compact" ? 12 : 14} aria-hidden />
+      Conflicting ownership declarations
     </Tag>
   );
 }
 
-/**
- * The ownership badge for one entity, from the server's projection. Every inspector header and
- * entry list uses this: a platform-maintained entity reads Framework managed, an entity whose
- * owner cannot be established reads Ownership unresolved, and a developer-owned one carries no
- * badge. The tooltip says how Studio knows.
- */
+/** The server projection supplies the ownership badge and its explanation. */
 export function OwnershipStatus({
   entity,
   placement = "header",
@@ -134,23 +129,15 @@ export function OwnershipStatus({
   const { index } = useStudio();
   const facts = ownershipOf(index, entity);
   const title = ownershipReason(facts, (id) => titleOf(index, id));
-  if (facts.managedBy === "framework") return <FrameworkManagedStatus {...props} placement={placement} title={title} />;
-  if (facts.managedBy === "unresolved") return <UnresolvedOwnershipStatus {...props} placement={placement} title={title} />;
-  return null;
+  return (
+    <>
+      {facts.managedBy === "framework" ? <FrameworkManagedStatus {...props} placement={placement} title={title} /> : null}
+      {facts.basis === "conflict" ? <OwnershipConflictStatus {...props} placement={placement} title={title} stacked /> : null}
+    </>
+  );
 }
 
-/** CDK input files carry their ownership badge (unresolved: no declaration names an owner for the file). */
-export function EnvironmentFileStatus({
-  resource,
-  placement = "header",
-}: {
-  resource: ModelResource;
-  readonly placement?: StatusPlacement;
-}) {
-  return resource.deploymentFile || resource.deploymentFiles ? <OwnershipStatus entity={resource.id} placement={placement} /> : null;
-}
-
-/** Ownership, issue and catalog status chips. `issues={false}` leaves issues to the header's `IssueNotice`. */
+/** Ownership and issue status chips. `issues={false}` leaves issues to the header's `IssueNotice`. */
 export function ResourceStatus({
   resource,
   placement = "header",
@@ -162,26 +149,13 @@ export function ResourceStatus({
 }) {
   const { index } = useStudio();
   if (!resource) return null;
-  const managed = ownershipOf(index, resource.id).managedBy !== "developer";
+  const facts = ownershipOf(index, resource.id);
+  const hasOwnershipBadge = facts.managedBy === "framework" || facts.basis === "conflict";
   const issues = showIssues ? resourceIssues(resource, index.resources.values()) : [];
   return (
     <>
-      <EnvironmentFileStatus resource={resource} placement={placement} />
-      {!resource.deploymentFile && !resource.deploymentFiles ? <OwnershipStatus entity={resource.id} placement={placement} /> : null}
-      <IssueChips issues={issues} placement={placement} stacked={managed} />
-      {resource.frameworkStack ? (
-        // Expected for a framework stack, so a neutral status rather than an issue.
-        <p
-          data-resource-status="undeclared"
-          className={cx(
-            resourceStatusClasses(placement, managed || issues.length > 0),
-            "text-graphite",
-          )}
-        >
-          <FileQuestionMark size={14} aria-hidden />
-          Not declared in the stack catalog
-        </p>
-      ) : null}
+      <OwnershipStatus entity={resource.id} placement={placement} />
+      <IssueChips issues={issues} placement={placement} stacked={hasOwnershipBadge} />
     </>
   );
 }

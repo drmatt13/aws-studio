@@ -22,6 +22,7 @@ import { readClientMappings } from "./client-environment-source";
 import { clientBindingFor } from "../shared/client-environment";
 import { STACK_MEMBER_TAGGING, tagFacts, withAbsentTagging } from "./model/tags";
 import { mergeDeclaredOwnership, withOwnership } from "./model/ownership";
+import { frameworkResourceOwnership } from "./model/framework-resource-catalog";
 import { failedModel } from "./model/project";
 import { replaceFileAtomic } from "aws-studio/cli/atomic-replace.cjs";
 import { SOURCE_HOLD_NOTE, sourceHeld } from "../shared/api";
@@ -70,7 +71,7 @@ function withClassMembers(model: ModeModel, catalog: ReadonlyMap<string, Catalog
         networkPlacement: member.networkPlacement, networkId: member.networkId,
       });
     }
-    if (stack) resources[index.get(`resource:${catalogPath}`)!] = { ...stack, stackClass: entry.stack.className, stackUsage: entry.stackUsage };
+    if (stack) resources[index.get(`resource:${catalogPath}`)!] = { ...stack, stackClass: entry.stack.className, stackFile: entry.stack.location?.file, stackUsage: entry.stackUsage };
   }
   const ids = new Set([...resources.map((resource) => resource.id), ...model.targets.map((target) => target.ref)]);
   const ownership = resources.filter((resource) => resource.frameworkManaged && resource.networkPlacement && resource.parent && ids.has(resource.parent)).map((resource): ModeModel["edges"][number] => ({
@@ -106,6 +107,8 @@ export class SnapshotBuilder {
   private pending: Promise<StudioState> | undefined;
   private latest: StudioState | undefined;
   private latestEpoch: string | undefined;
+  /** Last published per-mode facts, before merging owners across the two graphs. */
+  private lastOwnership?: Record<Mode, NonNullable<ModeModel["ownership"]>>;
   readonly pool: EvaluatorPool;
   private readonly sourceObserver: SourceGateObserver;
 
@@ -247,21 +250,28 @@ export class SnapshotBuilder {
     const localDatabase = readLocalDatabases(this.repositoryRoot);
     const clientMappings = readClientMappings(this.repositoryRoot);
     const content = sha256(JSON.stringify({ files, conditions: [dev.targets.map(target => target.lanes.when), prod.targets.map(target => target.lanes.when), dev.gateways?.map(gateway => gateway.lanes.when), prod.gateways?.map(gateway => gateway.lanes.when)], schema: schema.hash, localDatabase }));
-    // One owner per entity across both graphs, declared in source; structure supplies the rest.
-    // Graphs that disagree leave the entity unresolved.
     const metadata = (mode: Mode) => {
       const current = evaluation[mode].targets.length || evaluation[mode].status === "ok" ? evaluation.inputMetadata : this.latest?.evaluation.inputMetadata ?? evaluation.inputMetadata;
       return current?.[mode] ?? EMPTY_INPUT_METADATA;
     };
-    const declaredOwnership = mergeDeclaredOwnership([["dev", dev.ownership], ["prod", prod.ownership], ["dev", frameworkSettingOwnership(metadata("dev"))], ["prod", frameworkSettingOwnership(metadata("prod"))]]);
     const stackFiles = Object.fromEntries([...built.catalog].flatMap(([key, entry]) => entry.stack?.location ? [[`resource:${key}`, entry.stack.location.file]] : []));
-    const project = (model: ModeModel): ModeModel => {
+    const enrich = (model: ModeModel): ModeModel => {
       const declared = model.stale ? model : withExportStacks(withClassMembers(model, built.catalog, built.index.cdkLinks.edges), built.exportStacks);
       const comparisons = Object.values(clientMappings.mappings).flatMap(mapping => [clientBindingFor(mapping, "dev"), clientBindingFor(mapping, "prod")].flatMap(binding => binding.when ? [binding.when] : []));
       const enriched = withClientEnvironment(withDeploymentInputs(this.repositoryRoot, withLocalDatabases(declared, localDatabase.services), { dev, prod }, comparisons, this.inputSetupProblems(), metadata(model.mode)), clientMappings);
-      return withOwnership(withPermissionReadiness(withConnectionAuthorizations(withConnectionEvidence(this.repositoryRoot, enriched, built.index, built.catalog, sources)), built.index), declaredOwnership, { stackFiles });
+      return withPermissionReadiness(withConnectionAuthorizations(withConnectionEvidence(this.repositoryRoot, enriched, built.index, built.catalog, sources)), built.index);
     };
-    const models = { dev: project(dev), prod: project(prod) };
+    const enriched = { dev: enrich(dev), prod: enrich(prod) };
+    const modeOwnership = (mode: Mode) => {
+      if (enriched[mode].stale && this.lastOwnership) return this.lastOwnership[mode];
+      const inputMetadata = metadata(mode);
+      const declarations = { ...evaluation[mode].ownership, ...frameworkSettingOwnership(inputMetadata) };
+      return frameworkResourceOwnership(enriched[mode], declarations, inputMetadata);
+    };
+    const records = { dev: modeOwnership("dev"), prod: modeOwnership("prod") };
+    const ownership = mergeDeclaredOwnership(Object.entries(records));
+    const ownershipContext = { stackFiles, databaseOverrideOwner: prod.managedDatabase && `database:${prod.managedDatabase.id}` };
+    const models = { dev: withOwnership(enriched.dev, ownership, ownershipContext), prod: withOwnership(enriched.prod, ownership, ownershipContext) };
     const snapshot: Snapshot = {
       displayNames: readDisplayNames(this.repositoryRoot),
       namingCapabilities: namingCapabilities(Object.values(models)),
@@ -288,6 +298,7 @@ export class SnapshotBuilder {
       } finally { rmSync(temporary, { force: true }); }
       this.generation += 1;
       this.latestEpoch = publicationEpoch;
+      this.lastOwnership = records;
       // Operations reserve the source whether or not they change it. Republishing
       // what is already published must not read as a source change to a dirty
       // draft, an open review or anything else keyed on the revision.

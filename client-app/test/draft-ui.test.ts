@@ -805,10 +805,12 @@ test("stack resource rows expose every native member with AWS badges and navigat
 test("an exported framework stack shows its native resources and exports", async () => {
   await mount("framework-stack:DevLambdaReplayStack");
   assert.ok(ui.screen.getByRole("heading", { name: "DevLambdaReplayStack" }));
-  // No stack() declaration names it, so Studio states that its ownership is unresolved.
-  assert.ok(ui.screen.getAllByText("Ownership unresolved").length >= 1);
-  assert.equal(ui.screen.queryByText("Framework managed"), null);
-  assert.ok(ui.screen.getByText("Not declared in the stack catalog"));
+  const inspector = ui.screen.getByRole("complementary", { name: "Inspector" });
+  assert.ok(ui.within(inspector.querySelector("header")!).getByText("Framework managed"));
+  assert.equal(ui.screen.queryByText("Not declared in the stack catalog"), null);
+  openSection("Ownership");
+  assert.equal(ui.screen.queryByRole("button", { name: "Take ownership…" }), null);
+  assert.equal(inspector.querySelector("[data-slot=ownership-owner]")?.textContent, "AWS Studio platform");
   assert.ok(ui.screen.getByText("Exports", { selector: "summary > span" }));
   assert.ok(ui.screen.getByText((_text, element) => element?.tagName === "CODE" && element.textContent === "queue.queueArn"));
   assert.ok(ui.screen.getByText("DEV_LAMBDA_REPLAY_QUEUE_ARN", { selector: "code" }));
@@ -834,13 +836,14 @@ test("an exported framework stack shows its native resources and exports", async
   await ui.waitFor(() => assert.ok(ui.screen.getByRole("heading", { name: "bucket" })));
 });
 
-test("the stacks island distinguishes missing catalog declarations from missing CDK constructors", async () => {
+test("the stacks island shows framework ownership and warns when CDK omits an application stack", async () => {
   await mount("island:stacks");
+  assert.equal(document.querySelector("[data-slot=ownership]"), null, "a map grouping has no resource definition");
   openSection("Island entries");
   for (const name of ["FrontendWebsiteS3Stack", "DevLambdaReplayStack"]) {
     const row = ui.screen.getByRole("button", { name }).closest("li")!;
-    assert.ok(ui.within(row).getByText("Ownership unresolved"), name);
-    assert.ok(ui.within(row).getByText("Not declared in the stack catalog"));
+    assert.ok(ui.within(row).getByText("Framework managed"), name);
+    assert.equal(ui.within(row).queryByText("Not declared in the stack catalog"), null);
     assert.equal(ui.within(row).queryByText("Not created in application.ts"), null);
   }
   for (const name of ["CognitoStack", "RdsStack", "ReferenceExampleStack"]) {
@@ -848,6 +851,26 @@ test("the stacks island distinguishes missing catalog declarations from missing 
     assert.equal(ui.within(row).queryByText("Not declared in the stack catalog"), null);
     if (name === "ReferenceExampleStack") assert.ok(ui.within(row).getByText("Not created in application.ts"));
   }
+});
+
+test("conflicting ownership declarations show the effective lock and both environments' evidence", async () => {
+  const graph = (mode: "dev" | "prod"): Snapshot["models"]["dev"] => ({
+    ...baseline.models[mode],
+    ownership: {
+      ...baseline.models[mode].ownership,
+      [target]: {
+        managedBy: "framework", basis: "conflict",
+        conflicts: [{ where: "dev", managedBy: "developer" }, { where: "prod", managedBy: "framework" }],
+      },
+    },
+  });
+  persisted = { ...baseline, models: { dev: graph("dev"), prod: graph("prod") } };
+  await mount(target);
+  const header = ui.within(ui.screen.getByRole("complementary", { name: "Inspector" }).querySelector("header")!);
+  assert.ok(header.getByText("Framework managed"));
+  const conflict = header.getByText("Conflicting ownership declarations");
+  assert.match(conflict.title, /Development declares developer ownership/);
+  assert.match(conflict.title, /Production declares framework ownership/);
 });
 
 test("API routes show their target's environment pills, owner and owning config", async () => {
@@ -1887,6 +1910,33 @@ test("database placement stages a coordinated review, guards navigation, and res
   assert.equal(applyCalls, 0);
 });
 
+test("the combined PostgreSQL inspector shows the database declaration owner from either implementation", async () => {
+  const database = baseline.models.prod.managedDatabase!;
+  const declaration = `database:${database.id}`;
+  const local = baseline.models.dev.localServices![0]!.id;
+  for (const owner of ["developer", "framework"] as const) {
+    const implementationOwner = owner === "developer" ? "framework" : "developer";
+    const graph = (mode: "dev" | "prod"): Snapshot["models"]["dev"] => ({
+      ...baseline.models[mode],
+      ownership: {
+        ...baseline.models[mode].ownership,
+        [declaration]: { managedBy: owner, basis: "declared" },
+        [local]: { managedBy: implementationOwner, basis: "declared" },
+        [database.resource]: { managedBy: implementationOwner, basis: "declared" },
+      },
+    });
+    persisted = { ...baseline, models: { dev: graph("dev"), prod: graph("prod") } };
+    for (const [mode, id] of [["dev", local], ["prod", database.resource]] as const) {
+      await mount(id, mode);
+      const panel = ui.screen.getByRole("complementary", { name: "Inspector" });
+      assert.equal(ui.within(panel.querySelector("header")!).queryAllByText("Framework managed").length, owner === "framework" ? 1 : 0);
+      openSection("Database declaration ownership");
+      assert.equal(panel.querySelector("[data-slot=ownership-owner]")?.getAttribute("data-owner"), owner);
+      ui.cleanup();
+    }
+  }
+});
+
 test("managed PostgreSQL policy stays editable in development and retains its complete draft through review", async () => {
   assert.equal(baseline.models.dev.resources.find(resource => resource.id === "resource:rds")?.absent, true, "development uses local PostgreSQL while RDS stays declared");
   const database = baseline.models.dev.managedDatabase!;
@@ -2229,8 +2279,12 @@ test("every resource family uses one framed ownership status directly below its 
       await mount(id, mode);
       const header = document.querySelector("[data-slot=inspector-content] > header")!;
       assert.ok(header, `${mode}: ${id} has an inspector header`);
-      assert.equal(header.querySelectorAll("[data-resource-status=managed]").length, expected.has(id) ? 1 : 0, `${mode}: ${id}`);
-      if (expected.has(id)) {
+      const database = model.managedDatabase;
+      const databaseInspector = database && (database.resource === id || model.localServices?.some(service => service.id === id));
+      const represented = databaseInspector ? `database:${database.id}`
+        : model.resources.find(resource => resource.id === id)?.deploymentFile ? CDK_ENVIRONMENT_ID : id;
+      assert.equal(header.querySelectorAll("[data-resource-status=managed]").length, expected.has(represented) ? 1 : 0, `${mode}: ${id}`);
+      if (expected.has(represented)) {
         const badge = ui.within(header as HTMLElement).getByText("Framework managed");
         assert.equal(badge.className, referenceClasses);
         assert.ok(badge.querySelector("svg"));

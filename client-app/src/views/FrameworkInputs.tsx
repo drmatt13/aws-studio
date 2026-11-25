@@ -132,8 +132,8 @@ export function FrameworkInputView({
   const form = draft.resourceForm(resource);
   const owner = model.ownership?.[resource.id];
   const signIn = resource.frameworkInput === "authentication";
-  const policy = signIn ? { policy: true, availability: true, fallback: resource.kind !== "secret" } : resource.inputChoices;
-  const editable = policy?.policy && (!owner || owner.managedBy === "developer") ? policy : undefined;
+  const policy = signIn && owner?.managedBy === "developer" ? { policy: true, availability: true, fallback: resource.kind !== "secret" } : resource.inputChoices;
+  const editable = policy?.policy && (owner?.managedBy === "developer" || owner?.basis === "catalog") ? policy : undefined;
   const entry = draftState.entries.find(item => item.kind === "resource" && item.intent.resource === resource.id);
   const environmentPending = draftState.entries.some(item => item.kind === "environment");
   const disabled = sourceEditBlocked({ draftState, draft, model, live }) || live.running !== null || environmentPending;

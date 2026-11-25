@@ -18,6 +18,12 @@ export interface ExportStackSource {
   readonly members?: readonly StackMember[];
 }
 
+/** Join class definitions by source as well as name. A project can define an unrelated
+ * stack with the same name as one in its installed release. */
+export function matchesExportStack(stack: CatalogEntrySource["stack"], exported: ExportStackSource): boolean {
+  return stack?.className === exported.className && stack.location?.file === exported.location.file;
+}
+
 /** Only outputs on the exporter's public allowlist leave the source reader.
  * Values expose identifier paths only; literals and resolved values are excluded.
  */
@@ -66,9 +72,20 @@ export function readExportStacks(repositoryRoot: string, sites = readConstructor
       found.push({ className, location: { file: toRelative(repositoryRoot, file), ...lineAndColumn(source, start), start, end: declaration.name.end }, outputs });
     }
   }
-  const catalog = new Map<string, CatalogEntrySource>(found.map((item) => [item.className, { key: item.location, value: item.location, stack: { className: item.className, location: item.location, members: [] } }]));
+  const catalog = new Map<string, CatalogEntrySource>(found.map(item => [item.location.file + "#" + item.className, { key: item.location, value: item.location, stack: { className: item.className, location: item.location, members: [] } }]));
   const usage = readStackUsage(repositoryRoot, catalog, sites);
-  return found.map((item) => ({ ...item, usage: usage.get(item.className) }));
+  const roles = new Map<string, ExportStackSource[]>();
+  for (const item of found) {
+    const role = { ...item, usage: usage.get(item.location.file + "#" + item.className) };
+    roles.set(item.className, [...(roles.get(item.className) ?? []), role]);
+  }
+  return [...roles.values()].flatMap(candidates => {
+    if (candidates.length === 1) return candidates;
+    const referenced = candidates.filter(stack => stack.usage?.status === "referenced");
+    if (referenced.length === 1) return referenced;
+    const packaged = candidates.filter(stack => stack.location.file.startsWith("node_modules/aws-studio/cdk/"));
+    return packaged.length === 1 ? packaged : [];
+  });
 }
 
 /** Declared framework stack lifecycles, using the model's actual WebSocket AWS lanes. */
@@ -87,10 +104,12 @@ function absent(stack: ExportStackSource, model: ModeModel): boolean {
 export function withExportStacks(model: ModeModel, stacks: readonly ExportStackSource[]): ModeModel {
   const resources = [...model.resources];
   const tagging = { ...model.tagging };
+  const exportIds = new Map<string, string>();
   for (const stack of stacks) {
-    const existing = resources.findIndex((item) => item.kind === "stack" && item.stackClass === stack.className);
+    const existing = resources.findIndex((item) => item.kind === "stack" && item.stackClass === stack.className && item.stackFile === stack.location.file);
     const id = existing >= 0 ? resources[existing]!.id : `framework-stack:${stack.className}`;
-    const item: ModelResource = existing >= 0 ? resources[existing]! : { id, path: [stack.className], kind: "stack", absent: absent(stack, model), stackClass: stack.className, frameworkStack: true, stackUsage: stack.usage };
+    exportIds.set(stack.className, id);
+    const item: ModelResource = existing >= 0 ? resources[existing]! : { id, path: [stack.className], kind: "stack", absent: absent(stack, model), stackClass: stack.className, stackFile: stack.location.file, frameworkStack: true, stackUsage: stack.usage };
     const updated = { ...item, frameworkManaged: item.frameworkManaged ?? ("outputs" as const), stackOutputs: stack.outputs };
     if (existing >= 0) resources[existing] = updated; else resources.push(updated);
     // Tagged like any stack; one without a stacks entry yet starts empty.
@@ -104,7 +123,7 @@ export function withExportStacks(model: ModeModel, stacks: readonly ExportStackS
         nativeKind: member.category === "construct" ? "resource" : member.category, typeText: member.typeText, memberSource: "class" });
     }
   }
-  const replay = resources.find((item) => item.kind === "stack" && item.stackClass === "DevLambdaReplayStack");
+  const replay = resources.find(item => item.id === exportIds.get("DevLambdaReplayStack"));
   const replayBucket = replay && resources.find(item => item.parent === replay.id && item.path.at(-1) === "bucket" && item.nativeKind === "resource");
   const edges = model.edges.filter((edge) => edge.relation !== "localReplay");
   if (replay && replayBucket) for (const target of model.targets) {
@@ -115,5 +134,5 @@ export function withExportStacks(model: ModeModel, stacks: readonly ExportStackS
       detail: "localReplay: true captures AWS invocations through the development replay stack for local execution. Production invokes the handler directly.",
     });
   }
-  return { ...model, resources, tagging, edges, gateways: gatewaysOf(model).map(gateway => gateway.protocol === "agentcore" ? gateway : ({ ...gateway, stackResource: resources.find(resource => resource.stackClass === (gateway.protocol === "http" ? "HttpApiGatewayStack" : "WebSocketApiStack"))?.id ?? gateway.stackResource })) };
+  return { ...model, resources, tagging, edges, gateways: gatewaysOf(model).map(gateway => gateway.protocol === "agentcore" ? gateway : ({ ...gateway, stackResource: exportIds.get(gateway.protocol === "http" ? "HttpApiGatewayStack" : "WebSocketApiStack") ?? gateway.stackResource })) };
 }

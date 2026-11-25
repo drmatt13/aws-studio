@@ -12,7 +12,7 @@ import { lineAndColumn, literalKey, unwrap } from "./syntax";
 import { triggerFacts } from "./trigger-facts";
 import { readStatefulSource, STATEFUL_SOURCE_FILE } from "../stateful-source";
 import { descriptorFactory } from "./factories";
-import type { ExportStackSource } from "./export-stacks";
+import { matchesExportStack, type ExportStackSource } from "./export-stacks";
 
 interface Discovery { readonly catalog: ReadonlyMap<string, CatalogEntrySource>; readonly exportStacks: readonly ExportStackSource[]; readonly capabilities: readonly TriggerCapability[]; readonly permissionCapabilities: readonly PermissionCapability[]; readonly files: Readonly<Record<string, string>> }
 // Only serializable type/source facts are retained. No program, excerpts or evaluated resource values.
@@ -200,12 +200,14 @@ export function discoverCapabilities(root: string, catalog: ReadonlyMap<string, 
   });
   const entries = [
     ...[...catalog].map(([id, entry]) => ({ id, resourceId: `resource:${id}`, entry, nativeStack: undefined as ExportStackSource | undefined })),
-    ...exportStacks.filter(stack => ![...catalog.values()].some(entry => entry.stack?.className === stack.className)).map(nativeStack => ({
+    ...exportStacks.map(nativeStack => ({
       id: nativeStack.className, resourceId: `framework-stack:${nativeStack.className}`, nativeStack,
       entry: { key: nativeStack.location, value: nativeStack.location } as CatalogEntrySource,
     })),
   ];
   for (const { id, resourceId, entry, nativeStack } of entries) {
+    // Process the catalog first so type aliases and re-exports have their actual defining file.
+    if (nativeStack && [...resultCatalog.values()].some(item => matchesExportStack(item.stack, nativeStack))) continue;
     const source = program.getSourceFile(path.join(root, entry.value.file));
     let argument: ts.TypeNode | undefined;
     let standalone = false;

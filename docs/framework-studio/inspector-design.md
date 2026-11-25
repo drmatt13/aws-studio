@@ -59,21 +59,16 @@ Framework ownership uses the same framed lock and **Framework managed** label di
 after the inspector's identity block (its name and identifier). Keep type labels factual, such as PostgreSQL database;
 ownership is a separate badge, not a replacement type label. Every badge renders through
 `OwnershipStatus`, which reads the server's `ModeModel.ownership` projection; no view derives
-ownership from resource flags, names or kinds. A platform-maintained entity shows **Framework
-managed**, an entity whose owner cannot be established shows **Ownership unresolved**, and a
-developer-owned one carries no badge. The tooltip states how Studio knows. Map hover cards show the
-same two badges; the map's lock marks only platform-maintained entities.
+ownership from resource flags, names or kinds. A platform-maintained resource shows **Framework
+managed**. Developer-owned resources use the usual header. The badge tooltip, map lock and hover
+card use the same ownership fact. A framework export stack can appear without an application
+`stack()` declaration. Its inspector explains what an application reference enables.
 
-The rules, consequences and enforcement are in
-[editing](../aws-studio-knowledge/studio/editing.md#ownership). In this repository only `stacks.rds`
-(the framework's implementation of the database declaration) is platform maintained; Cognito, the
-sign-in inputs and the workloads are developer owned, and the generated HTTP/WebSocket APIs,
-export-only framework stacks, inputs files, client mapping and Compose services are unresolved.
+The **Ownership** disclosure identifies the maintainer, explains how Studio recognized the
+resource, and lists any integration. Project-backed declarations support reviewed changes of
+ownership. A mode conflict shows the competing declarations and keeps the shared definition
+protected. [Ownership rules and enforcement](../aws-studio-knowledge/studio/editing.md#ownership)
 
-Inspectors with an owner record have an **Ownership** disclosure: owner, basis, what Studio may
-change, and framework integrations. Entities with a declaration of their own offer **Take
-ownership** or **Hand to the platform** (both choices for a conflict) behind a confirmation that
-says what the review writes; inherited and undeclared entities explain and link their owner instead.
 Grouping islands carry no owner record; a grouping does not own its entries' infrastructure.
 
 `shared/framework-management.ts` owns classification. Map icons, inherited resource

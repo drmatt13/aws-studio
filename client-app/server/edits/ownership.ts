@@ -31,12 +31,15 @@ export function ownershipTargets(model: ModeModel, entity: string): readonly str
   const facts = ownershipOf(model, owner);
   if (facts.basis === "inherited") throw new Error(`${owner} follows ${facts.from ?? "its owner"}. Change ownership there.`);
   const resource = model.resources.find(item => item.id === owner);
-  if (resource?.kind === "group" && (facts.basis === "entries" || facts.basis === "conflict")) {
+  if (resource?.kind === "group" && facts.basis === "entries") {
     const entries = model.resources.filter(item => item.parent === owner).map(item => item.id);
-    for (const id of entries) if (!["declared", "default", "conflict"].includes(ownershipOf(model, id).basis)) throw new Error(`${id} has no declaration of its own to record an owner on, so this group's ownership cannot change here.`);
+    for (const id of entries) {
+      const entry = ownershipOf(model, id);
+      if (!entry.projectOverride && !["declared", "default", "conflict"].includes(entry.basis)) throw new Error(`${id} has no declaration of its own to record an owner on, so this group's ownership cannot change here.`);
+    }
     return entries;
   }
-  if (facts.basis === "undeclared") throw new Error(`${owner} has no declaration that can name an owner. ${facts.note ?? ""}`.trim());
+  if ((facts.basis === "catalog" && !facts.projectOverride) || facts.basis === "project" || facts.basis === "undeclared") throw new Error(`${owner} has no declaration that can name an owner. ${facts.note ?? ""}`.trim());
   if (resource?.kind === "member") throw new Error(`${owner} follows its stack. Change ownership on the stack() entry.`);
   return [owner];
 }

@@ -128,7 +128,7 @@ export function IslandInspector({ id }: { readonly id: string }) {
       </header>
       <Description entity={id} />
       <Tags entity={id} />
-      <Ownership entity={id} />
+      {network ? <Ownership entity={id} /> : null}
       <NetworkControls id={id} />
       {network ? <VpcPrivateZones networkId={id.slice("island:vpc:".length)} /> : null}
       {id === "island:inputs" ? (

@@ -8,6 +8,7 @@ source:
   - client-app/shared/permissions.ts
   - client-app/shared/framework-management.ts
   - client-app/server/model/ownership.ts
+  - client-app/server/model/framework-resource-catalog.ts
   - client-app/shared/grants.ts
   - client-app/server/model/project.ts
   - client-app/server/model/catalog-context.ts
@@ -32,14 +33,11 @@ Public members of framework-built export stacks inherit their `stackTags` metada
 through `server/source/export-stacks.ts`, including members already discovered elsewhere.
 Public strings remain logical metadata; constructs keep linked ownership semantics.
 
-`ModeModel.ownership` maps every graph entity to `OwnershipFacts` (`managedBy`: framework,
-developer or unresolved; `basis`; `from`, `conflicts` or `note`; `integrations`): who maintains its
-definition, separately from AWS tag capability above. The evaluator records every declaration's
-owner; the snapshot merges both graphs (disagreement is a conflict) and `withOwnership` completes
-structural owners, groups and undeclared entities after enrichment. Legacy flags
-(`frameworkManaged`, `frameworkStack`, `frameworkInput`) keep their semantic roles and only choose
-the wording of an unresolved note or an integration. See [editing](editing.md#ownership) for the rules
-and their enforcement.
+`ModeModel.ownership` maps each graph entity to the maintainer of its definition.
+Studio applies its [framework resource catalog](../../../client-app/server/model/framework-resource-catalog.ts)
+to each evaluated mode, reconciles project overrides across modes, then propagates ownership
+to routes, members and groups. Map badges, inspectors and source writers read those facts.
+[Editing](editing.md#ownership) documents catalog entries, project overrides and write behavior.
 
 [shared/model.ts](../../../client-app/shared/model.ts) is the serialized server/browser contract; avoid creating parallel graph types in a view. `projectModel`, `targetLanes` and `targetPlacement` in [model/project.ts](../../../client-app/server/model/project.ts) derive the graph from normalized declarations and mode predicates.
 
@@ -62,7 +60,7 @@ lane-byte equivalence with the standalone predicate path.
 | `ModelGateway` | HTTP/WebSocket route gateways or explicit AgentCore gateway identity, tools, consumer agents, lanes and source ownership |
 | `ModelRoute` | Public route/method semantics and target; route and target identities are distinct |
 | `ModelResource` | Catalog path/kind, member/input/secret metadata, capabilities and stack usage; not resolved secret contents |
-| `OwnershipFacts` | Framework, developer or unresolved, with its basis (declared, default, inherited, entries, conflict, undeclared), evidence and framework integrations |
+| `OwnershipFacts` | Definition owner, catalog or project evidence, structural inheritance, conflicts, supported project overrides and framework integrations |
 | `ModelEdge` | Directed `from`/`to`, relation, provenance, source evidence and supported removal information |
 | `FieldFact` | Authored/effective setting, inheritance, domain and editability reason |
 | `SourceIndex`, `CdkLinkIndex` | Source entities/files, capabilities, inferred connections and diagnostics |

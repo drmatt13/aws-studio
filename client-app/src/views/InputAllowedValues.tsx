@@ -19,7 +19,8 @@ export function InputAllowedValues({ resource }: { readonly resource: ModelResou
   if (form.secret || resource.inputChoices?.sensitive) return null;
   const choices = form.choices ?? resource.values ?? [];
   const owner = model.ownership?.[resource.id];
-  const editable = !resource.frameworkInput || (resource.frameworkInput === "authentication" || !!resource.inputChoices) && (!owner || owner.managedBy === "developer");
+  const editable = !resource.frameworkInput || (resource.frameworkInput === "authentication" && owner?.managedBy === "developer")
+    || (!!resource.inputChoices && (owner?.managedBy === "developer" || owner?.basis === "catalog"));
   const disabled = sourceEditBlocked({ draftState, draft, model, live }) || live.running !== null || draftState.entries.some(entry => entry.kind === "environment" || entry.kind === "create");
   const entry = draftState.entries.find(entry => entry.kind === "resource" && entry.intent.resource === resource.id);
   const error = inputChoicesError(choices) ?? entry?.error;

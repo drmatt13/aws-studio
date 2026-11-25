@@ -232,34 +232,32 @@ restoration in real browser Back/Forward cases.
 
 ## Ownership
 
-Every graph entity has one owner record (`ModeModel.ownership`), projected by
-[model/ownership.ts](../../../client-app/server/model/ownership.ts). It answers who maintains
-the definition (`framework`: the AWS Studio platform, `developer`: the application developer, or
-`unresolved`), how that was established (`basis`), and, through
-[shared/framework-management.ts](../../../client-app/shared/framework-management.ts), what Studio may
-change. Views only read it; an entity without a record reads as unresolved.
+The Studio host assigns **framework** or **developer** ownership to each resource when it
+opens or refreshes a project. Add shared resource definitions to the
+[Studio framework resource catalog](../../../client-app/server/model/framework-resource-catalog.ts).
+The host applies it to the selected project's evaluated resources and installed sources.
+A catalog update takes effect across compatible projects on their next open with that Studio
+version. New CDK or runtime functionality still follows the project's reviewed release upgrade.
 
-| Rule | Entities | Basis |
-| --- | --- | --- |
-| Its own declaration's `managedBy`; absent means developer | Workloads, workflows, AgentCore gateways, `defineNetwork`, `defineDatabase`, `stack<T>()`, `cdk<T>()`, inputs and secrets (catalog and framework settings files) | `declared`, `default` |
-| One structural owner | Stack members (stack), routes (workload), VPC fixtures (VPC), database setting overrides (database declaration) | `inherited` |
-| A group with no declaration, whose entries agree | Input groups, framework settings groups | `entries` |
-| Evidence disagrees | One declaration with different owners in Development and Production; a group whose entries disagree | `conflict` (unresolved) |
-| Nothing declares an owner | HTTP/WebSocket APIs generated from routes, stacks found only through exported outputs, CDK inputs files, the client environment mapping, Compose services | `undeclared` (unresolved, with a note) |
+| Resource | Ownership rule |
+| --- | --- |
+| Generated HTTP and WebSocket APIs | Framework. Routes and handlers keep their own owners. |
+| Primary PostgreSQL database | Framework by default. The project supplies database settings and placement. |
+| CDK stacks and their public members | Stacks defined by the installed framework package belong to the framework. Studio also registers the starter's website and RDS stack classes at their canonical source paths. Members inherit their stack's owner. |
+| Framework inputs and services | Studio registers known deployment, local and sign-in settings, the logical CDK environment editor, and services defined by the packaged Compose file. Each project's own files and client environment mappings belong to the project. Database overrides follow the database. |
+| Application declarations | An explicit `managedBy` records the owner's decision on a configurable declaration. Other application workloads, AgentCore gateways, VPCs, native stacks and custom inputs default to developer. Routes and network components inherit their structural owner's classification. |
+| Application namespaces | A group with uniformly owned entries inherits their classification. A mixed namespace belongs to the project and each entry retains its owner. |
 
-Implementation never decides ownership: no class name, entity kind, catalog key, file location or
-resource flag does. Framework integrations (the framework settings readers, the database's implementing
-stack, the Authentication workspace's fixed `cdk-app/lib/app/cognito-stack.ts`) are listed as
-`integrations` beside the owner and never change it.
+The [ownership projection](../../../client-app/server/model/ownership.ts) records the
+basis and source of each decision in `ModeModel.ownership`. If dev and prod assign different
+owners to one definition, Studio shows both declarations and protects the shared source until
+they agree. Missing graph evidence also prevents writes. An integration such as Cognito's
+workload user-pool binding has its own evidence and can use a developer-owned stack.
 
-Studio's limits follow from the owner, with no separate lock. Developer-owned definitions are edited
-normally. For a platform-maintained or unresolved entity,
-[ownership-guard.ts](../../../client-app/server/edits/ownership-guard.ts) refuses a change to its
-stack class file and to its declaration's tokens, ignoring only `tags`, `managedBy`, comments and
-formatting; tags, display names, descriptions and supplied values stay editable. A change to
-`managedBy` is a transition: it is reported, and it is refused when the same change also alters that
-entity's definition. A computed declaration the locator cannot read has no span to compare; a
-computed `managedBy` reads as unresolved.
+The [write guard](../../../client-app/server/edits/ownership-guard.ts) checks framework-owned
+stack source and declaration tokens. The project can edit tags, display names, descriptions,
+supplied values, and the configuration exposed by the resource. A reviewed change of owner
+stands alone. Removing a project override restores the catalog default.
 
 Enforcement covers every writer:
 
@@ -280,8 +278,7 @@ The Inspector's **Ownership** disclosure shows the owner, the basis, what Studio
 integrations. **Take ownership** / **Hand to the platform** (or recording an owner for a conflict)
 opens a confirmation, then stages `{ kind: "ownership", entity, managedBy }`;
 [edits/ownership.ts](../../../client-app/server/edits/ownership.ts) writes the explicit value at the
-declaration's tag site (each entry for a group). Inherited and undeclared entities have no
-declaration to write and offer no transition. Ownership of files (platform versus application source)
+declaration's tag site (each entry for a group). Intrinsic framework resources have a fixed catalog owner. Inherited entities link to the owner’s declaration. Ownership of files (platform versus application source)
 is not modelled; edits made outside Studio are not checked.
 
 ## Reviewed source application

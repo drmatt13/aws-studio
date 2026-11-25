@@ -236,8 +236,8 @@ aliased, default and namespace constructor references and local barrel exports. 
 type-only imports and never executes constructors or conditions. Missing imports or an
 unsupported entry point leave unreferenced usage unknown. Constructor sites are source
 evidence, not live deployment status. The database named by the evaluated config is marked as
-the database (`frameworkManaged: "database"`). The `defineDatabase` declaration is developer owned;
-its implementation, `stacks.rds`, declares `managedBy: "framework"`. A literal member constructor's subnet
+the database (`frameworkManaged: "database"`). The Studio catalog classifies the primary database and starter RDS stack as framework managed.
+The project supplies the database settings and placement through `defineDatabase`. A literal member constructor's subnet
 selection is read alongside its public fields; this places the RDS member in the VPC
 without adding a second logical entity.
 

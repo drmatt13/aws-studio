@@ -288,7 +288,7 @@ export function useResourceEnvironments(resource: ModelResource): ComponentProps
     note: declaration ? undefined :
           parent
             ? "This member is created with its owning stack."
-            : resource.frameworkStack || isFrameworkManaged(model, resource.id)
+            : isFrameworkManaged(model, resource.id)
               ? "The framework builds this infrastructure. Its consumers control their own deployment; this resource has no independent workload flag."
               : "Native CDK controls stack construction. Catalog availability does not deploy a stack; review its owning CDK declaration before changing its lifecycle.",
     details: !declaration && owners.length ? <DeploymentOwnership owners={owners} /> : undefined,

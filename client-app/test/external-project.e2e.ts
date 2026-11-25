@@ -7,7 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+import { readSourceManifest } from "aws-studio/source/workspace";
 import { copyIsolatedProject } from "../../packages/aws-studio/test/cdk/support/isolated-project";
+import type { Snapshot } from "../shared/model";
 
 /**
  * Proof that this checkout's Studio opens and evaluates a separate project directory.
@@ -15,6 +17,7 @@ import { copyIsolatedProject } from "../../packages/aws-studio/test/cdk/support/
  * The project is a writable copy of the recorded starter with its own installed release,
  * changed so that each way Studio reads a project is observable:
  *   - its deployment inputs gain PROOF_SETTING (read in Studio's own process);
+ *   - its database gets a project-specific ID (recognized through its framework role);
  *   - its app is renamed in cdk-app/cdk.json (read from the project root);
  *   - its framework installation is its own copy (the evaluator must use it).
  * STUDIO_UNDER_TEST points the test at another Studio checkout, such as one before this support.
@@ -50,6 +53,11 @@ test("Studio opens a separate project and reads that project, not its own checko
     const cdk = JSON.parse(readFileSync(cdkJson, "utf8")) as { context: Record<string, unknown> };
     cdk.context["framework:app"] = "external-proof";
     writeFileSync(cdkJson, `${JSON.stringify(cdk, null, 2)}\n`);
+    const database = path.join(project, "framework-config/databases/application.ts");
+    const databaseSource = readFileSync(database, "utf8");
+    assert.ok(databaseSource.includes('id: "application"'));
+    writeFileSync(database, databaseSource.replace('id: "application"', 'id: "external"'));
+    const projectSource = readSourceManifest(project).digest;
 
     // The direct entry point also works when the caller belongs to no package.
     const loader = pathToFileURL(createRequire(path.join(studio, "client-app/package.json")).resolve("tsx")).href;
@@ -69,14 +77,27 @@ test("Studio opens a separate project and reads that project, not its own checko
     ] as const) {
       const result = await run(args, cwd, env);
       assert.equal(result.code, 0, `${label}: Studio exited ${result.code}:\n${result.stderr.slice(-3000)}`);
-      const snapshot = JSON.parse(result.stdout) as { repositoryRoot: string; application?: { name?: string }; models: Record<"dev" | "prod", { status: string }> };
+      const snapshot = JSON.parse(result.stdout) as Snapshot;
       assert.equal(snapshot.repositoryRoot, realpathSync(project), `${label}: the snapshot is the external project's`);
-      assert.equal(snapshot.models.dev.status, "ok", `${label}: development evaluates`);
-      assert.equal(snapshot.models.prod.status, "ok", `${label}: production evaluates`);
+      for (const model of Object.values(snapshot.models)) {
+        assert.equal(model.status, "ok", `${label}: ${model.mode} evaluates`);
+        for (const [id, facts] of Object.entries(model.ownership ?? {})) {
+          assert.ok(["developer", "framework"].includes(facts.managedBy), `${label}: ${id} needs an owner in ${model.mode}`);
+        }
+        for (const id of ["framework-stack:DevLambdaReplayStack", "framework-stack:FrontendWebsiteS3Stack",
+          "gateway:http", "gateway:websocket", "database:external", "resource:rds.database",
+          "framework:deployment.localDevUrl"]) {
+          assert.equal(model.ownership?.[id]?.managedBy, "framework", `${label}: Studio recognizes ${id} in ${model.mode}`);
+        }
+        for (const id of ["framework:deployment.proofSetting", "resource:referenceExamples", "lambda:sign-in"]) {
+          assert.equal(model.ownership?.[id]?.managedBy, "developer", `${label}: ${id} belongs to the project in ${model.mode}`);
+        }
+      }
       assert.equal(snapshot.application?.name, "external-proof", `${label}: the app identity is the project's`);
       assert.ok(result.stdout.includes("PROOF_SETTING"), `${label}: deployment inputs are the project's own, not this checkout's`);
       assert.ok(result.stderr.includes(`Evaluating with the project's framework at ${realpathSync(path.join(project, "node_modules/aws-studio"))}`), `${label}: the evaluator uses the project's framework:\n${result.stderr.slice(-2000)}`);
     }
+    assert.equal(readSourceManifest(project).digest, projectSource, "opening projects applies Studio's catalog without rewriting app source or pins");
     assert.ok(existsSync(path.join(project, ".cache/framework-studio")), "Studio's per-project scratch state is written into the project");
     assert.equal(status(), before, "nothing in this checkout changed");
   } finally {

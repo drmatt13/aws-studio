@@ -45,9 +45,8 @@ export interface TagFacts {
  * Who maintains an entity's definition, projected once by the server for every graph entity.
  *
  * `framework`: AWS Studio's platform maintains it. `developer`: the application developer does.
- * `unresolved`: no declaration or structural owner establishes either, or the evidence conflicts.
- * Ownership is never inferred from how an entity is implemented, generated or deployed, from
- * class names or from entity kinds. Studio derives its editing limits from it (see
+ * `unresolved` is reserved for missing or invalid evidence. Studio matches its framework resource
+ * catalog against the opened project, then derives editing limits from the result (see
  * `ownershipConsequence` in shared/framework-management.ts); there is no separate edit lock.
  */
 export type Owner = "framework" | "developer" | "unresolved";
@@ -56,17 +55,21 @@ export interface OwnershipFacts {
   readonly managedBy: Owner;
   /**
    * `declared`: the entity's own declaration says `managedBy`.
-   * `default`: the entity has its own declaration without `managedBy`, which the DSL defines as developer.
+   * `default`: an ordinary project declaration without an explicit owner.
+   * `catalog`: Studio recognizes the framework definition.
+   * `project`: a project-owned source or namespace.
    * `inherited`: follows `from`, its single structural owner (a stack member, route, VPC fixture or database setting).
    * `entries`: a group with no declaration of its own, whose entries all agree.
-   * `conflict`: declarations disagree (between modes, or among a group's entries); see `conflicts`.
+   * `conflict`: mode declarations disagree; the framework owner protects the shared source.
    * `undeclared`: nothing declares an owner; `note` says what defines it.
    */
-  readonly basis: "declared" | "default" | "inherited" | "entries" | "conflict" | "undeclared";
+  readonly basis: "catalog" | "project" | "declared" | "default" | "inherited" | "entries" | "conflict" | "undeclared";
   readonly from?: string;
+  /** A project declaration can explicitly override this framework catalog default. */
+  readonly projectOverride?: true;
   /** The disagreeing evidence, for `conflict`: a mode or an entry, and what it declares. */
   readonly conflicts?: readonly { readonly where: string; readonly managedBy: Owner }[];
-  /** What defines an undeclared entity. */
+  /** Source or catalog evidence for this classification. */
   readonly note?: string;
   /**
    * Framework-maintained integrations this entity takes part in: contracts other code relies on,
@@ -359,6 +362,8 @@ export interface ModelResource {
   readonly memberSource?: "class" | "usage" | "both";
   /** For a stack: the class it reads. */
   readonly stackClass?: string;
+  /** Repository-relative source of the class, including classes in the installed framework. */
+  readonly stackFile?: string;
   /** Source evidence only; this never queries CloudFormation deployment status. */
   readonly stackUsage?: { readonly status: "referenced" | "unreferenced" | "unknown"; readonly sites: readonly SourceLocation[] };
   /** The configured database/owner, or a public root-environment export stack. */

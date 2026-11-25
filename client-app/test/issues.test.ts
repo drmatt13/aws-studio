@@ -204,9 +204,9 @@ test("warnings and workload errors take the right corner and move a role badge l
   const [unattached] = resourceIssues(stack);
   assert.deepEqual([unattached!.severity, unattached!.title, unattached!.badge], ["warning", "Not created in application.ts", "unattached"]);
   assert.deepEqual(unattached!.details, [
-    "Detached is a framework stack, but cdk-app/lib/application.ts never creates it, so it is not synthesized or deployed.",
+    "Detached exports environment values, but cdk-app/lib/application.ts never creates it, so it is not synthesized or deployed.",
     "Construct it from that file or one it imports.",
-  ], "a framework stack has no catalog entry to name");
+  ], "an export identifies the stack without claiming ownership or inventing a catalog entry");
   assert.deepEqual(cornerBadges({ roleIcon: "managed", frameworkManaged: true, issues: [unattached!] }), { right: "unattached" });
   const target = { ref: "lambda:events", implementation: { ready: false, problems: ["Configured handler index.ts is missing."] } } as unknown as ModelTarget;
   const issues = targetIssues(target, [

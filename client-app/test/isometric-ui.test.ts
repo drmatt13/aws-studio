@@ -271,9 +271,9 @@ test("an Errors filter appears only with errors, starts on, and keeps error wire
 test("framework settings groups expose input requirements and show errored connections for missing lines", async () => {
   const scene = buildScene(response.snapshot.models.dev, { layoutModels: Object.values(response.snapshot.models), resourceAvailability: catalogAvailability(response.snapshot.models) });
   const node = scene.nodes.find(item => item.id === "framework:local")!;
-  // Its entries are input declarations without managedBy, so the developer owns them; no platform lock.
+  // Local development settings use the same catalog as their map and inspector badges.
   assert.deepEqual([node.icon, node.island, node.label], ["group", "island:inputs", "Local development"]);
-  assert.equal(response.snapshot.models.dev.ownership?.["framework:local"]?.managedBy, "developer");
+  assert.equal(response.snapshot.models.dev.ownership?.["framework:local"]?.managedBy, "framework");
   assert.ok(!scene.nodes.some(item => item.id.startsWith("framework:local.")), "entries fold into their group's building");
   await mount(true, "framework:local");
   const inspector = ui.within(ui.screen.getByRole("complementary", { name: "Inspector" }));
@@ -375,9 +375,8 @@ test("input and environment grouping inspectors omit deployment controls", async
       assert.ok(ui.screen.getByRole("heading", { name: cdk ? "CDK environment files" : "Client environment files" }));
       ui.fireEvent.click(ui.screen.getByText("Island entries", { selector: "summary span" }).closest("summary")!);
       const members = document.querySelector('[data-slot="island-members"]')!;
-      // Neither file has a declared owner: both say so, and neither claims the platform badge.
-      assert.equal(ui.within(members as HTMLElement).queryAllByText("Framework managed").length, 0);
-      assert.equal(ui.within(members as HTMLElement).queryAllByText("Ownership unresolved").length, 1);
+      // Studio provides the CDK environment editor. The client mappings belong to the project.
+      assert.equal(ui.within(members as HTMLElement).queryAllByText("Framework managed").length, cdk ? 1 : 0);
       assert.equal(members.children.length, 1);
       assert.equal(ui.within(members as HTMLElement).queryByText("Application"), null);
       assert.equal(ui.screen.queryByRole("searchbox", { name: "Search client mappings" }), null);
@@ -1607,13 +1606,13 @@ interface Pointing {
 const pointing = () => (dom.window as unknown as { __studioLandscape: Pointing }).__studioLandscape;
 
 /** Moves the pointer onto an entity's label card, or the middle of its silhouette when no card is drawn, where the real picker finds it. */
-async function hoverOver(id: string) {
+async function hoverOver(id: string, role: "tooltip" | "dialog" = "tooltip") {
   await approachCanvasAfresh();
   await draw();
   const point = nodePoint(id);
   ui.fireEvent.pointerMove(document.querySelector("canvas")!, { pointerId: 1, clientX: point.x, clientY: point.y });
   await draw();
-  return ui.screen.findByRole("tooltip");
+  return ui.screen.findByRole(role);
 }
 
 /** A new deliberate hover approaches outside the previous card, which can cover nearby entities. */
@@ -1742,7 +1741,7 @@ test("keyboard connection previews expose each member's environments and scroll 
 
 test("input group hovers label every entry with its own environments and omit aggregate pills", async () => {
   await mount();
-  const card = await hoverOver("resource:client");
+  const card = await hoverOver("resource:client", "dialog");
   assert.equal(card.querySelector("[data-ui~=\"landscape-hover-tags\"]"), null);
   const rows = [...card.querySelectorAll<HTMLElement>("[data-ui~=\"landscape-hover-entries\"] > li")];
   assert.deepEqual(rows.map(row => row.querySelector("[data-ui~=\"landscape-hover-entry-name\"]")?.textContent), ["apiPort", "webSocketPort", "studioUrl"]);
@@ -1750,6 +1749,9 @@ test("input group hovers label every entry with its own environments and omit ag
   assert.equal(card.querySelector("[data-ui~=\"landscape-hover-subtitle\"]")?.textContent, "Input group · 3 inputs");
   assert.ok(!card.textContent?.includes("Not declared"), "the unlit Prod pill already says it");
   assert.ok(!card.textContent?.includes("Holds apiPort"), "the list replaces the prose name summary");
+  ui.fireEvent.click(ui.within(card).getByRole("button", { name: "webSocketPort" }));
+  await ui.screen.findByRole("heading", { name: "webSocketPort" });
+  assert.equal(card.isConnected, false);
 });
 
 test("combined CDK supplies carry each parameter's environment pair in hover and inspector", async () => {
@@ -2044,7 +2046,7 @@ test("an error replaces the ownership lock on the map and reddens the name; othe
   const environmentFile = scene.nodes.find(node => node.id === CDK_ENVIRONMENT_ID)!;
   assert.ok(environmentFile);
   assert.deepEqual(cornerBadges(environmentFile), { right: "error" });
-  assert.deepEqual(cornerBadges(environmentFile, false), {}, "the unresolved input file has no ownership lock");
+  assert.deepEqual(cornerBadges(environmentFile, false), { right: "managed" }, "the combined CDK environment shows its ownership when issues are hidden");
   const renderer = new SceneRenderer(document.createElement("canvas"));
   renderer.setScene(scene);
   const viewport = { width: 1920, height: 1000 };
@@ -2053,10 +2055,8 @@ test("an error replaces the ownership lock on the map and reddens the name; othe
   const errorCount = [...scene.nodes, ...scene.props].filter(item => cornerBadges(item).right === "error").length;
   assert.equal(images.filter(image => image.src === iconUrl("error")).length, errorCount, "the overview paints the file and any other actual project errors");
   const lockedCount = [...scene.nodes, ...scene.props].filter(item => !("issues" in item && item.issues?.length) && (item.roleIcon === "managed" || item.frameworkManaged)).length;
-  assert.equal(images.filter(image => image.src === iconUrl("managed")).length, lockedCount, "every managed item without an issue paints exactly one lock; the combined file node paints none");
-  // Give the isolated fixture a lock so the filter must restore it after
-  // painting the error. The real environment file above has unresolved ownership.
-  const file = { ...environmentFile, roleIcon: "managed" as const, frameworkManaged: true as const };
+  assert.equal(images.filter(image => image.src === iconUrl("managed")).length, lockedCount, "every managed item without an issue paints exactly one lock");
+  const file = environmentFile;
   const alone = { ...scene, nodes: [file], props: [], edges: [], routes: {} };
   const close = new SceneRenderer(document.createElement("canvas"));
   close.setScene(alone);

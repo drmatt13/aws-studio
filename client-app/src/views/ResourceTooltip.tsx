@@ -72,6 +72,7 @@ const samePlacement = (current: TooltipPlacement | undefined, next: TooltipPlace
 /** A measured, scrollable map preview, bounded by both its canvas host and the visual viewport. */
 export function CanvasTooltip(props: {
   readonly id: string;
+  readonly interactiveLabel?: string;
   readonly point: { readonly x: number; readonly y: number };
   readonly viewport: { readonly width: number; readonly height: number };
   readonly onPointerEnter: () => void;
@@ -115,23 +116,31 @@ export function CanvasTooltip(props: {
       window.visualViewport?.removeEventListener("scroll", measure);
     };
   }, [measure]);
-  return <div ref={card} id={props.id} data-ui="landscape-hover canvas-tooltip" data-map-tooltip className={cx("group", mapTooltipClasses())} role="tooltip"
+  return <div ref={card} id={props.id} data-ui="landscape-hover canvas-tooltip" data-map-tooltip className={cx("group", mapTooltipClasses())} role={props.interactiveLabel ? "dialog" : "tooltip"} aria-label={props.interactiveLabel}
     style={{ ...placement, visibility: placement ? "visible" : "hidden" }}
     onPointerEnter={props.onPointerEnter} onPointerLeave={props.onPointerLeave}>
     {props.children}
   </div>;
 }
 
-/** A portal keeps the preview out of the resource list's scrolling/clipping context. */
+/** Position the preview against its row as the list or viewport scrolls. */
 export function ResourceTooltip(props: {
   readonly id: string;
+  readonly interactiveLabel?: string;
   readonly anchor: HTMLElement;
+  readonly onFocusLeave?: () => void;
   readonly onPointerEnter: () => void;
   readonly onPointerLeave: () => void;
   readonly children: ReactNode;
 }) {
   const card = useRef<HTMLDivElement>(null);
   const [placement, setPlacement] = useState<ReturnType<typeof resourceTooltipPlacement>>();
+  const { anchor, id, interactiveLabel } = props;
+  useLayoutEffect(() => {
+    const attribute = interactiveLabel ? "aria-controls" : "aria-describedby";
+    anchor.setAttribute(attribute, id);
+    return () => anchor.removeAttribute(attribute);
+  }, [anchor, id, interactiveLabel]);
   useLayoutEffect(() => {
     const element = card.current;
     if (!element) return;
@@ -158,9 +167,15 @@ export function ResourceTooltip(props: {
       window.visualViewport?.removeEventListener("scroll", measure);
     };
   }, [props.anchor]);
-  return createPortal(<div ref={card} id={props.id} data-ui="landscape-hover resource-tooltip" data-map-tooltip className={cx("group", mapTooltipClasses(true))} role="tooltip"
+  // Place interactive previews after their trigger in the tab order.
+  const portal = props.interactiveLabel ? props.anchor.parentElement : document.body;
+  return createPortal(<div ref={card} id={props.id} data-ui="landscape-hover resource-tooltip" data-map-tooltip className={cx("group", mapTooltipClasses(true))} role={props.interactiveLabel ? "dialog" : "tooltip"} aria-label={props.interactiveLabel}
     style={{ ...placement, visibility: placement ? "visible" : "hidden" }}
+    onBlur={event => {
+      if (event.relatedTarget !== props.anchor && !event.currentTarget.contains(event.relatedTarget))
+        props.onFocusLeave?.();
+    }}
     onPointerEnter={props.onPointerEnter} onPointerLeave={props.onPointerLeave}>
     {props.children}
-  </div>, document.body);
+  </div>, portal ?? document.body);
 }

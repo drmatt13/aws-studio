@@ -72,7 +72,7 @@ const routeChange = (route: string, change: (line: string) => string) => {
 };
 const memory = (route: string) => routeChange(route, line => line.replace("memorySize: 256", "memorySize: 512"));
 
-test("every entity is owned by its declaration or structure, and anything else is explicitly unresolved", () => {
+test("Studio assigns catalog, declared and structural ownership in both modes", () => {
   for (const mode of ["dev", "prod"] as const) {
     const graph = state().snapshot.models[mode];
     assert.deepEqual(ownershipOf(graph, "lambda:platform"), { managedBy: "framework", basis: "declared" });
@@ -83,18 +83,18 @@ test("every entity is owned by its declaration or structure, and anything else i
     assert.deepEqual(ownershipOf(graph, "resource:fixed"), { managedBy: "framework", basis: "declared" });
     assert.deepEqual(ownershipOf(graph, "resource:mine"), { managedBy: "developer", basis: "default" });
     assert.deepEqual(ownershipOf(graph, "resource:providers"), { managedBy: "framework", basis: "entries" });
-    // Conflicting evidence is unresolved, with the evidence listed: between modes, and among entries.
-    assert.deepEqual(ownershipOf(graph, "lambda:split"), { managedBy: "unresolved", basis: "conflict", conflicts: [{ where: "dev", managedBy: "developer" }, { where: "prod", managedBy: "framework" }] });
-    assert.equal(ownershipOf(graph, "route:http:/split").managedBy, "unresolved");
-    assert.deepEqual(ownershipOf(graph, "resource:mixed"), { managedBy: "unresolved", basis: "conflict", conflicts: [{ where: "resource:mixed.platform", managedBy: "framework" }, { where: "resource:mixed.app", managedBy: "developer" }] });
-    // The HTTP API is generated from routes; no declaration owns it, whatever its kind suggests.
-    assert.equal(ownershipOf(graph, "gateway:http").managedBy, "unresolved");
-    assert.equal(ownershipOf(graph, "gateway:http").basis, "undeclared");
+    // One source definition must satisfy the framework guard if either mode is framework owned.
+    assert.deepEqual(ownershipOf(graph, "lambda:split"), { managedBy: "framework", basis: "conflict", conflicts: [{ where: "dev", managedBy: "developer" }, { where: "prod", managedBy: "framework" }] });
+    assert.equal(ownershipOf(graph, "route:http:/split").managedBy, "framework");
+    assert.equal(ownershipOf(graph, "resource:mixed").basis, "project");
+    // Studio defines the HTTP API independently of the owners of its routes.
+    assert.equal(ownershipOf(graph, "gateway:http").managedBy, "framework");
+    assert.equal(ownershipOf(graph, "gateway:http").basis, "catalog");
     // Every graph entity has an answer, and none is silently developer owned.
     for (const id of [...graph.targets.map(target => target.ref), ...graph.routes.map(route => route.id), ...graph.resources.map(resource => resource.id)]) assert.ok(graph.ownership?.[id], `${mode}: ${id} has an owner record`);
-    for (const [id, facts] of Object.entries(graph.ownership ?? {})) if (facts.managedBy === "developer") assert.ok(["default", "declared", "inherited", "entries"].includes(facts.basis), `${id}: developer only from evidence`);
+    for (const [id, facts] of Object.entries(graph.ownership ?? {})) if (facts.managedBy === "developer") assert.ok(["project", "default", "declared", "inherited", "entries"].includes(facts.basis), `${id}: developer only from evidence`);
   }
-  assert.ok(idsOwnedBy(model(), "unresolved").has("lambda:split"));
+  assert.ok(idsOwnedBy(model(), "framework").has("lambda:split"));
 });
 
 test("the server refuses changes to definitions Studio does not own, and allows developer-owned ones", async () => {
@@ -102,8 +102,8 @@ test("the server refuses changes to definitions Studio does not own, and allows 
   await assert.rejects(edits.planBatch([{ kind: "removeWorkload", target: "lambda:platform" }], revision()), /platform maintains it/);
   await assert.rejects(edits.planBatch([{ kind: "route", route: "route:http:/platform", value: "/moved" }], revision()), /platform maintains it/);
   await assert.rejects(edits.planBatch([{ kind: "resourceConfig", intent: { resource: "resource:fixed", kind: "input", fromEnv: "RENAMED", group: "", requirements: {}, modes: { dev: { present: true, required: false, default: "one" }, prod: { present: true, required: false, default: "one" } } } }], revision()), /platform maintains it/);
-  // Unresolved ownership is not safe to change either.
-  assert.throws(() => assertOwnershipAllows(fixture, state(), [memory("/split")]), /lambda:split: its ownership is unresolved/);
+  // The shared definition stays protected when either mode assigns it to the framework.
+  assert.throws(() => assertOwnershipAllows(fixture, state(), [memory("/split")]), /lambda:split: the AWS Studio platform maintains it/);
   // Developer-owned declarations in the same file stay editable, as do the platform one's tags.
   const mine = await edits.planBatch([{ kind: "resourceConfig", intent: { resource: "resource:mine", kind: "input", fromEnv: "MINE", group: "", requirements: {}, modes: { dev: { present: true, required: false, default: "three" }, prod: { present: true, required: false, default: "three" } } } }], revision());
   assert.ok(mine.ok, JSON.stringify(mine.preflight));
@@ -192,7 +192,7 @@ test("declaration signatures ignore metadata, comments and formatting, and nothi
   assert.notEqual(signature('input.fromEnv("X").default("2")'), base);
   assert.notEqual(signature('input.fromEnv("X", { bindingPath: ["x"] }).default("1")'), base);
   const owner = (text: string) => { const source = parse("x.ts", `const x = ${text};`); return declaredOwner(source, 10, source.text.length - 1); };
-  assert.equal(owner('input.fromEnv("X")'), "developer");
+  assert.equal(owner('input.fromEnv("X")'), undefined);
   assert.equal(owner('input.fromEnv("X", { managedBy: "framework" })'), "framework");
   assert.equal(owner('input.fromEnv("X", { managedBy: OWNER })'), "unresolved", "a computed owner is not readable evidence");
 });
@@ -201,7 +201,7 @@ test("stack source is refused when its stack is platform maintained or unresolve
   const fake = {
     snapshot: { models: {
       dev: { ownership: { "resource:auth": { managedBy: "framework", basis: "declared" }, "resource:mine": { managedBy: "developer", basis: "default" }, "resource:cognitoNamed": { managedBy: "developer", basis: "default" }, "framework-stack:ExportOnlyStack": { managedBy: "unresolved", basis: "undeclared" } }, resources: [] },
-      prod: { ownership: {}, resources: [] },
+      prod: { ownership: { "framework-stack:FrontendWebsiteS3Stack": { managedBy: "framework", basis: "catalog" }, "resource:extra": { managedBy: "developer", basis: "default" } }, resources: [] },
     } },
     built: {
       catalog: new Map([
@@ -209,14 +209,19 @@ test("stack source is refused when its stack is platform maintained or unresolve
         ["mine", { stack: { className: "MineStack", location: { file: "cdk-app/lib/app/mine-stack.ts" }, members: [] } }],
         // A developer stack named like a framework stack is still the developer's.
         ["cognitoNamed", { stack: { className: "HttpApiGatewayStack", location: { file: "cdk-app/lib/app/http-api-gateway-stack.ts" }, members: [] } }],
+        ["extra", { stack: { className: "ProjectStack", location: { file: "cdk-app/lib/app/frontend-website-s3-stack.ts" }, members: [] } }],
       ]),
-      exportStacks: [{ className: "ExportOnlyStack", location: { file: "node_modules/aws-studio/cdk/export-only-stack.ts" } }],
+      exportStacks: [
+        { className: "ExportOnlyStack", location: { file: "node_modules/aws-studio/cdk/export-only-stack.ts" } },
+        { className: "FrontendWebsiteS3Stack", location: { file: "cdk-app/lib/app/frontend-website-s3-stack.ts" } },
+      ],
     },
   } as unknown as StudioState;
   assert.throws(() => assertStackSourceWritable(fake, "cdk-app/lib/app/auth-stack.ts"), /resource:auth, which the AWS Studio platform maintains/);
-  assert.throws(() => assertStackSourceWritable(fake, "node_modules/aws-studio/cdk/export-only-stack.ts"), /framework-stack:ExportOnlyStack, whose ownership is unresolved/);
+  assert.throws(() => assertStackSourceWritable(fake, "node_modules/aws-studio/cdk/export-only-stack.ts"), /could not verify the owner of framework-stack:ExportOnlyStack/);
   assert.doesNotThrow(() => assertStackSourceWritable(fake, "cdk-app/lib/app/mine-stack.ts"));
   assert.doesNotThrow(() => assertStackSourceWritable(fake, "cdk-app/lib/app/http-api-gateway-stack.ts"));
+  assert.throws(() => assertStackSourceWritable(fake, "cdk-app/lib/app/frontend-website-s3-stack.ts"), /framework-stack:FrontendWebsiteS3Stack/, "a project class in the same file cannot release the managed implementation");
 });
 
 test("Studio refuses approval before the agent host is asked, and settled proposals keep their retry path", async () => {

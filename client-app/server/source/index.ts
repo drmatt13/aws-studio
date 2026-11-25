@@ -13,7 +13,7 @@ import { parseOrigin, type ParsedOrigin } from "../model/origin";
 import { readConfiguredCatalog, readResourceLinks, type CatalogEntrySource } from "./catalog";
 import { descriptorFactory } from "./factories";
 import { readConstructorSites, readStackUsage } from "./stack-usage";
-import { readExportStacks, type ExportStackSource } from "./export-stacks";
+import { matchesExportStack, readExportStacks, type ExportStackSource } from "./export-stacks";
 import { scanCdkLinks } from "./cdk-links";
 import { discoverCapabilities } from "./capabilities";
 import { discoverPolicyRules } from "./permission-rules";
@@ -289,7 +289,7 @@ export function buildSourceIndex(
 
   try {
     for (const stack of exportStacks) {
-      const entry = [...catalog].find(([, item]) => item.stack?.className === stack.className);
+      const entry = [...catalog].find(([, item]) => matchesExportStack(item.stack, stack));
       const id = entry ? `resource:${entry[0]}` : `framework-stack:${stack.className}`;
       entities[id] ??= { origin: stack.className, key: stack.location, value: stack.location };
       catalogFacts[id] ??= { stackClass: stack.className, stackLocation: stack.location };
@@ -322,7 +322,7 @@ export function buildSourceIndex(
   }
   const tagSources = located ? { located, catalog } : undefined;
   for (const stack of exportStacks) {
-    if ([...catalog.values()].some(item => item.stack?.className === stack.className)) continue;
+    if ([...catalog.values()].some(item => matchesExportStack(item.stack, stack))) continue;
     const id = `framework-stack:${stack.className}`;
     taggedEntities.add(id);
     const tagLocation = stackTagLocation(repositoryRoot, model, files, stack.className, tagSources);

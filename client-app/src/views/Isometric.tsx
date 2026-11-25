@@ -780,6 +780,8 @@ export function Isometric() {
       event.stopPropagation();
       window.clearTimeout(hoverOpenTimer.current);
       window.clearTimeout(hoverCloseTimer.current);
+      if (document.getElementById(tooltipId)?.contains(document.activeElement))
+        (keyboardAnchor ?? canvasRef.current)?.focus({ preventScroll: true });
       dismissedHover.current = hover.id;
       tooltipPointed.current = false;
       setHover(undefined);
@@ -787,11 +789,6 @@ export function Isometric() {
     document.addEventListener("keydown", dismiss, true);
     return () => document.removeEventListener("keydown", dismiss, true);
   }, [hover, resourcePreview, keyboardAnchor, tooltipId]);
-  useLayoutEffect(() => {
-    if (!keyboardAnchor || !hover) return;
-    keyboardAnchor.setAttribute("aria-describedby", tooltipId);
-    return () => keyboardAnchor.removeAttribute("aria-describedby");
-  }, [keyboardAnchor, hover, tooltipId]);
 
   // High-rate pointers only need one hit test and tooltip position per paint.
   const hoverFrame = useRef<number | undefined>(undefined);
@@ -1124,7 +1121,7 @@ export function Isometric() {
             canvasRef.current?.focus();
             return;
           }
-          const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button")];
+          const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button[data-hover-id]")];
           const current = items.indexOf(event.target as HTMLButtonElement);
           if (current < 0) return;
           const next =
@@ -1335,6 +1332,20 @@ export function Isometric() {
               viewport={live.current.viewport}
               id={tooltipId}
               anchor={keyboardAnchor}
+              interactiveLabel={
+                index.resources.get(hover.id)?.kind === "group" ? nodes.get(hover.id)?.label : undefined
+              }
+              onInspect={(id) => {
+                tooltipPointed.current = false;
+                setHovered(undefined);
+                setHover(undefined);
+                setKeyboardAnchor(undefined);
+                inspect(id, true);
+              }}
+              onFocusLeave={() => {
+                setKeyboardAnchor(undefined);
+                if (!tooltipPointed.current) setHovered(undefined);
+              }}
               onPointerEnter={keepTooltip}
               onPointerLeave={leaveTooltip}
             />
@@ -1408,6 +1419,9 @@ function visibleViewport(container: HTMLElement | null, viewport: Viewport): Vie
 /** What the pointer is over, in words: an entity, a relationship, a place, or furniture. */
 function HoverCard(props: {
   readonly hover: Hover;
+  readonly interactiveLabel?: string;
+  readonly onInspect: (id: string) => void;
+  readonly onFocusLeave: () => void;
   readonly scene: Scene;
   readonly nodes: ReadonlyMap<string, SceneNode>;
   readonly viewport: Viewport;
@@ -1426,7 +1440,7 @@ function HoverCard(props: {
         : undefined;
   if (current.kind === "node" || current.kind === "prop") {
     if (!resource) return null;
-    content = <ResourceHoverContent resource={resource} />;
+    content = <ResourceHoverContent resource={resource} onInspect={props.onInspect} />;
   } else if (current.kind === "edge") {
     const sceneEdge = props.scene.edges.find((candidate) => candidate.id === current.id);
     const edge = sceneEdge?.edge;
@@ -1446,14 +1460,18 @@ function HoverCard(props: {
       />
     );
   }
-  const events = { onPointerEnter: props.onPointerEnter, onPointerLeave: props.onPointerLeave };
+  const previewProps = {
+    interactiveLabel: props.interactiveLabel,
+    onPointerEnter: props.onPointerEnter,
+    onPointerLeave: props.onPointerLeave,
+  };
   const key = `${current.kind}:${current.id}:${current.band ?? ""}`;
   return props.anchor ? (
-    <ResourceTooltip key={key} id={props.id} anchor={props.anchor} {...events}>
+    <ResourceTooltip key={key} id={props.id} anchor={props.anchor} onFocusLeave={props.onFocusLeave} {...previewProps}>
       {content}
     </ResourceTooltip>
   ) : (
-    <CanvasTooltip key={key} id={props.id} point={current} viewport={props.viewport} {...events}>
+    <CanvasTooltip key={key} id={props.id} point={current} viewport={props.viewport} {...previewProps}>
       {content}
     </CanvasTooltip>
   );

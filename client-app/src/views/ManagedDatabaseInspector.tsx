@@ -35,6 +35,7 @@ export function ManagedDatabaseInspector({
 }) {
   const { snapshot, model, select, mode } = useStudio();
   const database = model.managedDatabase!;
+  const declaration = `database:${database.id}`;
   const postgres = local ?? snapshot.models.dev.localServices?.[0];
   const consumers = databaseConsumers(Object.values(snapshot.models), database.id);
   const rds = snapshot.models.prod.resources.find((item) => item.id === database.resource);
@@ -43,7 +44,7 @@ export function ManagedDatabaseInspector({
     snapshot.models.prod.resources.find(
       (item) => item.kind === "stack" && database.resource.startsWith(`${item.id}.`),
     )?.id;
-  const source = snapshot.source.entities[`database:${database.id}`]?.value;
+  const source = snapshot.source.entities[declaration]?.value;
   const availability = { dev: !!postgres?.enabled, prod: !!rds && !rds.absent };
   const development = useHoverEnvironments("local", postgres?.id ?? "local:postgres");
   const production = useHoverEnvironments("resource", database.resource);
@@ -68,12 +69,12 @@ export function ManagedDatabaseInspector({
           icon={local ? "postgres" : "database"}
           reference={`${database.databaseName} · ${database.id}`}
         />
-        <OwnershipStatus entity={local?.id ?? resource?.id ?? database.resource} />
+        <OwnershipStatus entity={declaration} />
         <Written placement="header" location={source} label="Declared in" />
       </header>
       <Description entity={local?.id ?? resource?.id ?? database.resource} />
-      <Tags entity={`database:${database.id}`} />
-      <Ownership entity={`database:${database.id}`} />
+      <Tags entity={declaration} />
+      <Ownership entity={declaration} title="Database declaration ownership" />
       <InspectorSection
         title="Environments"
         description="One application schema. Independent data in development and production."

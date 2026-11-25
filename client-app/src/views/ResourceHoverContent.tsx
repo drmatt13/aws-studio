@@ -24,11 +24,13 @@ import type { EntityIssue } from "../issues";
 import { useStudio } from "../studio";
 import { EnvironmentPills } from "./DeploymentBadge";
 import { IssueGlyph } from "./IssueNotice";
-import { FrameworkManagedStatus, UnresolvedOwnershipStatus } from "./ResourceStatus";
-import { isFrameworkManaged } from "../../shared/framework-management";
+import { FrameworkManagedStatus, OwnershipConflictStatus } from "./ResourceStatus";
 
 /** The map and Resources panel describe the same entity, including staged edits. */
-export function ResourceHoverContent({ resource }: { readonly resource: SceneNode | Prop }) {
+export function ResourceHoverContent({ resource, onInspect }: {
+  readonly resource: SceneNode | Prop;
+  readonly onInspect: (id: string) => void;
+}) {
   const { draft, snapshot, model } = useStudio();
   const indexes = useMemo(
     () => ({ dev: indexModel(snapshot.models.dev), prod: indexModel(snapshot.models.prod) }),
@@ -52,11 +54,13 @@ export function ResourceHoverContent({ resource }: { readonly resource: SceneNod
       facts={entries ? undefined : facts}
       description={description}
       entries={entries}
+      onInspect={onInspect}
       details={details}
       lines={lines}
       notes={contents?.notes}
       issues={node?.issues}
-      {...(group?.kind === "group" && isFrameworkManaged(indexes[model.mode], group.id) ? { frameworkManaged: true } : {})}
+      frameworkManaged={facts.frameworkManaged}
+      ownershipConflict={facts.ownershipConflict}
       unavailableDescription={
         group?.kind === "input" || group?.kind === "secret" ? "not declared" : undefined
       }
@@ -164,12 +168,14 @@ export function HoverEntries({
   context = "declaration",
   label = "Input parameters and secrets",
   pills = true,
+  onInspect,
 }: {
   readonly entries: readonly HoverEntry[];
   readonly context?: "declaration" | "supply" | "cdk-supply" | "connection";
   readonly label?: string;
   /** False when the heading's pair already describes every entry. */
   readonly pills?: boolean;
+  readonly onInspect?: (id: string) => void;
 }) {
   if (!entries.length) return null;
   const descriptions =
@@ -189,14 +195,22 @@ export function HoverEntries({
       {entries.map((entry) => (
         <li
           key={entry.id}
-          className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 border-map-hairline/60 py-2 not-first:border-t group-last/entries:last:pb-0"
+          className="relative grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 border-map-hairline/60 py-2 not-first:border-t group-last/entries:last:pb-0"
         >
-          <span
-            data-ui="landscape-hover-entry-name"
-            className="min-w-0 pt-px text-map-ink wrap-anywhere"
-          >
-            {entry.label}
-          </span>
+          {onInspect ? (
+            <button
+              type="button"
+              data-ui="landscape-hover-entry-name"
+              className="min-w-0 cursor-pointer border-0 bg-transparent p-0 pt-px text-left text-map-ink underline-offset-[3px] wrap-anywhere after:absolute after:inset-0 hover:underline focus-visible:underline focus-visible:outline-map-focus"
+              onClick={() => onInspect(entry.id)}
+            >
+              {entry.label}
+            </button>
+          ) : (
+            <span data-ui="landscape-hover-entry-name" className="min-w-0 pt-px text-map-ink wrap-anywhere">
+              {entry.label}
+            </span>
+          )}
           {pills ? (
             <EnvironmentPills
               availability={entry.availability}
@@ -234,18 +248,19 @@ export function HoverContent(props: {
   readonly lines: readonly (string | undefined)[];
   readonly notes?: readonly string[];
   readonly entries?: readonly HoverEntry[];
+  readonly onInspect?: (id: string) => void;
   readonly details?: readonly HoverEntryDetail[];
   readonly issues?: readonly EntityIssue[];
   /** States ownership when no heading pair is shown (the entries carry the environments). */
   readonly frameworkManaged?: boolean;
-  readonly ownershipUnresolved?: boolean;
+  readonly ownershipConflict?: boolean;
   readonly emptyDescription?: boolean;
   readonly showLocations?: boolean;
   readonly unavailableDescription?: string;
 }) {
   const { title, subtitle, facts, description, lines } = props;
   const managed = props.frameworkManaged ?? facts?.frameworkManaged;
-  const unresolved = props.ownershipUnresolved ?? facts?.ownershipUnresolved;
+  const conflict = props.ownershipConflict ?? facts?.ownershipConflict;
   const resourceType = managed
     ? subtitle?.replace(/^framework[-\s]managed\s*/i, "")
     : subtitle;
@@ -277,7 +292,7 @@ export function HoverContent(props: {
             />
           </span>
         ) : null}
-        {resourceType || managed || unresolved ? (
+        {resourceType || managed || conflict ? (
           <div
             data-ui="landscape-hover-resource-meta"
             className="col-span-full grid justify-items-start gap-2"
@@ -291,7 +306,7 @@ export function HoverContent(props: {
               </span>
             ) : null}
             {managed ? <FrameworkManagedStatus appearance="map" placement="inline" /> : null}
-            {!managed && unresolved ? <UnresolvedOwnershipStatus appearance="map" placement="inline" /> : null}
+            {conflict ? <OwnershipConflictStatus appearance="map" placement="inline" /> : null}
           </div>
         ) : null}
       </div>
@@ -331,7 +346,7 @@ export function HoverContent(props: {
           ))}
         </dl>
       ) : null}
-      {props.entries?.length ? <HoverEntries entries={props.entries} /> : null}
+      {props.entries?.length ? <HoverEntries entries={props.entries} onInspect={props.onInspect} /> : null}
       <HoverDetails details={props.details} />
       {lines.some(Boolean) ? (
         <div data-ui="landscape-hover-copy" className="grid min-w-0 gap-2">

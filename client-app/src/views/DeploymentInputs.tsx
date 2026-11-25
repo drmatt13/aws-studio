@@ -18,7 +18,7 @@ import type { Mode, ModelResource, SourceLocation } from "../../shared/model";
 import { api } from "../api";
 import { editorLink, titleOf } from "../lookup";
 import { useStudio } from "../studio";
-import { EnvironmentFileStatus, OwnershipStatus } from "./ResourceStatus";
+import { OwnershipStatus } from "./ResourceStatus";
 import { isFrameworkManaged } from "../../shared/framework-management";
 import { IssueNotice } from "./IssueNotice";
 import { resourceIssues } from "../issues";
@@ -485,7 +485,7 @@ export function EnvironmentFileView({ resource }: { resource: ModelResource }) {
           Environment files
         </InspectorKind>
         <EntityName entity={CDK_ENVIRONMENT_ID} fallback="CDK environment" icon="envFile" />
-        <EnvironmentFileStatus resource={collection ?? resource} />
+        <OwnershipStatus entity={(collection ?? resource).id} />
         {/* Where each environment's values live, as the client mappings' header names its exports. */}
         <InspectorFacts
           aria-label="Environment input files"

@@ -68,7 +68,7 @@ export const CDK_APP_FILE = "cdk-app/lib/application.ts";
  */
 function notCreatedIssue(resource: ModelResource): EntityIssue {
   const className = resource.stackClass ?? resource.path[resource.path.length - 1]!;
-  const declared = resource.frameworkStack ? `${className} is a framework stack` : `stacks.${resource.path.join(".")} declares ${className}`;
+  const declared = resource.frameworkStack ? `${className} exports environment values` : `stacks.${resource.path.join(".")} declares ${className}`;
   return { severity: "warning", title: "Not created in application.ts", badge: "unattached", details: [
     `${declared}, but ${CDK_APP_FILE} never creates it, so it is not synthesized or deployed.`,
     resource.frameworkStack

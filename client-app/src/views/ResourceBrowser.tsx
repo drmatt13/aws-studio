@@ -1,3 +1,4 @@
+import { useStudio } from "../studio";
 import { cx } from "../ui/classes";
 import { Select } from "../ui/FormControls";
 import { buttonClasses } from "../ui/Button";
@@ -68,6 +69,7 @@ export function ResourceBrowser(props: {
   readonly memory: RefObject<BrowserMemory>;
 }) {
   const { scene, nodes, fixtures, memory } = props;
+  const { index } = useStudio();
   const list = useRef<HTMLDivElement>(null);
   const [pointed, setPointed] = useState<string>();
   const [focused, setFocused] = useState<string>();
@@ -113,6 +115,8 @@ export function ResourceBrowser(props: {
       if (event.key !== "Escape" || (dismissed && !tooltip)) return;
       event.preventDefault();
       event.stopPropagation();
+      if (document.getElementById(tooltipId)?.contains(document.activeElement))
+        tooltip?.anchor.focus({ preventScroll: true });
       dismissTooltip();
     };
     document.addEventListener("keydown", escape, true);
@@ -312,9 +316,6 @@ export function ResourceBrowser(props: {
                       if (element) anchors.current.set(row.id, element);
                       else anchors.current.delete(row.id);
                     }}
-                    aria-describedby={
-                      tooltip?.id === row.id && tooltipResource ? tooltipId : undefined
-                    }
                     onPointerDown={(event) => {
                       touch.current = event.pointerType === "touch";
                       if (touch.current) dismissTooltip();
@@ -338,7 +339,10 @@ export function ResourceBrowser(props: {
                         setFocused(row.id);
                       }
                     }}
-                    onBlur={() => setFocused(undefined)}
+                    onBlur={(event) => {
+                      if (!document.getElementById(tooltipId)?.contains(event.relatedTarget))
+                        setFocused(undefined);
+                    }}
                     onClick={() => props.onInspect(row.id)}
                   >
                     <span
@@ -413,10 +417,20 @@ export function ResourceBrowser(props: {
           key={tooltip.id}
           id={tooltipId}
           anchor={tooltip.anchor}
+          interactiveLabel={
+            index.resources.get(tooltip.id)?.kind === "group" ? tooltipResource.label : undefined
+          }
+          onFocusLeave={() => setFocused(undefined)}
           onPointerEnter={() => setCardPointed(tooltip.id)}
           onPointerLeave={() => setCardPointed(undefined)}
         >
-          <ResourceHoverContent resource={tooltipResource} />
+          <ResourceHoverContent
+            resource={tooltipResource}
+            onInspect={(id) => {
+              dismissTooltip();
+              props.onInspect(id);
+            }}
+          />
         </ResourceTooltip>
       ) : null}
     </>

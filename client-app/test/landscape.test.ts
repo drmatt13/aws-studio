@@ -1136,10 +1136,9 @@ test("an environment file that has not been generated wears only a red cross on 
   const withExists = (exists: boolean) => buildScene({ ...model, resources: model.resources.map((resource) => resource.deploymentFile ? { ...resource, deploymentFile: { ...resource.deploymentFile, exists } } : resource) }, { });
   const badges = (scene: Scene) => scene.nodes.filter((node) => node.id.startsWith("envfile:")).map((node) => cornerBadges(node));
   assert.deepEqual(badges(withExists(false)), [{ right: "error" }]);
-  // No declaration names an owner for an inputs file: it is unresolved, so it carries no platform lock.
-  assert.deepEqual(badges(withExists(true)), [{}]);
-  assert.ok(withExists(false).nodes.filter(node => node.id.startsWith("envfile:")).every(node => !node.frameworkManaged));
-  assert.ok(Object.entries(model.ownership ?? {}).filter(([id]) => id.startsWith("envfile:")).every(([, facts]) => facts.managedBy === "unresolved"));
+  assert.deepEqual(badges(withExists(true)), [{ right: "managed" }]);
+  assert.equal(model.ownership?.[CDK_ENVIRONMENT_ID]?.managedBy, "framework");
+  for (const id of ["envfile:dev", "envfile:prod"]) assert.equal(model.ownership?.[id]?.managedBy, "developer");
 });
 
 test("an enabled connection reads clearly in its own view and recedes where it is disabled", () => {

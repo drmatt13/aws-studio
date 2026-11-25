@@ -1,13 +1,14 @@
 import path from "node:path";
 import ts from "typescript";
 import { locateConfigSource, type LocatedConfigSource } from "aws-studio/source-index";
-import { ownershipOf } from "../../shared/framework-management";
 import type { ModeModel, Owner } from "../../shared/model";
 import { toRelative } from "../files";
-import { FRAMEWORK_SETTING_FILES, locateFrameworkSetting } from "../input-choices-source";
+import { FRAMEWORK_SETTING_FILES, frameworkInputChoices, locateFrameworkSetting } from "../input-choices-source";
 import { parseOrigin } from "../model/origin";
 import { readConfiguredCatalog, type CatalogEntrySource } from "../source/catalog";
+import { matchesExportStack } from "../source/export-stacks";
 import { locateManagedDatabase } from "../source/database";
+import { literalKey } from "../source/syntax";
 import { SourceFiles } from "../source";
 import type { StudioState } from "../snapshot";
 import { EditError } from "aws-studio/source/io";
@@ -43,7 +44,7 @@ export interface OwnershipTransition {
 }
 
 interface Span { readonly start: number; readonly end: number }
-interface Declaration { readonly file: string; readonly spans: readonly Span[] }
+interface Declaration { readonly file: string; readonly spans: readonly Span[]; readonly configuration?: readonly Span[] }
 
 const IGNORED_PROPERTIES = new Set(["tags", "managedBy"]);
 const MODELS = (state: StudioState) => [state.snapshot.models.dev, state.snapshot.models.prod];
@@ -51,7 +52,7 @@ const MODELS = (state: StudioState) => [state.snapshot.models.dev, state.snapsho
 /** The strictest owner across both graphs: platform first, then unresolved, then developer. */
 export function guardedOwner(state: StudioState, id: string): Owner {
   // Only graphs that hold the entity give evidence; an entity neither holds is unresolved.
-  const owners = MODELS(state).filter(model => model.ownership?.[id]).map(model => ownershipOf(model, id).managedBy);
+  const owners = MODELS(state).flatMap(model => model.ownership?.[id]?.managedBy ?? []);
   if (!owners.length) return "unresolved";
   return owners.includes("framework") ? "framework" : owners.includes("unresolved") ? "unresolved" : "developer";
 }
@@ -60,7 +61,7 @@ export function guardedOwner(state: StudioState, id: string): Owner {
 function declaredEntities(state: StudioState): Map<string, ModeModel> {
   const result = new Map<string, ModeModel>();
   for (const model of MODELS(state)) for (const [id, facts] of Object.entries(model.ownership ?? {})) {
-    if ((facts.basis === "declared" || facts.basis === "default" || facts.basis === "conflict") && !result.has(id)) result.set(id, model);
+    if ((facts.projectOverride || facts.basis === "declared" || facts.basis === "default" || facts.basis === "conflict") && !result.has(id)) result.set(id, model);
   }
   return result;
 }
@@ -68,24 +69,24 @@ function declaredEntities(state: StudioState): Map<string, ModeModel> {
 /** Stack class files whose stack is not developer owned, keyed by repository-relative file. */
 export function protectedStackFiles(state: StudioState): Map<string, string> {
   const files = new Map<string, string>();
-  const catalogFiles = new Set<string>();
+  const catalogClasses: CatalogEntrySource["stack"][] = [];
   for (const [key, entry] of state.built.catalog ?? []) {
     if (!entry.stack?.location) continue;
-    catalogFiles.add(entry.stack.location.file);
+    catalogClasses.push(entry.stack);
     if (guardedOwner(state, `resource:${key}`) !== "developer") files.set(entry.stack.location.file, `resource:${key}`);
   }
-  // A stack outside the catalog has no declaration, so its ownership is unresolved.
+  // Export stacks also have a Studio ownership record when the app has no stack() entry.
   for (const stack of state.built.exportStacks ?? []) {
     const id = `framework-stack:${stack.className}`;
-    if (!catalogFiles.has(stack.location.file) && guardedOwner(state, id) !== "developer") files.set(stack.location.file, id);
+    if (!catalogClasses.some(entry => matchesExportStack(entry, stack)) && guardedOwner(state, id) !== "developer") files.set(stack.location.file, id);
   }
   return files;
 }
 
 function stackRefusal(relativeFile: string, id: string, owner: Owner): string {
   return owner === "framework"
-    ? `${relativeFile} defines ${id}, which the AWS Studio platform maintains (managedBy: "framework"). Studio does not change platform-maintained stack source. Take ownership in its own review first if you intend to maintain it.`
-    : `${relativeFile} defines ${id}, whose ownership is unresolved. Studio does not change stack source it cannot attribute. Declare the stack in framework-config/stacks with an owner first.`;
+    ? `${relativeFile} defines ${id}, which the AWS Studio platform maintains. Studio protects this stack's implementation.`
+    : `Studio could not verify the owner of ${id} in ${relativeFile}. Refresh the project before editing its stack source.`;
 }
 
 /** Refuse a native CDK write into a stack class that is not developer owned. */
@@ -116,7 +117,10 @@ function locateDeclaration(root: string, model: ModeModel, located: LocatedConfi
   }
   if (id.startsWith("database:")) {
     const database = locateManagedDatabase(root, files);
-    return database && id === `database:${database.id}` ? [{ file: database.file, spans: [database.span] }] : undefined;
+    if (!database || id !== `database:${database.id}`) return undefined;
+    const configuration = database.object.properties.filter(property => ts.isPropertyAssignment(property) && ["settings", "vpc", "subnet"].includes(literalKey(property) ?? ""))
+      .map(property => ({ start: property.getStart(database.source), end: property.end }));
+    return [{ file: database.file, spans: [database.span], configuration }];
   }
   if (id.startsWith("resource:")) {
     const entry = catalog.get(id.slice("resource:".length));
@@ -130,14 +134,24 @@ function locateDeclaration(root: string, model: ModeModel, located: LocatedConfi
     const file = path.join(root, FRAMEWORK_SETTING_FILES[setting[1] as keyof typeof FRAMEWORK_SETTING_FILES]);
     let span: Span | undefined;
     try { span = locateFrameworkSetting(files.get(file), setting[2]!); } catch { return undefined; }
-    return span ? [{ file, spans: [span] }] : undefined;
+    if (!span) return undefined;
+    const resource = model.resources.find(item => item.id === id);
+    const policy = resource?.inputChoices;
+    if (!policy || !resource.fromEnv || model.ownership?.[id]?.basis !== "catalog") return [{ file, spans: [span] }];
+    const builder = frameworkInputChoices(root, setting[1]!, setting[2]!, resource.fromEnv, new Map([[file, files.text(file)]]));
+    const configuration = builder?.calls.filter(call => {
+      if (call.name === "enum") return !policy.sensitive;
+      if (call.name === "default") return policy.fallback;
+      return policy.policy && builder.literalPolicy && (call.name === "required" || call.name === "only" && policy.availability);
+    }).map(call => ({ start: call.receiver.end, end: call.node.end }));
+    return [{ file, spans: [span], configuration }];
   }
   return undefined;
 }
 
 /** Tokens of a declaration, without trivia, commas, empty objects, or its metadata properties. */
-export function declarationSignature(source: ts.SourceFile, start: number, end: number): string {
-  const skipped: { start: number; end: number }[] = [];
+export function declarationSignature(source: ts.SourceFile, start: number, end: number, configuration: readonly Span[] = []): string {
+  const skipped = [...configuration];
   const visit = (node: ts.Node): void => {
     if (node.pos >= end || node.end <= start) return;
     if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) && node.getStart(source) >= start && node.end <= end) {
@@ -160,8 +174,8 @@ export function declarationSignature(source: ts.SourceFile, start: number, end: 
   return tokens.join("\u0000");
 }
 
-/** The owner a declaration's own text states: its `managedBy` literal, absent meaning developer. */
-export function declaredOwner(source: ts.SourceFile, start: number, end: number): Owner {
+/** The explicit owner in this span. Omission uses the Studio catalog or project default. */
+export function declaredOwner(source: ts.SourceFile, start: number, end: number): Owner | undefined {
   let found: Owner | undefined;
   const visit = (node: ts.Node): void => {
     if (found || node.pos >= end || node.end <= start) return;
@@ -173,21 +187,20 @@ export function declaredOwner(source: ts.SourceFile, start: number, end: number)
     ts.forEachChild(node, visit);
   };
   visit(source);
-  return found ?? "developer";
+  return found;
 }
 
-interface Located { readonly declarations: readonly Declaration[]; readonly signature: string; readonly owner: Owner }
+interface Located { readonly signature: string; readonly owner: Owner; readonly explicit: boolean }
 
-function read(declarations: readonly Declaration[], files: SourceFiles): Located {
+function read(declarations: readonly Declaration[], files: SourceFiles, defaultOwner: Owner, omitConfiguration = false): Located {
   const owners = new Set<Owner>();
   const signature = JSON.stringify(declarations.map(declaration => declaration.spans.map(span => {
     const source = files.get(declaration.file);
-    owners.add(declaredOwner(source, span.start, span.end));
-    return declarationSignature(source, span.start, span.end);
+    const explicit = declaredOwner(source, span.start, span.end);
+    if (explicit) owners.add(explicit);
+    return declarationSignature(source, span.start, span.end, omitConfiguration ? declaration.configuration : undefined);
   })));
-  // A key span never holds managedBy; any explicit owner in the value decides.
-  const explicit = [...owners].filter(owner => owner !== "developer");
-  return { declarations, signature, owner: explicit.length === 1 ? explicit[0]! : explicit.length ? "unresolved" : "developer" };
+  return { signature, owner: owners.size > 1 ? "unresolved" : [...owners][0] ?? defaultOwner, explicit: owners.size > 0 };
 }
 
 /** Snapshot-time facts for a quick decision: which files hold which declarations. */
@@ -216,7 +229,7 @@ export function ownershipRelevantFile(root: string, state: StudioState, file: st
   return index.byFile.has(path.resolve(file)) || index.stackFiles.has(toRelative(root, path.resolve(file)));
 }
 
-const ownerName = (owner: Owner) => owner === "framework" ? "the AWS Studio platform maintains it (managedBy: \"framework\")" : "its ownership is unresolved";
+const ownerName = (owner: Owner) => owner === "framework" ? "the AWS Studio platform maintains it" : "Studio could not verify its owner";
 
 /**
  * Assess a proposed change set against ownership. Throws an EditError naming the first
@@ -265,14 +278,21 @@ export function assessOwnership(root: string, state: StudioState, changes: reado
       if (owner !== "developer") throw new EditError(422, `${id}: ${ownerName(owner)}. This change removes or renames its declaration in ${file}; Studio does not change a definition it does not own.`);
       continue;
     }
-    const was = read(declared, beforeFiles), now = read(next, afterFiles);
+    const defaultOwner = model.ownership?.[id]?.projectOverride ? "framework" : "developer";
+    const was = read(declared, beforeFiles, defaultOwner), now = read(next, afterFiles, defaultOwner);
     const redefined = was.signature !== now.signature;
-    if (was.owner !== now.owner) {
+    const overrideChanged = defaultOwner === "framework" && was.explicit !== now.explicit;
+    if (was.owner !== now.owner || overrideChanged) {
       if (redefined) throw new EditError(422, `${id}: this change alters both its ownership (${was.owner} → ${now.owner}) and its definition in ${file}. Change ownership in its own review, then edit it.`);
       transitions.push({ entity: id, from: was.owner, to: now.owner, file });
       continue;
     }
-    if (redefined && owner !== "developer") throw new EditError(422, `${id}: ${ownerName(owner)}, so Studio does not change its definition in ${file}. Its tags and supplied values stay editable.${owner === "framework" ? " Take ownership in its own review first if you intend to maintain it." : " Give it an owner in source first."}`);
+    if (redefined && owner !== "developer") {
+      // Compare the implementation after removing both versions' supported project settings.
+      if (model.ownership?.[id]?.basis === "catalog" && declared.some(site => site.configuration) &&
+          read(declared, beforeFiles, defaultOwner, true).signature === read(next, afterFiles, defaultOwner, true).signature) continue;
+      throw new EditError(422, `${id}: ${ownerName(owner)}, so Studio does not change its definition in ${file}. Its tags and supplied values stay editable.`);
+    }
   }
   return transitions;
 }

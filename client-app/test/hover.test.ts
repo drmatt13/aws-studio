@@ -100,14 +100,14 @@ test("framework-managed resources are flagged and application declarations are n
   assert.deepEqual(labels(factsOf("resource:rds")), ["prod: CloudFormation stack"]);
   assert.equal(factsOf("resource:rds").frameworkManaged, true);
   assert.deepEqual(labels(factsOf("framework-stack:DevLambdaReplayStack")), ["dev: CloudFormation stack"]);
+  for (const id of ["framework-stack:DevLambdaReplayStack", "framework-stack:FrontendWebsiteS3Stack", "gateway:http", "gateway:websocket"]) assert.equal(factsOf(id).frameworkManaged, true, id);
   assert.deepEqual(labels(factsOf("gateway:http")), ["dev: Your machine", "prod: API Gateway HTTP API"]);
   assert.equal(factsOf("resource:openaiApiKey").frameworkManaged, false);
   assert.deepEqual(labels(factsOf("resource:openaiApiKey")), ["dev: AWS Secrets Manager", "prod: AWS Secrets Manager"]);
   const index = indexes();
   const local = sceneOf("prod").nodes.filter((candidate) => candidate.entity === "local");
   assert.ok(local.length, "the fixture places local PostgreSQL beside RDS");
-  // The local database follows the developer-managed database declaration it stands in for.
-  for (const node of local) assert.equal(nodeHoverFacts(node, index).frameworkManaged, false, node.id);
+  for (const node of local) assert.equal(nodeHoverFacts(node, index).frameworkManaged, true, node.id);
   for (const node of sceneOf("prod").nodes.filter((candidate) => candidate.entity !== "resource" && candidate.entity !== "gateway" && candidate.entity !== "local")) assert.equal(nodeHoverFacts(node, index).frameworkManaged, false, node.id);
   for (const mode of ["dev", "prod"] as const) {
     const expected = frameworkManagedIds(snapshot.models[mode]);
@@ -137,7 +137,7 @@ test("a stack missing from the CDK app is explained by its issue, not repeated a
 test("the combined CDK environment names both files from either physical selection", () => {
   const places = (["dev", "prod"] as const).map(env => ({ env, where: `Local file · cdk-app/.env.${env}` }));
   for (const mode of ["dev", "prod"] as const) {
-    assert.deepEqual(factsOf(`envfile:${mode}`), { places, frameworkManaged: false, ownershipUnresolved: true });
+    assert.deepEqual(factsOf(`envfile:${mode}`), { places, frameworkManaged: true });
     assert.deepEqual(factsOf(`envfile:${mode}`, mode === "dev" ? "prod" : "dev"), factsOf(`envfile:${mode}`));
   }
 });

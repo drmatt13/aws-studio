@@ -145,9 +145,9 @@ application tag without changing protected ownership tags.
 
 Every declaration that takes `tags` also takes `managedBy`, which records who maintains its
 definition: `"framework"` for the AWS Studio platform, `"developer"` for the application developer.
-Absent means developer. Ownership is not implementation: a workload built by framework constructs,
-or a stack the framework generates wiring for, stays developer owned unless its declaration says
-otherwise. It is never inherited from `defaults`. A stack member follows its `stack<T>()` entry (a
+Studio supplies the default owner for built-in resources from its framework resource catalog.
+Application declarations default to developer ownership. A workload can use framework constructs
+and still belong to its developer. Ownership is independent of workload `defaults`. A stack member follows its `stack<T>()` entry (a
 member cannot declare it), routes follow their workload, and declarations of one shared workload
 must agree. It is source metadata for AWS Studio only: it never reaches CloudFormation, runtime
 environments or generated contracts.
@@ -162,9 +162,9 @@ Studio derives its editing limits from ownership; there is no separate lock. It 
 platform-maintained or unresolved definition or its stack class, and still edits tags, display
 names, descriptions, input-file values and the connections developer-owned workloads make to it.
 Changing the owner is a transition reviewed on its own (**Take ownership** in the Inspector, or an
-explicit `managedBy` in source). This repository marks only `stacks.rds`, the framework's
-implementation of the developer-owned database declaration. See
-[editing](../aws-studio-knowledge/studio/editing.md#ownership) for the rules and their enforcement.
+explicit `managedBy` in source). The catalog supplies ownership for the primary database and
+its registered RDS implementation across projects. The project configures database settings
+and placement. [Ownership rules](../aws-studio-knowledge/studio/editing.md#ownership)
 
 ## Studio authoring
 

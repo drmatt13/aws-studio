@@ -3,7 +3,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { ROOT_ENV_STACK_OUTPUTS } from "aws-studio/cli/root-env-outputs";
-import { readExportStacks } from "../server/source/export-stacks";
+import type { ModeModel } from "../shared/model";
+import { readExportStacks, withExportStacks } from "../server/source/export-stacks";
 
 test("only mapped CfnOutputs are projected, aliases work, and literals/templates never enter symbolic values", () => {
   const root = mkdtempSync(path.resolve(__dirname, "../../.cache/export-stacks-"));
@@ -19,6 +20,7 @@ test("only mapped CfnOutputs are projected, aliases work, and literals/templates
           new Output(this, "ReplayDeadLetterQueueUrl", { value: "unmapped-must-stay-private" });
         }
       }`,
+    "cdk-app/lib/custom-replay.ts": 'import { CfnOutput } from "aws-cdk-lib"; export class DevLambdaReplayStack { constructor() { new CfnOutput(this, "ReplayBucketName", { value: this.customBucket.bucketName }); } }',
     "cdk-app/lib/unmapped.ts": 'import * as cdk from "aws-cdk-lib"; export class EcsTasksStack { constructor() { new cdk.CfnOutput(this, "ReplayBucketName", { value: "excluded" }); } }',
   };
   try {
@@ -26,6 +28,11 @@ test("only mapped CfnOutputs are projected, aliases work, and literals/templates
     const stacks = readExportStacks(root);
     assert.equal(stacks.length, 1);
     assert.equal(stacks[0]?.usage?.status, "referenced");
+    const custom = { id: "resource:custom", path: ["custom"], kind: "stack", absent: false, stackClass: "DevLambdaReplayStack", stackFile: "cdk-app/lib/custom-replay.ts" } as const;
+    const graph: ModeModel = { mode: "dev", status: "ok", resources: [custom], targets: [], workflows: [], routes: [], edges: [], fields: {}, diagnostics: [], evaluatedInMs: 0 };
+    const projected = withExportStacks(graph, stacks);
+    assert.equal(projected.resources.find(resource => resource.id === custom.id)?.stackOutputs, undefined);
+    assert.equal(projected.resources.find(resource => resource.id === "framework-stack:DevLambdaReplayStack")?.stackFile, "node_modules/aws-studio/cdk/dev-lambda-replay-stack.ts");
     assert.deepEqual(stacks[0]?.outputs.map((output) => [output.name, output.envName, output.symbol]), [
       ["ReplayBucketName", ROOT_ENV_STACK_OUTPUTS.DevLambdaReplayStack.ReplayBucketName, "bucket.bucketName"],
       ["ReplayQueueUrl", ROOT_ENV_STACK_OUTPUTS.DevLambdaReplayStack.ReplayQueueUrl, "ReplayQueueUrl"],

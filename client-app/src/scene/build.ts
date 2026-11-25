@@ -180,7 +180,7 @@ function targetItem(target: ModelTarget, mode: Mode, diagnostics?: readonly Diag
 
 function gatewayItem(gateway: import("../../shared/gateways").ModelGateway, mode: Mode, managed: boolean): Item {
   const presence = targetPresence(gateway.lanes, mode);
-  return { id: gateway.id, entity: "gateway", label: gateway.title, kindLabel: gateway.protocol === "agentcore" ? "AgentCore Gateway" : "Framework-managed API Gateway", icon: "gateway",
+  return { id: gateway.id, entity: "gateway", label: gateway.title, kindLabel: gateway.protocol === "agentcore" ? "AgentCore Gateway" : managed ? "Framework-managed API Gateway" : "API Gateway", icon: "gateway",
     ...(gateway.protocol === "agentcore" ? { roleIcon: "agent" as const } : managed ? { roleIcon: "managed" as const } : {}),
     ...(managed ? { frameworkManaged: true as const } : {}),
     badge: deploymentBadge(gateway.lanes), presence: presence.presence, presenceText: presence.text, lanes: gateway.lanes };
@@ -221,7 +221,7 @@ function resourceItem(resource: ModelResource, mode: Mode, managed: boolean, ava
     label: resource.kind === "stack" ? resource.path.join(".") : name,
     kindLabel,
     presence: resource.absent ? "absent" : "present",
-    presenceText: resource.frameworkStack ? `${presenceText} Not declared in the stack catalog.` : presenceText,
+    presenceText,
   };
 }
 
@@ -266,7 +266,7 @@ function islandSpecs(model: ModeModel, options: SceneOptions): { entry: IslandSp
   const workflows: Item[] = [];
   for (const resource of model.resources) {
     if (resource.kind === "member" && resource.networkId && resource.networkPlacement) {
-      byVpc.get(resource.networkId!)?.[resource.networkPlacement].push({ ...catalogItem(resource), ...(resource.frameworkManaged === "database" ? { label: "RDS database", kindLabel: `Framework-managed Amazon RDS, stacks.${resource.path.join(".")}` } : {}) });
+      byVpc.get(resource.networkId!)?.[resource.networkPlacement].push({ ...catalogItem(resource), ...(resource.frameworkManaged === "database" ? { label: "RDS database", kindLabel: `${managed(resource.id) ? "Framework-managed " : ""}Amazon RDS, stacks.${resource.path.join(".")}` } : {}) });
     }
   }
   // The local database stands beside RDS, as its development counterpart: workloads bind to one or the other.

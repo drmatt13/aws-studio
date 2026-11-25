@@ -21,10 +21,6 @@ export function isFrameworkManaged(model: Owned, id: string): boolean {
   return ownershipOf(model, id).managedBy === "framework";
 }
 
-export function isOwnershipUnresolved(model: Owned, id: string): boolean {
-  return ownershipOf(model, id).managedBy === "unresolved";
-}
-
 /** Only a developer-owned definition is one Studio may change through its editors. */
 export function isDeveloperOwned(model: Owned, id: string): boolean {
   return ownershipOf(model, id).managedBy === "developer";
@@ -47,10 +43,12 @@ export function ownershipReason(facts: OwnershipFacts, title: (id: string) => st
   switch (facts.basis) {
     case "declared": return `Its declaration says managedBy: "${facts.managedBy}", so ${owner} maintains its definition.`;
     case "default": return "Its declaration sets no managedBy, which means the application developer maintains its definition.";
+    case "catalog": return facts.note ?? "The AWS Studio resource catalog defines this resource.";
+    case "project": return facts.note ?? "This resource belongs to the application.";
     case "inherited": return `Follows ${facts.from ? title(facts.from) : "its owner"}, maintained by ${owner}.`;
-    case "entries": return `Has no declaration of its own; every entry is maintained by ${owner}.`;
-    case "conflict": return `Ownership is unresolved because its declarations disagree: ${(facts.conflicts ?? []).map(item => `${item.where === "dev" ? "Development" : item.where === "prod" ? "Production" : title(item.where)} says ${item.managedBy}`).join("; ")}.`;
-    case "undeclared": return `Ownership is unresolved: no declaration names an owner.${facts.note ? ` ${facts.note}` : ""}`;
+    case "entries": return `Each entry is maintained by ${owner}.`;
+    case "conflict": return `${(facts.conflicts ?? []).map(item => `${item.where === "dev" ? "Development" : item.where === "prod" ? "Production" : title(item.where)} declares ${item.managedBy} ownership`).join(". ")}. Studio protects the definition until the declarations agree.`;
+    case "undeclared": return facts.note ?? "Studio has no ownership record for this entity.";
   }
 }
 
@@ -58,7 +56,7 @@ export function ownershipReason(facts: OwnershipFacts, title: (id: string) => st
 export function ownershipConsequence(facts: OwnershipFacts): string {
   switch (facts.managedBy) {
     case "developer": return "Studio may change its definition through its editors.";
-    case "framework": return "Studio does not change its definition or its stack source. Its tags, names, descriptions and supplied values stay editable, as do connections that developer-owned workloads make to it.";
+    case "framework": return "Studio protects the resource definition and stack source. You can edit supported project settings, tags, names, descriptions and supplied values, and connect developer-owned workloads.";
     case "unresolved": return "Studio does not change any definition it can locate for it. Its tags, names, descriptions and supplied values stay editable.";
   }
 }

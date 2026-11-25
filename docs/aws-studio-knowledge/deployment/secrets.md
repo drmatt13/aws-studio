@@ -72,8 +72,8 @@ The sign-in providers are the one framework group declared in the catalog, becau
 secrets are `input.secret` entries: `inputs.signInProviders` in
 `framework-config/auth/sign-in-providers.ts`
 holds each provider's client ID (and Microsoft's tenant ID) as inputs and its client secret as a
-secret. The entries declare no `managedBy`, so the application developer owns them, as it owns the
-Cognito stack that reads them. `frameworkInput: "authentication"` opens them in the framework
+secret. Studio recognizes the registered provider fields through the active sign-in provider metadata.
+They default to framework ownership. The application maintains its native Cognito stack. `frameworkInput: "authentication"` opens them in the framework
 input views and records an integration: Studio's Sign-in providers view relies on their names. A provider's lines are all or nothing per file, as
 `packages/aws-studio/cdk/deployment.ts` resolves them: once a file sets one, Studio requires the rest there, and a
 partly set provider is a missing value on its connection and stops synthesis. Google's secret keeps

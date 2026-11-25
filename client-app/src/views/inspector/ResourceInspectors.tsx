@@ -7,6 +7,7 @@ import {
   inspectorRelationListClasses,
 } from "../../inspector-ui";
 
+import { isFrameworkManaged } from "../../../shared/framework-management";
 import type { LocalDatabase } from "../../../shared/database";
 import type { ModelResource } from "../../../shared/model";
 import { resourceIcon } from "../../icons";
@@ -73,8 +74,9 @@ export function ResourceView(props: { readonly resource: ModelResource }) {
   const facts = snapshot.source.catalog[resource.id];
   const root = resource.path[0]!;
   const links = snapshot.source.links[resource.path.join(".")] ?? snapshot.source.links[root] ?? [];
+  const managed = isFrameworkManaged(index, resource.id);
   const kind = resource.frameworkStack
-    ? "Framework stack"
+    ? managed ? "Framework stack" : "CDK stack"
     : resource.kind === "stack"
       ? "Stack in the catalog"
       : resource.kind === "member"
@@ -122,7 +124,7 @@ export function ResourceView(props: { readonly resource: ModelResource }) {
               : resource.path.at(-1))!
           }
           icon={resourceIcon(resource)}
-          // A framework stack has no catalog entry to name.
+          // Only an application catalog entry supplies a workload reference.
           reference={
             resource.kind !== "stack" || !resource.frameworkStack
               ? catalogReference(model, resource.id)
@@ -185,9 +187,9 @@ export function ResourceView(props: { readonly resource: ModelResource }) {
             <div className="mt-1 grid gap-2">
               {resource.frameworkStack ? (
                 <p className={inspectorNoteClasses}>
-                  No <code>stack&lt;{resource.stackClass}&gt;()</code> entry in{" "}
-                  <code>framework-config/stacks/</code>. Declare and link one if workloads
-                  should reference this stack's public fields.
+                  To reference this stack's fields from a workload, add a{" "}
+                  <code>stack&lt;{resource.stackClass}&gt;()</code> entry to{" "}
+                  <code>framework-config/stacks/</code> and link it in the CDK application.
                 </p>
               ) : null}
               {resource.frameworkManaged === "database" ? (
@@ -197,7 +199,7 @@ export function ResourceView(props: { readonly resource: ModelResource }) {
                 </p>
               ) : resource.frameworkManaged ? (
                 <p className={inspectorNoteClasses}>
-                  The framework manages this stack and its generated environment outputs.
+                  Studio maps this stack's public outputs to environment variables.
                 </p>
               ) : null}
             </div>
