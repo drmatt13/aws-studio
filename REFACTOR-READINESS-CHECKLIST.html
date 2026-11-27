@@ -1,0 +1,959 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refactor readiness checklist</title>
+<style>
+  :root {
+    --paper: #edf1f4;
+    --sheet: #f8fafb;
+    --ink: #1b2733;
+    --ink-soft: #4a5b6b;
+    --rule: #c9d3dc;
+    --track: #a9b7c4;
+    --done: #1d7a68;
+    --gate: #b7791f;
+    --gate-wash: #f6e8cc;
+    --gate-ink: #6b4510;
+    --blocked: #b23a2b;
+    --changed: #4c58a6;
+    --focus: #2f6fd6;
+    --ui: "Avenir Next", Avenir, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    --prose: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #121a21;
+      --sheet: #18222b;
+      --ink: #dde5ec;
+      --ink-soft: #9aacbc;
+      --rule: #2b3946;
+      --track: #3e4e5d;
+      --done: #3db39a;
+      --gate: #e0a33a;
+      --gate-wash: #3a2f1b;
+      --gate-ink: #f0cf8f;
+      --blocked: #e26b5b;
+      --changed: #8f9be6;
+      --focus: #7aa7ff;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-padding-top: 132px; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.5 var(--ui); }
+  button, select, input, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  a { color: var(--focus); }
+  code { font: 0.88em var(--mono); background: color-mix(in srgb, var(--rule) 45%, transparent); padding: 0.05em 0.3em; border-radius: 3px; overflow-wrap: anywhere; }
+  pre { background: color-mix(in srgb, var(--rule) 35%, transparent); padding: 10px 12px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: 0.85em; }
+
+  /* Top bar */
+  .topbar { position: sticky; top: 0; z-index: 5; background: var(--paper); border-bottom: 1px solid var(--rule); }
+  .topbar-inner { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; padding: 14px 28px 12px; }
+  .brand h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .brand .file { margin: 2px 0 0; color: var(--ink-soft); font-size: 13px; }
+  .progress { display: flex; gap: 18px; align-items: baseline; color: var(--ink-soft); font-size: 14px; margin-left: auto; }
+  .progress b { color: var(--ink); font-weight: 600; font-size: 17px; }
+  .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .save-state { font-size: 13px; color: var(--ink-soft); min-width: 10ch; }
+  .save-state.warn { color: var(--gate-ink); }
+  .save-state.error { color: var(--blocked); }
+  .bar { height: 3px; background: var(--rule); }
+  .bar span { display: block; height: 100%; background: var(--done); width: 0; transition: width 240ms ease; }
+
+  .btn { border: 1px solid var(--rule); background: var(--sheet); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  .btn:hover { border-color: var(--track); }
+  .btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .btn.quiet { border-color: transparent; background: transparent; color: var(--ink-soft); padding: 4px 8px; }
+  .btn.quiet:hover { color: var(--ink); border-color: var(--rule); }
+  .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 8px 28px 10px; font-size: 14px; }
+  .segmented { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+  .segmented button { border: 0; background: transparent; padding: 4px 12px; cursor: pointer; color: var(--ink-soft); }
+  .segmented button[aria-pressed="true"] { background: var(--sheet); color: var(--ink); font-weight: 600; }
+  .spacer { flex: 1; }
+
+  /* Layout */
+  .layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 0 40px; padding: 0 28px 80px; max-width: 1240px; }
+
+  /* The step track: the one strong element */
+  .track { position: sticky; top: 132px; align-self: start; max-height: calc(100vh - 150px); overflow-y: auto; padding: 18px 4px 18px 0; }
+  .track ol { list-style: none; margin: 0; padding: 0; }
+  .track li { position: relative; }
+  .track li::before { content: ""; position: absolute; left: 13px; top: 0; bottom: 0; width: 2px; background: var(--track); }
+  .track li:first-child::before { top: 50%; }
+  .track li:last-child::before { bottom: 50%; }
+  .track li.resolved::before { background: var(--done); }
+  .track a { position: relative; display: grid; grid-template-columns: 28px 26px 1fr; align-items: center; gap: 0 6px; padding: 5px 6px 5px 0; color: var(--ink-soft); text-decoration: none; font-size: 13.5px; line-height: 1.3; border-radius: 6px; }
+  .track a:hover { color: var(--ink); background: color-mix(in srgb, var(--rule) 30%, transparent); }
+  .track .node { justify-self: center; width: 12px; height: 12px; border-radius: 50%; background: var(--paper); border: 2px solid var(--track); z-index: 1; }
+  .track .gate .node { border-radius: 2px; transform: rotate(45deg); width: 13px; height: 13px; border-color: var(--gate); }
+  .track .resolved .node { background: var(--done); border-color: var(--done); }
+  .track .blocked .node { border-color: var(--blocked); background: var(--paper); }
+  .track .skipped .node { border-style: dashed; }
+  .track .num { font-variant-numeric: tabular-nums; text-align: right; color: var(--ink-soft); }
+  .track .current a { color: var(--ink); font-weight: 600; background: var(--sheet); }
+  .track .hidden-by-filter { display: none; }
+
+  /* Main column */
+  main { padding-top: 18px; min-width: 0; }
+  .about { margin: 0 0 18px; border: 1px solid var(--rule); border-radius: 8px; background: var(--sheet); }
+  .about > summary { cursor: pointer; padding: 12px 16px; font-weight: 600; }
+  .about-body { padding: 0 16px 8px; }
+
+  /* Start here: the grounding document */
+  .start-here { margin: 0 0 18px; border: 1px solid var(--rule); border-left: 4px solid var(--done); border-radius: 8px; background: var(--sheet); }
+  .start-here > summary { cursor: pointer; padding: 14px 18px; font-size: 18px; font-weight: 600; }
+  .start-here > summary .hint { font-size: 14px; font-weight: 400; color: var(--ink-soft); margin-left: 8px; }
+  .start-body { padding: 0 18px 10px; }
+  .start-body .block { margin-bottom: 26px; }
+  .start-body .block-head h3 { font-size: 17px; color: var(--ink); }
+  .start-body pre { font-size: 15px; line-height: 1.35; }
+  .track li.start-link .node { border-color: var(--done); border-radius: 3px; }
+  .step-map { margin: 4px 0 26px; }
+  .step-map img { display: block; width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--rule); }
+  .step-map figcaption { margin-top: 6px; font-size: 13px; color: var(--ink-soft); }
+
+  /* Technical background */
+  .technical { margin: 4px 0 20px; border: 1px dashed var(--track); border-radius: 8px; }
+  .technical > summary { cursor: pointer; padding: 8px 14px; font-size: 14px; font-weight: 600; color: var(--ink-soft); }
+  .technical[open] > summary { border-bottom: 1px dashed var(--track); }
+  .technical .block { margin: 10px 14px 12px; }
+  .technical .prose { font: 15px/1.55 var(--ui); }
+
+  dialog.briefing { width: min(820px, 92vw); border: 1px solid var(--rule); border-radius: 10px; background: var(--sheet); color: var(--ink); padding: 18px; }
+  dialog.briefing::backdrop { background: rgba(10, 20, 30, 0.45); }
+  dialog.briefing textarea { width: 100%; height: 60vh; font: 13px/1.45 var(--mono); padding: 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); }
+  dialog.briefing p { margin: 0 0 10px; }
+
+  .step { border-top: 1px solid var(--rule); }
+  .step:last-of-type { border-bottom: 1px solid var(--rule); }
+  .step-toggle { width: 100%; display: grid; grid-template-columns: 44px 1fr auto; gap: 4px 12px; align-items: baseline; padding: 14px 4px; background: none; border: 0; cursor: pointer; text-align: left; }
+  .step-no { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+  .step.resolved .step-no { color: var(--done); }
+  .step-title { font-size: 18px; font-weight: 600; line-height: 1.3; }
+  .tags { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+  .gate-tag { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--gate-wash); color: var(--gate-ink); font-weight: 600; }
+  .status-chip { font-size: 12px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--rule); color: var(--ink-soft); }
+  .status-chip.done, .status-chip.changed { border-color: transparent; background: color-mix(in srgb, var(--done) 18%, transparent); color: var(--done); font-weight: 600; }
+  .status-chip.changed { background: color-mix(in srgb, var(--changed) 16%, transparent); color: var(--changed); }
+  .status-chip.blocked { border-color: transparent; background: color-mix(in srgb, var(--blocked) 15%, transparent); color: var(--blocked); font-weight: 600; }
+  .step.hidden-by-filter { display: none; }
+
+  .step-body { padding: 0 4px 26px 56px; }
+  .step-body[hidden] { display: none; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: center; padding: 10px 14px; margin-bottom: 18px; background: var(--sheet); border: 1px solid var(--rule); border-radius: 8px; }
+  .done-box { display: inline-flex; gap: 8px; align-items: center; font-weight: 600; cursor: pointer; }
+  .done-box input { width: 18px; height: 18px; accent-color: var(--done); }
+  .controls label.status { display: inline-flex; gap: 8px; align-items: center; color: var(--ink-soft); font-size: 14px; }
+  .controls select { padding: 4px 8px; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); }
+
+  .block { margin: 0 0 18px; }
+  .block-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+  .block-head h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--ink-soft); }
+  .block-head .btn.quiet { font-size: 13px; }
+  .prose { font: 17px/1.58 var(--prose); max-width: 70ch; }
+  .prose p { margin: 0.25em 0 0.6em; }
+  .prose ul, .prose ol { margin: 0.2em 0 0.6em; padding-left: 1.4em; }
+  .prose li { margin: 0.15em 0; }
+  .prose li > p { margin: 0; }
+  .prose .table-wrap { overflow-x: auto; margin: 0.4em 0 0.8em; }
+  .prose table { border-collapse: collapse; font: 14px/1.4 var(--ui); }
+  .prose th, .prose td { border: 1px solid var(--rule); padding: 5px 8px; text-align: left; vertical-align: top; }
+  .block.refs { margin-top: -6px; }
+  .refs .prose { font: 14px/1.5 var(--ui); color: var(--ink-soft); }
+  .refs .prose p { margin: 0; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .editor { width: 100%; max-width: 70ch; min-height: 8em; padding: 10px 12px; border: 1px solid var(--track); border-radius: 6px; background: var(--sheet); font: 14px/1.5 var(--mono); resize: vertical; }
+  .title-editor { width: 100%; padding: 6px 10px; border: 1px solid var(--track); border-radius: 6px; background: var(--sheet); font-size: 17px; font-weight: 600; }
+  .edit-actions { display: flex; gap: 8px; margin-top: 6px; }
+
+  .results { border-left: 3px solid var(--track); padding: 2px 0 2px 16px; }
+  .step.resolved .results { border-left-color: var(--done); }
+  .results h3 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+  .field { display: grid; gap: 3px; margin-bottom: 12px; max-width: 70ch; }
+  .field label { font-size: 13.5px; color: var(--ink-soft); }
+  .field textarea { width: 100%; min-height: 2.3em; padding: 6px 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--sheet); resize: none; line-height: 1.45; overflow: hidden; }
+  .grid-wrap { overflow-x: auto; margin: 4px 0 16px; }
+  table.grid { border-collapse: collapse; font-size: 14px; min-width: 100%; }
+  table.grid th { text-align: left; font-weight: 600; color: var(--ink-soft); padding: 4px 6px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  table.grid td { padding: 3px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  table.grid textarea { width: 100%; min-width: 16ch; min-height: 2.1em; padding: 4px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; resize: none; overflow: hidden; line-height: 1.4; }
+  table.grid td:first-child textarea { min-width: 22ch; }
+  table.grid textarea:hover, table.grid textarea:focus { border-color: var(--rule); background: var(--sheet); }
+  table.grid td.row-actions { width: 1%; }
+
+  /* Empty state */
+  .empty { max-width: 62ch; margin: 64px auto; padding: 0 28px; }
+  .empty h2 { font-size: 26px; margin: 0 0 8px; font-weight: 600; }
+  .empty p { font: 17px/1.58 var(--prose); color: var(--ink-soft); }
+  .empty .actions { margin: 20px 0; }
+  .note { font-size: 14px; color: var(--ink-soft); border-left: 3px solid var(--gate); padding: 4px 0 4px 12px; }
+  .error-box { color: var(--blocked); font-weight: 600; }
+  .drop-hint { position: fixed; inset: 0; display: none; place-items: center; background: color-mix(in srgb, var(--paper) 88%, transparent); border: 3px dashed var(--track); font-size: 20px; font-weight: 600; z-index: 20; }
+  body.dragging .drop-hint { display: grid; }
+
+  @media (max-width: 900px) {
+    html { scroll-padding-top: 170px; }
+    .topbar-inner, .toolbar { padding-left: 16px; padding-right: 16px; }
+    .layout { grid-template-columns: minmax(0, 1fr); padding: 0 16px 60px; }
+    .track { position: static; max-height: none; overflow-x: auto; padding: 10px 0 4px; }
+    .track ol { display: flex; gap: 2px; }
+    .track li::before { left: 0; right: 0; top: 50%; bottom: auto; width: auto; height: 2px; }
+    .track a { grid-template-columns: 22px; padding: 6px 4px; }
+    .track .num, .track .label { display: none; }
+    .step-body { padding-left: 4px; }
+    .progress { margin-left: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; scroll-behavior: auto !important; }
+  }
+</style>
+</head>
+<body>
+<div class="drop-hint" aria-hidden="true">Drop the checklist JSON to open it</div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <h1>Refactor readiness</h1>
+      <p class="file" id="file-name">No file open</p>
+    </div>
+    <div class="progress" id="progress" hidden>
+      <span><b id="done-count">0</b> of <span id="step-count">0</span> steps done</span>
+      <span><b id="gate-count">0</b> of <span id="gate-total">0</span> gates done</span>
+      <span id="blocked-wrap" hidden><b id="blocked-count">0</b> blocked</span>
+    </div>
+    <div class="actions">
+      <button class="btn" id="open-btn" type="button">Open file</button>
+      <button class="btn primary" id="save-btn" type="button" disabled>Save</button>
+      <button class="btn" id="download-btn" type="button" disabled>Download JSON</button>
+      <span class="save-state" id="save-state" role="status" aria-live="polite"></span>
+    </div>
+  </div>
+  <div class="toolbar" id="toolbar" hidden>
+    <div class="segmented" role="group" aria-label="Show">
+      <button type="button" data-filter="all" aria-pressed="true">All steps</button>
+      <button type="button" data-filter="open" aria-pressed="false">Remaining</button>
+      <button type="button" data-filter="gates" aria-pressed="false">Gates</button>
+    </div>
+    <span class="spacer"></span>
+    <button class="btn quiet" type="button" id="next-btn">Go to next step</button>
+    <button class="btn quiet" type="button" id="expand-btn">Expand all</button>
+    <button class="btn quiet" type="button" id="collapse-btn">Collapse all</button>
+  </div>
+  <div class="bar" aria-hidden="true"><span id="bar-fill"></span></div>
+</header>
+
+<div id="empty" class="empty">
+  <h2>Open the checklist</h2>
+  <p>Choose <code>REFACTOR-READINESS-CHECKLIST.json</code> from the <code>aws-studio</code> folder. Every check, status, result and edited description saves back into that file.</p>
+  <div class="actions">
+    <button class="btn primary" id="empty-open" type="button">Open checklist file</button>
+    <button class="btn" id="reopen-btn" type="button" hidden></button>
+  </div>
+  <p class="note" id="support-note">You can also drop the file onto this page.</p>
+  <p class="error-box" id="open-error" role="alert" hidden></p>
+</div>
+
+<div class="layout" id="workspace" hidden>
+  <nav class="track" aria-label="Steps"><ol id="track"></ol></nav>
+  <main id="main"></main>
+</div>
+
+<input type="file" id="file-input" accept=".json,application/json" hidden>
+
+<script>
+"use strict";
+
+/* md:start */
+const LIST = /^(\s*)([-*]|\d+\.)\s+(.*)$/;
+const FENCE = /^(\s*)(`{3,})(.*)$/;
+
+function esc(text) {
+  return String(text).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
+function safeHref(href) {
+  const value = href.trim();
+  if (/^(https?:|mailto:)/i.test(value)) return value;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return null;
+  return value;
+}
+
+function inline(text) {
+  const codes = [];
+  let out = text.replace(/`([^`]+)`/g, (_, code) => { codes.push(code); return "\u0000" + (codes.length - 1) + "\u0000"; });
+  out = esc(out);
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, href) => {
+    const safe = safeHref(href.replace(/&amp;/g, "&"));
+    return safe ? `<a href="${esc(safe)}" target="_blank" rel="noopener">${label}</a>` : label;
+  });
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  return out.replace(/\u0000(\d+)\u0000/g, (_, index) => `<code>${esc(codes[Number(index)])}</code>`);
+}
+
+function indentOf(line) { return line.match(/^\s*/)[0].length; }
+function cells(row) { return row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim()); }
+
+function blocks(lines) {
+  let html = "";
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    let match = FENCE.exec(line);
+    if (match) {
+      const indent = match[1].length;
+      const fence = match[2];
+      const body = [];
+      i++;
+      while (i < lines.length && !(lines[i].trim().startsWith(fence) && lines[i].trim().replace(/`/g, "") === "")) {
+        body.push(lines[i].slice(Math.min(indent, indentOf(lines[i]))));
+        i++;
+      }
+      i++;
+      html += `<pre><code>${esc(body.join("\n"))}</code></pre>`;
+      continue;
+    }
+    if (line.trim().startsWith("|") && i + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])) {
+      const rows = [];
+      while (i < lines.length && lines[i].trim().startsWith("|")) { rows.push(lines[i]); i++; }
+      const head = cells(rows[0]);
+      const body = rows.slice(2).map(cells);
+      html += '<div class="table-wrap"><table><thead><tr>' + head.map(cell => `<th>${inline(cell)}</th>`).join("") + "</tr></thead><tbody>"
+        + body.map(row => "<tr>" + head.map((_, k) => `<td>${inline(row[k] ?? "")}</td>`).join("") + "</tr>").join("") + "</tbody></table></div>";
+      continue;
+    }
+    match = LIST.exec(line);
+    if (match) {
+      const base = match[1].length;
+      const ordered = /\d/.test(match[2]);
+      const items = [];
+      while (i < lines.length) {
+        const item = LIST.exec(lines[i]);
+        if (!item || item[1].length !== base || /\d/.test(item[2]) !== ordered) break;
+        const column = lines[i].length - item[3].length;
+        const itemLines = [item[3]];
+        i++;
+        while (i < lines.length) {
+          const next = lines[i];
+          if (!next.trim()) {
+            let j = i;
+            while (j < lines.length && !lines[j].trim()) j++;
+            if (j < lines.length && indentOf(lines[j]) > base) { itemLines.push(""); i++; continue; }
+            break;
+          }
+          if (indentOf(next) > base) { itemLines.push(next.slice(Math.min(column, indentOf(next)))); i++; continue; }
+          break;
+        }
+        items.push({ start: ordered ? parseInt(item[2], 10) : null, lines: itemLines });
+      }
+      const tag = ordered ? "ol" : "ul";
+      const start = ordered && items[0].start !== 1 ? ` start="${items[0].start}"` : "";
+      html += `<${tag}${start}>` + items.map(item => `<li>${blocks(item.lines)}</li>`).join("") + `</${tag}>`;
+      continue;
+    }
+    const paragraph = [];
+    while (i < lines.length && lines[i].trim() && !LIST.exec(lines[i]) && !FENCE.exec(lines[i]) && !lines[i].trim().startsWith("|")) {
+      paragraph.push(lines[i].trim());
+      i++;
+    }
+    if (!paragraph.length) { paragraph.push(lines[i].trim()); i++; }
+    html += `<p>${inline(paragraph.join(" "))}</p>`;
+  }
+  return html;
+}
+
+function markdown(source) { return blocks(String(source || "").replace(/\r\n/g, "\n").split("\n")); }
+/* md:end */
+
+const STATUS_LABELS = { "not started": "Not started", done: "Done", changed: "Changed", blocked: "Blocked", skipped: "Skipped" };
+const RESOLVED = new Set(["done", "changed"]);
+const BLOCKS = [["objective", "Objective"], ["why", "Why"], ["do", "Do"], ["doneWhen", "Done when"]];
+const supportsFileAccess = "showOpenFilePicker" in window;
+
+let doc = null;
+let handle = null;
+let fileName = "";
+let dirty = false;
+let saveTimer = null;
+let filter = "all";
+const expanded = new Set();
+
+const $ = id => document.getElementById(id);
+
+function el(tag, attributes = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attributes)) {
+    if (value === undefined || value === null || value === false) continue;
+    if (key === "class") node.className = value;
+    else if (key === "html") node.innerHTML = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value === true ? "" : value);
+  }
+  for (const child of children.flat()) if (child !== null && child !== undefined) node.append(child);
+  return node;
+}
+
+/* ---------- File handling ---------- */
+
+function parseChecklist(text) {
+  let data;
+  try { data = JSON.parse(text); } catch (error) { throw new Error(`The file isn't valid JSON (${error.message}).`); }
+  if (!data || data.schema !== 1 || !Array.isArray(data.steps) || !data.steps.every(step => step && typeof step.title === "string" && step.results)) {
+    throw new Error('This file isn\'t a readiness checklist. Expected "schema": 1 and a "steps" list.');
+  }
+  if (!Array.isArray(data.statuses)) data.statuses = Object.keys(STATUS_LABELS);
+  for (const step of data.steps) {
+    step.status = STATUS_LABELS[step.status] ? step.status : "not started";
+    step.done = RESOLVED.has(step.status);
+    step.results.fields = Array.isArray(step.results.fields) ? step.results.fields : [];
+  }
+  return data;
+}
+
+function openDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("readiness-checklist", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("handles");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function rememberHandle(fileHandle) {
+  try { const db = await openDatabase(); db.transaction("handles", "readwrite").objectStore("handles").put(fileHandle, "last"); } catch { /* optional */ }
+}
+async function recallHandle() {
+  try {
+    const db = await openDatabase();
+    return await new Promise(resolve => {
+      const request = db.transaction("handles").objectStore("handles").get("last");
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => resolve(null);
+    });
+  } catch { return null; }
+}
+
+async function ensureWrite(fileHandle, ask) {
+  if (!fileHandle || !fileHandle.queryPermission) return false;
+  if (await fileHandle.queryPermission({ mode: "readwrite" }) === "granted") return true;
+  if (!ask) return false;
+  return await fileHandle.requestPermission({ mode: "readwrite" }) === "granted";
+}
+
+async function loadFromHandle(fileHandle) {
+  const file = await fileHandle.getFile();
+  const data = parseChecklist(await file.text());
+  handle = fileHandle;
+  fileName = file.name;
+  await rememberHandle(fileHandle);
+  const writable = await ensureWrite(fileHandle, true).catch(() => false);
+  start(data);
+  setState(writable ? "Saving to the file automatically" : "Read only until you click Save and allow editing", writable ? "" : "warn");
+}
+
+async function loadFromFile(file) {
+  const data = parseChecklist(await file.text());
+  handle = null;
+  fileName = file.name;
+  start(data);
+  setState(supportsFileAccess ? "Opened a copy. Use Open file to save straight to it." : "Opened a copy. Download JSON to keep your changes.", "warn");
+}
+
+async function openFile() {
+  hideError();
+  if (!supportsFileAccess) { $("file-input").click(); return; }
+  try {
+    const [fileHandle] = await window.showOpenFilePicker({ types: [{ description: "Checklist JSON", accept: { "application/json": [".json"] } }], multiple: false });
+    await loadFromHandle(fileHandle);
+  } catch (error) {
+    if (error.name !== "AbortError") showError(error.message);
+  }
+}
+
+function serialize() { return JSON.stringify(doc, null, 2) + "\n"; }
+
+async function save(fromClick) {
+  if (!doc) return;
+  clearTimeout(saveTimer);
+  if (!handle) {
+    setState("Not saved. Use Download JSON, then replace the original file with it.", "warn");
+    return;
+  }
+  try {
+    if (!await ensureWrite(handle, fromClick)) {
+      setState("Click Save and allow editing to write to the file.", "warn");
+      return;
+    }
+    setState("Saving…");
+    doc.updatedAt = new Date().toISOString();
+    const writer = await handle.createWritable();
+    await writer.write(serialize());
+    await writer.close();
+    dirty = false;
+    $("file-name").textContent = `${fileName}, last saved ${new Date(doc.updatedAt).toLocaleString()}`;
+    setState(`Saved at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`);
+  } catch (error) {
+    setState(`Couldn't save: ${error.message} Use Download JSON instead.`, "error");
+  }
+}
+
+function download() {
+  if (!doc) return;
+  doc.updatedAt = new Date().toISOString();
+  const url = URL.createObjectURL(new Blob([serialize()], { type: "application/json" }));
+  const link = el("a", { href: url, download: fileName || "REFACTOR-READINESS-CHECKLIST.json" });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  if (!handle) { dirty = false; setState("Downloaded. Replace the original file with it.", "warn"); }
+}
+
+function changed() {
+  dirty = true;
+  updateProgress();
+  if (handle) {
+    setState("Unsaved changes");
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => save(false), 700);
+  } else {
+    setState("Unsaved changes. Use Download JSON to keep them.", "warn");
+  }
+}
+
+function setState(message, tone = "") {
+  const node = $("save-state");
+  node.textContent = message;
+  node.className = "save-state" + (tone ? " " + tone : "");
+}
+function showError(message) { const node = $("open-error"); node.textContent = message; node.hidden = false; }
+function hideError() { $("open-error").hidden = true; }
+
+/* ---------- Rendering ---------- */
+
+function start(data) {
+  doc = data;
+  dirty = false;
+  expanded.clear();
+  const current = currentStep();
+  if (current) expanded.add(current.number);
+  $("empty").hidden = true;
+  $("workspace").hidden = false;
+  $("toolbar").hidden = false;
+  $("progress").hidden = false;
+  $("save-btn").disabled = false;
+  $("download-btn").disabled = false;
+  $("file-name").textContent = fileName + (doc.updatedAt ? `, last saved ${new Date(doc.updatedAt).toLocaleString()}` : "");
+  render();
+}
+
+function currentStep() {
+  return doc.steps.find(step => !RESOLVED.has(step.status) && step.status !== "skipped") || null;
+}
+
+function render() {
+  renderTrack();
+  const main = $("main");
+  main.replaceChildren(...[renderGrounding(), renderAbout(), ...doc.steps.map(renderStep)].filter(Boolean));
+  applyFilter();
+  updateProgress();
+  autosizeAll(main);
+}
+
+function renderTrack() {
+  const current = currentStep();
+  const start = Array.isArray(doc.grounding) && doc.grounding.length
+    ? el("li", { class: "start-link" }, el("a", { href: "#start-here", onclick: () => { const panel = $("start-here"); if (panel) panel.open = true; } },
+      el("span", { class: "node", "aria-hidden": "true" }), el("span", { class: "num" }, ""), el("span", { class: "label" }, "Start here")))
+    : null;
+  $("track").replaceChildren(...(start ? [start] : []), ...doc.steps.map(step => el("li", {
+    class: trackClass(step, current),
+    "data-step": step.number,
+  }, el("a", { href: `#step-${step.number}`, onclick: () => { expanded.add(step.number); syncExpanded(); } },
+    el("span", { class: "node", "aria-hidden": "true" }),
+    el("span", { class: "num" }, String(step.number)),
+    el("span", { class: "label" }, step.title, step.gate ? el("span", { class: "visually-hidden" }, " (gate)") : null),
+  ))));
+}
+
+function trackClass(step, current) {
+  return [
+    step.gate && "gate",
+    RESOLVED.has(step.status) && "resolved",
+    step.status === "blocked" && "blocked",
+    step.status === "skipped" && "skipped",
+    current && current.number === step.number && "current",
+  ].filter(Boolean).join(" ");
+}
+
+function renderGrounding() {
+  if (!Array.isArray(doc.grounding) || !doc.grounding.length) return null;
+  const nothingDone = !doc.steps.some(step => RESOLVED.has(step.status));
+  const map = el("figure", { class: "step-map" },
+    el("a", { href: "REFACTOR-READINESS-MAP.svg", target: "_blank", rel: "noopener" },
+      el("img", { src: "REFACTOR-READINESS-MAP.svg", alt: "Map of all 23 readiness steps: why each exists, what it produces, and how the answers become the final plan", onerror: () => map.remove() })),
+    el("figcaption", {}, "The step map: all 23 steps, why each exists and what it produces. Select it to open full size."),
+  );
+  return el("details", { class: "start-here", id: "start-here", open: nothingDone },
+    el("summary", {}, "Start here", el("span", { class: "hint" }, "Why this checklist exists and how the pieces fit")),
+    el("div", { class: "start-body" }, map, ...doc.grounding.map(section => editableBlock(section, "body", section.title))),
+  );
+}
+
+function renderAbout() {
+  const body = el("div", { class: "about-body" },
+    editableBlock(doc, "intro", "Introduction"),
+    editableBlock(doc, "scope", "Scope"),
+    editableBlock(doc, "rules", "Rules for filling in results"),
+  );
+  return el("details", { class: "about" }, el("summary", {}, "About this checklist: scope and rules"), body);
+}
+
+function renderStep(step) {
+  const open = expanded.has(step.number);
+  const bodyId = `step-${step.number}-body`;
+  const section = el("section", { class: "step" + (RESOLVED.has(step.status) ? " resolved" : ""), id: `step-${step.number}`, "data-step": step.number });
+  const toggle = el("button", { class: "step-toggle", type: "button", "aria-expanded": String(open), "aria-controls": bodyId, onclick: () => {
+    if (expanded.has(step.number)) expanded.delete(step.number); else expanded.add(step.number);
+    syncExpanded();
+  } },
+    el("span", { class: "step-no" }, String(step.number)),
+    el("span", { class: "step-title" }, step.title),
+    el("span", { class: "tags" },
+      step.gate ? el("span", { class: "gate-tag", title: "Must be done or changed before the prompt generator runs" }, "Gate") : null,
+      el("span", { class: `status-chip ${step.status.replace(" ", "-")}` }, STATUS_LABELS[step.status]),
+    ),
+  );
+  const body = el("div", { class: "step-body", id: bodyId, hidden: !open },
+    renderControls(step),
+    ...BLOCKS.map(([field, label]) => editableBlock(step, field, label, field === "why" && step.references ? referenceLine(step) : null)),
+    typeof step.technical === "string" ? el("details", { class: "technical" },
+      el("summary", {}, "Technical background"),
+      editableBlock(step, "technical", "Technical background", null, "", true),
+    ) : null,
+    renderResults(step),
+  );
+  section.append(el("header", {}, toggle), body);
+  return section;
+}
+
+function referenceLine(step) {
+  return editableBlock(step, "references", "Reference", null, "refs");
+}
+
+function renderControls(step) {
+  const checkbox = el("input", { type: "checkbox", class: "done-input", checked: step.done, onchange: event => {
+    step.status = event.target.checked ? (step.status === "changed" ? "changed" : "done") : "not started";
+    step.done = RESOLVED.has(step.status);
+    stepChanged(step, ".done-input");
+  } });
+  const select = el("select", { class: "status-input", "aria-label": `Status of step ${step.number}`, onchange: event => {
+    step.status = event.target.value;
+    step.done = RESOLVED.has(step.status);
+    stepChanged(step, ".status-input");
+  } }, ...doc.statuses.filter(status => STATUS_LABELS[status]).map(status => el("option", { value: status, selected: status === step.status }, STATUS_LABELS[status])));
+  return el("div", { class: "controls" },
+    el("label", { class: "done-box" }, checkbox, "Done"),
+    el("label", { class: "status" }, "Status", select),
+    el("span", { class: "spacer" }),
+    el("button", { class: "btn quiet", type: "button", onclick: () => copyBriefing(step) }, "Copy AI briefing"),
+    el("button", { class: "btn quiet", type: "button", onclick: event => editTitle(step, event.currentTarget) }, "Edit title"),
+  );
+}
+
+/* A self-contained prompt for an AI helping with one step. */
+function briefingFor(step) {
+  const section = (title, body) => body && String(body).trim() ? `### ${title}\n\n${String(body).trim()}\n` : "";
+  const fields = step.results.fields.map(field => `- ${field.label}: ${field.value && field.value.trim() ? field.value.trim() : "(empty)"}`).join("\n");
+  const table = step.results.table
+    ? [`| ${step.results.table.columns.join(" | ")} |`, `| ${step.results.table.columns.map(() => "---").join(" | ")} |`,
+       ...step.results.table.rows.map(row => `| ${step.results.table.columns.map((_, index) => (row[index] || "").replace(/\|/g, "\\|").replace(/\n/g, " ")).join(" | ")} |`)].join("\n")
+    : "";
+  const grounding = (doc.grounding || []).map(part => `### ${part.title}\n\n${part.body.trim()}\n`).join("\n");
+  return [
+    "I'm working through the AWS Studio refactor readiness checklist and want help with one step.",
+    "",
+    "Work in the workspace folder that contains `aws-studio` and `aws-studio-starter-projects`. Before answering, read:",
+    "- `aws-studio/REFACTOR-READINESS-REFERENCE.md`, at least the sections this step references",
+    "- `aws-studio/REFACTOR-READINESS-CHECKLIST.json`, for the whole checklist and my other results",
+    "",
+    "The technical background below was written on 2026-11-25. Check the current code before relying on it, and tell me if anything has changed.",
+    "",
+    "## Background",
+    "",
+    grounding,
+    `## The step: ${step.number}. ${step.title}${step.gate ? " (gate step)" : ""}`,
+    "",
+    `Status: ${STATUS_LABELS[step.status]}`,
+    "",
+    section("Objective", step.objective),
+    section("Why", step.why),
+    section("References", step.references),
+    section("What to do", step.do),
+    section("Done when", step.doneWhen),
+    section("Technical background", step.technical),
+    "### My results so far",
+    "",
+    table,
+    fields,
+    "",
+    "## What I need",
+    "",
+    "Help me complete this step:",
+    "- explain anything that's unclear",
+    "- verify the technical details against the current code",
+    "- tell me exactly what to record in each result field",
+    "",
+    "Don't change any files, run billed AWS commands or deploy anything unless I ask.",
+  ].join("\n");
+}
+
+async function copyBriefing(step) {
+  const text = briefingFor(step);
+  try {
+    await navigator.clipboard.writeText(text);
+    setState(`Copied the AI briefing for step ${step.number}`);
+  } catch {
+    const area = el("textarea", { readonly: true, "aria-label": "AI briefing text" });
+    area.value = text;
+    const dialog = el("dialog", { class: "briefing" },
+      el("p", {}, "Your browser blocked copying. Select all of this text and copy it."),
+      area,
+      el("div", { class: "edit-actions" }, el("button", { class: "btn primary", type: "button", onclick: () => dialog.close() }, "Close")),
+    );
+    dialog.addEventListener("close", () => dialog.remove());
+    document.body.append(dialog);
+    dialog.showModal();
+    area.focus();
+    area.select();
+  }
+}
+
+function stepChanged(step, focusSelector) {
+  changed();
+  const section = document.getElementById(`step-${step.number}`);
+  const fresh = renderStep(step);
+  section.replaceWith(fresh);
+  autosizeAll(fresh);
+  renderTrack();
+  applyFilter();
+  if (focusSelector) fresh.querySelector(focusSelector)?.focus();
+}
+
+function editTitle(step, button) {
+  const section = document.getElementById(`step-${step.number}`);
+  const title = section.querySelector(".step-title");
+  const input = el("input", { class: "title-editor", value: step.title, "aria-label": `Title of step ${step.number}` });
+  const finish = () => {
+    const value = input.value.trim();
+    if (value && value !== step.title) { step.title = value; changed(); renderTrack(); }
+    title.textContent = step.title;
+    input.replaceWith(button);
+    button.focus();
+  };
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === "Escape") {
+      event.preventDefault();
+      if (event.key === "Escape") input.value = step.title;
+      input.blur();
+    }
+  });
+  input.addEventListener("blur", finish, { once: true });
+  button.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
+function editableBlock(owner, field, label, after = null, extraClass = "", hideLabel = false) {
+  const prose = el("div", { class: "prose", html: markdown(owner[field]) });
+  const button = el("button", { class: "btn quiet", type: "button", "aria-label": `Edit ${label.toLowerCase()}` }, "Edit");
+  const head = el("div", { class: "block-head" }, el("h3", { class: hideLabel ? "visually-hidden" : undefined }, label), button);
+  const block = el("div", { class: "block" + (extraClass ? " " + extraClass : "") }, head, prose);
+  button.addEventListener("click", () => {
+    const editor = el("textarea", { class: "editor", "aria-label": `${label} text (Markdown)` });
+    editor.value = owner[field] || "";
+    const before = editor.value;
+    const finish = keep => {
+      if (!keep) { owner[field] = before; }
+      prose.innerHTML = markdown(owner[field]);
+      wrap.replaceWith(prose);
+      button.hidden = false;
+      if (keep && owner[field] !== before) changed();
+      button.focus();
+    };
+    editor.addEventListener("input", () => { owner[field] = editor.value; });
+    editor.addEventListener("keydown", event => {
+      if (event.key === "Escape") { event.preventDefault(); finish(false); }
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); finish(true); }
+    });
+    const wrap = el("div", {}, editor, el("div", { class: "edit-actions" },
+      el("button", { class: "btn primary", type: "button", onclick: () => finish(true) }, "Done editing"),
+      el("button", { class: "btn", type: "button", onclick: () => finish(false) }, "Cancel"),
+    ));
+    prose.replaceWith(wrap);
+    button.hidden = true;
+    editor.style.height = Math.max(editor.scrollHeight + 4, 160) + "px";
+    editor.focus();
+  });
+  return after ? el("div", {}, block, after) : block;
+}
+
+function renderResults(step) {
+  const wrap = el("div", { class: "results" }, el("h3", {}, "Results"));
+  if (step.results.table) wrap.append(renderGrid(step));
+  step.results.fields.forEach((field, index) => {
+    const id = `step-${step.number}-field-${index}`;
+    const input = el("textarea", { id, rows: "1", oninput: event => { field.value = event.target.value; autosize(event.target); changed(); } });
+    input.value = field.value || "";
+    wrap.append(el("div", { class: "field" }, el("label", { for: id }, field.label), input));
+  });
+  return wrap;
+}
+
+function renderGrid(step) {
+  const table = step.results.table;
+  const tbody = el("tbody");
+  const draw = () => {
+    tbody.replaceChildren(...table.rows.map((row, rowIndex) => el("tr", {},
+      ...table.columns.map((column, columnIndex) => {
+        const cell = el("textarea", { rows: "1", "aria-label": `${column}, row ${rowIndex + 1}`, oninput: event => { row[columnIndex] = event.target.value; autosize(event.target); changed(); } });
+        cell.value = row[columnIndex] ?? "";
+        return el("td", {}, cell);
+      }),
+      el("td", { class: "row-actions" }, el("button", { class: "btn quiet", type: "button", "aria-label": `Remove row ${rowIndex + 1}`, disabled: table.rows.length === 1, onclick: () => { table.rows.splice(rowIndex, 1); draw(); changed(); } }, "Remove")),
+    )));
+    autosizeAll(tbody);
+  };
+  draw();
+  return el("div", { class: "grid-wrap" },
+    el("table", { class: "grid" }, el("thead", {}, el("tr", {}, ...table.columns.map(column => el("th", { scope: "col", html: inline(column) })), el("th", {}, el("span", { class: "visually-hidden" }, "Actions")))), tbody),
+    el("button", { class: "btn", type: "button", onclick: () => { table.rows.push(table.columns.map(() => "")); draw(); changed(); } }, "Add row"),
+  );
+}
+
+function autosize(textarea) { textarea.style.height = "auto"; textarea.style.height = textarea.scrollHeight + 2 + "px"; }
+function autosizeAll(root) { requestAnimationFrame(() => root.querySelectorAll(".field textarea, table.grid textarea").forEach(autosize)); }
+
+function syncExpanded() {
+  for (const section of document.querySelectorAll(".step")) {
+    const number = Number(section.dataset.step);
+    const open = expanded.has(number);
+    section.querySelector(".step-toggle").setAttribute("aria-expanded", String(open));
+    section.querySelector(".step-body").hidden = !open;
+    if (open) autosizeAll(section);
+  }
+}
+
+function applyFilter() {
+  const visible = step => filter === "all" || (filter === "gates" && step.gate) || (filter === "open" && !RESOLVED.has(step.status) && step.status !== "skipped");
+  for (const step of doc.steps) {
+    const hide = !visible(step);
+    document.getElementById(`step-${step.number}`)?.classList.toggle("hidden-by-filter", hide);
+    document.querySelector(`#track li[data-step="${step.number}"]`)?.classList.toggle("hidden-by-filter", hide);
+  }
+}
+
+function updateProgress() {
+  const steps = doc.steps;
+  const done = steps.filter(step => RESOLVED.has(step.status)).length;
+  const gates = steps.filter(step => step.gate);
+  const gatesDone = gates.filter(step => RESOLVED.has(step.status)).length;
+  const blocked = steps.filter(step => step.status === "blocked").length;
+  $("done-count").textContent = done;
+  $("step-count").textContent = steps.length;
+  $("gate-count").textContent = gatesDone;
+  $("gate-total").textContent = gates.length;
+  $("blocked-count").textContent = blocked;
+  $("blocked-wrap").hidden = blocked === 0;
+  $("bar-fill").style.width = steps.length ? `${(done / steps.length) * 100}%` : "0";
+}
+
+/* ---------- Wiring ---------- */
+
+$("open-btn").addEventListener("click", openFile);
+$("empty-open").addEventListener("click", openFile);
+$("save-btn").addEventListener("click", () => handle ? save(true) : download());
+$("download-btn").addEventListener("click", download);
+$("file-input").addEventListener("change", async event => {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  try { await loadFromFile(file); } catch (error) { showError(error.message); }
+});
+document.querySelectorAll("[data-filter]").forEach(button => button.addEventListener("click", () => {
+  filter = button.dataset.filter;
+  document.querySelectorAll("[data-filter]").forEach(other => other.setAttribute("aria-pressed", String(other === button)));
+  applyFilter();
+}));
+$("expand-btn").addEventListener("click", () => { doc.steps.forEach(step => expanded.add(step.number)); syncExpanded(); });
+$("collapse-btn").addEventListener("click", () => { expanded.clear(); syncExpanded(); });
+$("next-btn").addEventListener("click", () => {
+  const step = currentStep();
+  if (!step) { setState("Every step is resolved. Run the prompt generator next."); return; }
+  if (filter !== "all" && filter !== "open") document.querySelector('[data-filter="all"]').click();
+  expanded.add(step.number);
+  syncExpanded();
+  document.getElementById(`step-${step.number}`).scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  document.querySelector(`#step-${step.number} .step-toggle`).focus({ preventScroll: true });
+});
+
+document.addEventListener("keydown", event => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    if (doc) { if (handle) save(true); else download(); }
+  }
+});
+window.addEventListener("beforeunload", event => {
+  if (dirty || document.querySelector(".editor")) { event.preventDefault(); event.returnValue = ""; }
+});
+
+let dragDepth = 0;
+window.addEventListener("dragenter", event => { if (event.dataTransfer?.types.includes("Files")) { dragDepth++; document.body.classList.add("dragging"); } });
+window.addEventListener("dragleave", () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) document.body.classList.remove("dragging"); });
+window.addEventListener("dragover", event => event.preventDefault());
+window.addEventListener("drop", async event => {
+  event.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove("dragging");
+  if (dirty && !confirm("You have unsaved changes. Open the dropped file anyway?")) return;
+  const item = [...(event.dataTransfer?.items || [])].find(entry => entry.kind === "file");
+  try {
+    if (item && item.getAsFileSystemHandle) {
+      const dropped = await item.getAsFileSystemHandle();
+      if (dropped && dropped.kind === "file") { await loadFromHandle(dropped); return; }
+    }
+    const file = event.dataTransfer?.files?.[0];
+    if (file) await loadFromFile(file);
+  } catch (error) { showError(error.message); }
+});
+
+(async () => {
+  if (!supportsFileAccess) {
+    $("support-note").textContent = "This browser can't save straight to the file. Your edits download as a new JSON file that you copy over the original. Chrome and Edge can save directly.";
+    return;
+  }
+  const remembered = await recallHandle();
+  if (remembered) {
+    const reopen = $("reopen-btn");
+    reopen.textContent = `Reopen ${remembered.name}`;
+    reopen.hidden = false;
+    reopen.addEventListener("click", async () => {
+      hideError();
+      try {
+        if (await remembered.queryPermission({ mode: "readwrite" }) !== "granted") await remembered.requestPermission({ mode: "readwrite" });
+        await loadFromHandle(remembered);
+      } catch (error) { showError(`Couldn't reopen it: ${error.message} Use Open checklist file instead.`); }
+    });
+  }
+})();
+</script>
+</body>
+</html>

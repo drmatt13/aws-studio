@@ -1,0 +1,1284 @@
+{
+  "schema": 1,
+  "title": "Refactor readiness checklist",
+  "updatedAt": null,
+  "statuses": [
+    "not started",
+    "done",
+    "changed",
+    "blocked",
+    "skipped"
+  ],
+  "grounding": [
+    {
+      "title": "Read this first",
+      "body": "This page is the to-do list you finish **before** refactoring AWS Studio for its public 1.0 release. Each step says what to do and why. Your answers save into `REFACTOR-READINESS-CHECKLIST.json`.\n\nWhen every step is done, an AI turns your answers into the instructions for the final plan. That plan is what the refactor follows.\n\nThis section explains the big picture: what's wrong today, where we're heading, and why these steps come first. Read it once before you start, and come back whenever a step stops making sense.\n\nFor a one-page picture of all 23 steps, open [the step map](REFACTOR-READINESS-MAP.svg)."
+    },
+    {
+      "title": "AWS Studio in one paragraph",
+      "body": "AWS Studio is two things that ship together:\n\n- **The framework.** An npm package (`aws-studio`) that every app depends on. It builds the app's AWS infrastructure with CDK, runs the app's code locally, and wires up the database, sign-in and APIs.\n- **Studio.** The local app you open at `127.0.0.1:4590` to see and edit a project.\n\nA developer starts a new project from the **starter**, which is the reference app. From then on they own that project's code, and the framework is a dependency pinned to an exact version."
+    },
+    {
+      "title": "The problem we're solving",
+      "body": "**Too much framework code is copied into projects.** Today a lot of the framework isn't in the package at all. It's copied into each new project:\n\n- the database, website and sign-in stacks\n- the file that decides which stacks exist and in what order\n- the sign-in Lambdas\n- the GraphQL server setup\n- the database migration task\n\nOnce copied, that code belongs to the project, and we can't change it anymore. That's fine today, because nobody but you uses AWS Studio. After the public release, thousands of projects would each hold their own frozen copy.\n\nWhat that would mean in practice:\n\n- **A database bug.** We fix it in the starter, but every existing project keeps the bug.\n- **A security hole in sign-in.** There's no way to patch existing projects.\n- **A new framework setting.** Every older project stops building, because the framework expects each project's own copy of the settings file to declare it.\n- **A new framework Lambda or stack.** There's nowhere to put it, because each project's copy decides which stacks exist."
+    },
+    {
+      "title": "Where we're heading",
+      "body": "- **Framework code lives in the package.** Each project pins an exact version.\n- **Projects keep only their own work.** That means their declarations (what they want), their own stacks and code, and a few tiny **seed files** that call the package.\n- **Fixes arrive through a reviewed upgrade.** Studio installs the new version in a private copy, checks it, shows exactly what changes, and applies it only when the developer approves.\n- **Deploying and database changes are always separate approvals.** An upgrade never does either one on its own.\n\n```text\nNew framework release\n        |\n        v\nStudio offers \"Review framework upgrade\" --- developer approves\n        |\n        v\nProject's code and pinned version updated (nothing in AWS yet)\n        |\n        v\nDeploy to AWS ------------------------------ separate approval\n        |\n        v\nDatabase migration ------------------------- separate approval\n```"
+    },
+    {
+      "title": "One-way doors: why some things must be decided now",
+      "body": "**Some choices get written into every user's AWS account, database or user pool the first time they deploy:**\n\n- the names and tags on every AWS resource\n- the shape of the users table\n- which fields sign-up requires (fixed forever for each user pool)\n- how databases are encrypted\n\n**Before 1.0, changing any of these is free.** Nobody depends on them yet.\n\n**After 1.0, each change means migrating every user's live infrastructure or data.** That's what we mean by a **one-way door** or a **Freeze** item. The checklist makes you decide each one on purpose, rather than by accident."
+    },
+    {
+      "title": "Why this checklist comes before the refactor",
+      "body": "- **You can't lock in something you haven't seen work.** Production deploys, the website release and several Studio pages have never been tested together.\n- **Some decisions belong to you, not the code.** For example: the names, which features count as finished, and what compatibility you promise.\n- **The refactor needs a \"before\" picture** to prove it didn't break anything by accident.\n- **Building new features in files that are about to move is wasted work.**"
+    },
+    {
+      "title": "Your unfinished features",
+      "body": "You don't have to finish everything before 1.0. Each feature gets one of two treatments:\n\n- **Build.** Finished and tested for 1.0.\n- **Slot.** Only its extension point exists in 1.0, so the feature can arrive later through an upgrade without breaking anyone.\n\nEach feature also gets a label users can see:\n\n- **Stable:** finished, tested and promised.\n- **Preview:** visible, but may still change.\n- **Hidden:** not shown yet.\n\nAfter 1.0, a change reaches users in one of four ways:\n\n1. **A Studio update**, for Studio's own pages.\n2. **A framework release plus a reviewed upgrade**, for framework code and infrastructure.\n3. **The database review**, for the framework's own database tables.\n4. **An opt-in \"behavior revision\"**, for changing how already-deployed infrastructure is built. Each project adopts it when it chooses, and then deploys."
+    },
+    {
+      "title": "What's out of scope",
+      "body": "- **No one uses AWS Studio yet.**\n- **The reference app is a throwaway.** Change it, reset its database and redeploy it freely.\n- **Apta has been deleted.**\n\nNothing existing needs migrating, backing up or keeping compatible. Compatibility promises start at public 1.0. Old compatibility code gets deleted, not carried forward."
+    },
+    {
+      "title": "How the 23 steps fit together",
+      "body": "| Steps | What they do |\n| --- | --- |\n| 1–2 | Protect your starting point, and stop work that would be wasted |\n| 3 | Start the slowest decision, naming, early |\n| 4–6 | Record the baseline: tools, tests and an infrastructure fingerprint |\n| 7–10 | Prove what works today by actually using it |\n| 11–20 | Make the decisions only you can make |\n| 21–22 | Map what depends on what, and list what becomes permanent |\n| 23 | Hand off to the prompt generator |\n\nSix steps are **gates**: 3, 8, 15, 16, 18 and 22. The final prompt can't be generated until they're done."
+    },
+    {
+      "title": "After the checklist",
+      "body": "1. The prompt generator reads your answers, then checks the code for anything that changed.\n2. It writes `DISTRIBUTION-PLAN-PROMPT.md`.\n3. You run that prompt in Plan Mode. It produces the final implementation plan.\n4. The refactor follows the plan.\n5. Three simulated releases (1.0.1, 1.1.0 and 1.2.0) prove upgrades work before anyone else sees them.\n6. Public 1.0."
+    },
+    {
+      "title": "Words you'll see",
+      "body": "| Word | Meaning |\n| --- | --- |\n| Framework, package | The `aws-studio` npm package that apps depend on |\n| Studio | The local editor app at `127.0.0.1:4590` |\n| Starter, reference app | The template new projects are copied from. Throwaway until 1.0. |\n| Seed file | A tiny file in a project that only calls the framework. The project owns it, but there's almost nothing in it to go stale. |\n| Pin | The exact framework version a project uses: a `.tgz` file in the project plus its fingerprint in `package-lock.json` |\n| Reviewed upgrade | Studio's \"Review framework upgrade\": install in a private copy, verify, show the changes, apply on approval |\n| Gate step | A checklist step that must be finished before the final prompt can be generated |\n| Stable, Preview, Hidden | What a feature promises users at 1.0 |\n| Freeze, Slot, Build | Final at 1.0; extension point only at 1.0; finished and tested at 1.0 |\n| Behavior revision | An opt-in bundle of changes to how existing infrastructure is built. Adopted per project, then deployed. |\n| Layout revision | A version number for where files live in a project, so an upgrade knows which file moves to apply |\n| Infrastructure fingerprint | A saved description of every AWS resource the app would create, used to prove nothing changed by accident |\n| Framework schema | Database tables the framework owns, such as users and sign-in identities, kept apart from the app's own tables |\n| Identity mesh | The link between a Cognito sign-in and a row in the app's users table |\n| Prisma AG | Prisma Access Graph: the `/// @access` rules that decide who can read or change which rows |\n| One-way door | A choice that's free now and very expensive after release |"
+    },
+    {
+      "title": "Using AI on a step",
+      "body": "Each step has a **Copy AI briefing** button. It copies everything an AI needs to help you with that step:\n\n- this background\n- the step itself\n- its technical background\n- what you've written so far\n\nPaste it into an AI session started in the workspace folder. The AI can then read the reference file and the code for the details."
+    }
+  ],
+  "intro": "Work through these steps **in order** before starting the AWS Studio framework/project boundary refactor. Each step gives a plain objective, why it matters, what to do, when it counts as done, and results to fill in. **Technical background** under each step holds the detail an engineer or an AI needs.\n\nRead **Start here** first. [The reference file](REFACTOR-READINESS-REFERENCE.md) holds the full findings, proposals and decision register.\n\nWhen every step is resolved, run [the prompt generator](DISTRIBUTION-PLAN-PROMPT-GENERATOR.md). It reads this JSON file, including your results, and writes the Plan Mode prompt for the final distribution plan.",
+  "scope": "- **No one uses AWS Studio yet.** No production app, and no one else's project or deployment, depends on it.\n- **The work covers `aws-studio` and the starter's `reference-app` only.** The reference app is a throwaway working app. Change it, reset its database and redeploy it freely.\n- **Nothing existing is migrated, backed up or kept compatible.** Compatibility starts at public 1.0.\n- **Apta has been deleted from the workspace.** It played no part in this work.\n\nSee [R17](REFACTOR-READINESS-REFERENCE.md#r17-scope-and-existing-state).",
+  "rules": "- Fill in every field. Write `n/a` and the reason when a field doesn't apply.\n- **Status** is one of:\n  - `done`\n  - `changed`: done, but you deviated from the step or reached a different decision\n  - `blocked`: give the reason and what would unblock it\n  - `skipped`: give the reason\n- **Gate** steps must be `done` or `changed` before the prompt generator can produce the final prompt.\n- If a result contradicts the reference file, say so in **Decisions or deviations**. The generator carries contradictions forward.\n- **The checklist JSON may be committed to a public repository.** Never write credentials, secret values, `.env` contents, AWS account IDs, profile names, emails or user data here. Put those in a private note outside the repositories and write `see private note <name>` here.\n- Store large evidence, such as logs and captures, under `aws-studio/output/refactor-baseline/` (git-ignored) and give the path here.\n\nPaths in this file are relative to the workspace root `/Users/matt/Desktop/code/aws-studio-workspace/`\nunless they start with a repository name. `<ref-app>` means\n`aws-studio-starter-projects/reference-app`.",
+  "steps": [
+    {
+      "number": 1,
+      "title": "Create a recovery point in both repositories",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Save a snapshot of both repositories, so you can always compare against it or go back to it.",
+      "why": "- Everything you do next gets compared against this starting point.\n- If something goes wrong, you can get back to it.\n- The research notes and these checklist files aren't committed yet, so they could be lost.",
+      "references": "See [R1](REFACTOR-READINESS-REFERENCE.md#r1-workspace-and-repositories).",
+      "do": "1. In `aws-studio`:\n   1. Note the current HEAD (`git -C aws-studio rev-parse HEAD`; it was `8b0a51f` during research).\n   2. Create a branch such as `refactor-readiness`.\n   3. Commit `docs/aws-studio-knowledge/research/`, the change to `docs/aws-studio-knowledge/README.md`, `REFACTOR-READINESS-CHECKLIST.json`, `REFACTOR-READINESS-CHECKLIST.html`, `REFACTOR-READINESS-REFERENCE.md` `DISTRIBUTION-PLAN-PROMPT-GENERATOR.md` and `REFACTOR-READINESS-MAP.svg`.\n2. Tag the last code commit before your readiness commit: `git -C aws-studio tag pre-refactor-baseline <code-commit>`.\n3. In the starter repository, tag HEAD: `git -C aws-studio-starter-projects tag pre-refactor-baseline`. Also record the commit pinned in `aws-studio/scripts/starters.json` (`47d90d7`).\n4. Confirm `git status --short` is empty in both repositories. Ignored files such as `.env.dev` don't count.",
+      "doneWhen": "Both tags exist, and both working trees are clean.",
+      "technical": "**The repositories:**\n\n- **`aws-studio`**: the platform. Studio is in `client-app/`; the framework package is in `packages/aws-studio`.\n- **`aws-studio-starter-projects`**: the starter. The app lives in its `reference-app/` folder.\n\n**Pinned commit versus HEAD.** New projects are created from the starter commit pinned in `aws-studio/scripts/starters.json` (`47d90d7` at research time), not from the starter's HEAD (`61d8847`).\n\n**Why the tags matter.** They give everything later a fixed comparison point. The prompt generator runs `git log pre-refactor-baseline..HEAD` to list everything that changed during the readiness work.\n\n**What was uncommitted at research time:** `docs/aws-studio-knowledge/research/`, an edit to `docs/aws-studio-knowledge/README.md`, and the readiness files.\n\n**Link checking.** Root Markdown files are scanned by `python3 docs/check-links.py`, and links that leave the repository fail it. That's why starter paths are written as code rather than links.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "aws-studio code commit tagged",
+            "value": ""
+          },
+          {
+            "label": "aws-studio readiness branch and commit",
+            "value": ""
+          },
+          {
+            "label": "Starter HEAD tagged / pinned commit",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 2,
+      "title": "Declare the refactor freeze",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Stop building new features in the files this refactor will move, so nothing gets built twice.",
+      "why": "- The refactor moves these files into the framework, or replaces them with tiny seed files.\n- Anything new you build in them now gets thrown away or redone.\n- Fixing bugs in them is fine. Just note each fix so it survives the move.",
+      "references": "See [R3](REFACTOR-READINESS-REFERENCE.md#r3-how-framework-code-reaches-projects-today),\n[R8](REFACTOR-READINESS-REFERENCE.md#r8-target-architecture) and\n[R14](REFACTOR-READINESS-REFERENCE.md#r14-studio-pages-and-studio-state).",
+      "do": "1. Add a short \"Refactor freeze\" section to `aws-studio/AGENTS.md` and `<ref-app>/AGENTS.md`. It should say that no new features may be built against the files below until the boundary refactor lands, and that bug fixes must be recorded in Step 23's results. The frozen files:\n   - in the reference app:\n     - `cdk-app/lib/app/{rds-stack,frontend-website-s3-stack,frontend-routing,frontend-routing-handler,cognito-stack,auth-providers,identity-pool-access,identity-policy}.ts`\n     - `cdk-app/lib/application.ts`, `cdk-app/bin/app.ts`, `cdk-app/framework-inputs.ts`\n     - `framework-config/inputs/deployment.ts`, `framework-config/stacks/{rds,cognito}.ts`, `framework-config/auth/sign-in-providers.ts`, `framework-config/inputs/sign-in-providers.ts`\n     - `compute/tasks/db-migrate/**`\n     - `compute/events/cognito-*/**`\n     - `compute/http/{oauth-callback,sign-in,refresh,sign-out,verify-session,mfa}/**`\n     - `compute/http/graphql-api/{index.ts,graphql-context.ts,lib/**,schema/builder.ts}`\n     - `packages/database/src/{users,cognito-users}.ts`\n     - `packages/database/scripts/**`\n   - in `aws-studio`:\n     - `client-app/server/model/framework-resource-catalog.ts`\n     - the provider and identity-pool parsing in `client-app/server/identity/service.ts`\n     - the evidence file list in `client-app/server/stateful-resources.ts`\n2. Commit the notes.",
+      "doneWhen": "The freeze notes are committed in both repositories.",
+      "technical": "**The plan (decision D02, reference R8) moves framework-owned code out of project source.** Every reference-app file on the list either moves into `packages/aws-studio` or becomes a seed:\n\n- **Composition.** `application.ts` and `bin/app.ts` become calls to `runApplication` and `defineApplication`.\n- **Stacks.** The database, website, routing and Cognito stacks move into the package. Their stack IDs and construct IDs stay the same by default.\n- **Settings.** The settings files are deleted, and the package declares the settings instead.\n- **Workloads.** The auth Lambdas and `db-migrate` become framework workloads with reserved IDs.\n- **GraphQL.** The GraphQL bootstrap becomes `createGraphQLHandler`.\n- **User repositories.** These move into the package.\n\nThe Studio files on the list:\n\n- **`client-app/server/model/framework-resource-catalog.ts`** holds the hard-coded `STARTER_STACKS` and `LOCAL_SETTINGS` lists. The plan replaces them with ownership based on where a definition lives (D01).\n- **`client-app/server/identity/service.ts`** finds sign-in providers by regex-matching `new …UserPoolIdentityProvider(...)` in `cdk-app/lib/app/cognito-stack.ts`. That breaks once the stack moves (D44).\n- **`client-app/server/stateful-resources.ts`** fingerprints `framework-config/inputs/deployment.ts` and `cdk-app/lib/application.ts`. The plan deletes the first and rewrites the second.\n\n**Record bug fixes.** The refactor moves behavior, not only text, so recorded fixes get carried across.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Commits",
+            "value": ""
+          },
+          {
+            "label": "Files you chose to add to or remove from the freeze, and why",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 3,
+      "title": "Start the product, package and CLI name clearance",
+      "gate": true,
+      "done": false,
+      "status": "not started",
+      "objective": "Choose the final product name, npm package name and command-line name, and make sure you're allowed to use them.",
+      "why": "- The package and command names end up in every user's project code. Renaming after release means changing every project.\n- \"AWS\" is Amazon's trademark, and Amazon already sells \"AWS App Studio\". You need to know you're allowed to use the name.\n- Clearance can take a while, so start now and finish whenever the answer arrives.",
+      "references": "See [R7](REFACTOR-READINESS-REFERENCE.md#r7-persisted-identifiers-and-names) and\n[R20 D10](REFACTOR-READINESS-REFERENCE.md#r20-decision-register).",
+      "do": "1. List the candidate names.\n2. For each, check:\n   - npm availability: `npm view <name>` returns 404 when the name is free. Consider a scope you control, such as `@yourscope/<name>`.\n   - GitHub organization and repository names\n   - domains\n   - an AWS trademark review\n3. Decide each of these:\n   - display name\n   - npm package name\n   - CLI binary name\n   - `package.json` record key (today `awsStudio`)\n   - prefix for new environment variables (today `AWS_STUDIO_*` and `FRAMEWORK_*`)\n   - Studio state directory (today `.cache/framework-studio/`, already brand-neutral)\n4. Record the decision when it's final. Until then, set Status to `blocked`, note what you're waiting on, and carry on with the other steps.",
+      "doneWhen": "All six names are decided, or you have explicitly chosen to keep the current ones.",
+      "technical": "**Where the name persists:**\n\n- **Imports:** in every project, for example `aws-studio/config` and `aws-studio/runtime/*`.\n- **CLI binary:** `aws-studio` (the `bin` field in `packages/aws-studio/package.json`). It's also used in the starter's npm scripts.\n- **Project record:** the `package.json` key `awsStudio` (decision D11).\n- **Environment variables:** the `AWS_STUDIO_*` prefix.\n- **Studio state directory:** `.cache/framework-studio/`. This one is already brand-neutral.\n\n**Infrastructure identifiers already avoid the brand.** They use the `framework:` key family (`packages/aws-studio/src/deploy/identity.ts`). Step 18 covers the one brand-like value left there.\n\n**Display name versus package name.** The display name appears only in Studio's UI and the docs, so it's cheap to change later. The package and CLI names are not.\n\n**Publishing.** 1.0 distributes the framework as a vendored `file:` tgz (D27). Still pick a package name you could publish to npm later.\n\n**A tag-prefix rule.** AWS reserves tag keys that start with `aws:`.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Display name",
+            "value": ""
+          },
+          {
+            "label": "npm package name",
+            "value": ""
+          },
+          {
+            "label": "CLI name",
+            "value": ""
+          },
+          {
+            "label": "package.json record key",
+            "value": ""
+          },
+          {
+            "label": "Environment variable prefix for new framework variables",
+            "value": ""
+          },
+          {
+            "label": "Studio state directory",
+            "value": ""
+          },
+          {
+            "label": "Clearance source (no confidential details)",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 4,
+      "title": "Confirm the toolchains and hosts you will qualify on",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Make sure you have the exact tools and machines needed to test the release.",
+      "why": "- A release has to be tested on every kind of machine you say it supports.\n- The upgrade tests need two specific Node.js versions installed side by side.",
+      "references": "See [R1](REFACTOR-READINESS-REFERENCE.md#r1-workspace-and-repositories) and\n[R19](REFACTOR-READINESS-REFERENCE.md#r19-qualification-and-release-evidence).",
+      "do": "1. Install, or confirm, Node 24.22.2 with npm 11.19.1 and Node 26.13.0 with npm 11.20.0, as separate installations.\n2. Compare these against `aws-studio/scripts/studio-release.json` and `aws-studio/scripts/studio-node-archives.json`.\n3. Record:\n   - `docker version`\n   - `aws --version` (CLI v2)\n   - the CDK CLI version the reference app locks (`aws-cdk` in `<ref-app>/cdk-app/package.json`)\n4. Decide which native hosts 1.0 will advertise: macOS arm64, macOS x64, Linux x64 and arm64, Windows x64.",
+      "doneWhen": "Both Node installations work, and the list of advertised hosts is decided.",
+      "technical": "**Toolchains (ADR-010 and the verification guide):**\n\n| Component | Node | npm |\n| --- | --- | --- |\n| Studio 1.0 | 26.13.0 | 11.20.0 |\n| Apps | 24.22.2 | 11.19.1 |\n\n**Pins.**\n\n- `scripts/studio-release.json` names the bundled framework and the host runtime.\n- `scripts/studio-node-archives.json` pins the Node archive digests used for first-launch provisioning.\n\n**Qualification scripts.**\n\n- **`scripts/verify-studio-distribution.mjs <distribution.tar.gz> <node26> <node24> <evidence-dir>`** is the single-release smoke test.\n- **`scripts/qualify-retained-cohorts.mjs`** is the two-release upgrade proof. It needs both Node installations and a populated npm cache, set through `npm_config_cache`.\n\n**Test each advertised host separately.** A source checkout that passes isn't the same as a packaged distribution that passes.\n\n**Windows** needs an unelevated terminal and a user-owned NTFS directory.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Node/npm versions",
+            "value": ""
+          },
+          {
+            "label": "Docker / AWS CLI / CDK versions",
+            "value": ""
+          },
+          {
+            "label": "Hosts advertised for 1.0",
+            "value": ""
+          },
+          {
+            "label": "Hosts you can actually test on",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 5,
+      "title": "Run the current test suites and record the baseline",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Run all the existing tests and write down what already fails.",
+      "why": "- During the refactor you need to tell new breakage apart from breakage that was already there.",
+      "references": "See [R1](REFACTOR-READINESS-REFERENCE.md#r1-workspace-and-repositories).",
+      "do": "1. In `aws-studio`:\n   1. `node scripts/bootstrap-test-peer.mjs`\n   2. `npm ci`\n   3. `npm run build`, which builds Studio\n   4. `npm run verify`\n   5. `npm test`, plus any focused suites listed in `README.md`\n2. Docs checks: `node docs/aws-studio-knowledge/check.mjs` and `python3 docs/check-links.py`.\n3. In `<ref-app>`: `npm ci`, `npm run verify`, `npm test`, `npm run typecheck`.\n4. Save the logs under `aws-studio/output/refactor-baseline/tests/`. Leave `TMPDIR` at its default, because a scratchpad `TMPDIR` has broken the harness before.",
+      "doneWhen": "Every command has run, its logs are saved, and its failures are listed.",
+      "technical": "**Root scripts in `aws-studio`:**\n\n| Command | What it runs |\n| --- | --- |\n| `npm run build` | Builds the Studio UI workspace |\n| `npm run verify` | `scripts/verify-platform.mjs verify` |\n| `npm test` | `scripts/verify-platform.mjs test` |\n\n**How platform tests run.** They use the starter commit pinned in `scripts/starters.json`, through `scripts/with-test-project.mjs`.\n\n**Run `node scripts/bootstrap-test-peer.mjs` before `npm ci`.** It prepares the `@repo/framework-generated` peer the package expects.\n\n**Docs checks:**\n\n- `node docs/aws-studio-knowledge/check.mjs` (the wiki)\n- `python3 docs/check-links.py` (every Markdown file in the repository)\n\n**A known pitfall.** Setting `TMPDIR` to a scratchpad folder has broken the test harness before, because npm masks part of the path.\n\n**What to record.** Exact failing test names, so a later run can be compared failure by failure.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Commands run",
+            "value": ""
+          },
+          {
+            "label": "Pass/fail summary per repository",
+            "value": ""
+          },
+          {
+            "label": "Failing tests (names) that already fail today",
+            "value": ""
+          },
+          {
+            "label": "Log paths",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 6,
+      "title": "Capture golden infrastructure evidence from the reference app",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Save a fingerprint of the AWS resources the reference app creates, so you can prove later that the refactor didn't change them by accident.",
+      "why": "- The database, website and sign-in stacks are moving into the framework. They should produce exactly the same AWS resources as before, unless we change something on purpose.\n- This fingerprint is how we check that.\n- It's also the starting list of names that become permanent (Step 22).",
+      "references": "See [R4](REFACTOR-READINESS-REFERENCE.md#r4-the-upgrade-machinery-that-already-exists) and\n[R22](REFACTOR-READINESS-REFERENCE.md#r22-feasibility-spikes) (S2).",
+      "do": "1. Work in `<ref-app>` at HEAD. If it differs from the pinned `47d90d7`, capture both.\n2. Capture four files. Add `--account 123456789012 --region us-east-1` placeholders if asked.\n   - `npm run infrastructure:identity -- capture --mode dev --out <dir>/dev.json`\n   - `… --mode prod --out <dir>/prod.json`\n   - both again with `--bundling`\n3. Run the captures a second time and `compare` each pair. This checks determinism. Explain any difference.\n4. Store everything under `aws-studio/output/refactor-baseline/identity/<commit>/`.",
+      "doneWhen": "All captures exist, and each pair compares clean or its differences are explained.",
+      "technical": "**The tool already exists:** `packages/aws-studio/cli/infrastructure-identity.ts`, run as `npm run infrastructure:identity -- capture|compare` from the app's root.\n\n**How capture works.**\n\n- It synthesizes offline. It runs `cdk-app/bin/app.ts` with the `cdk.json` context and the cached lookups in `cdk.context.json`.\n- It removes credentials from the environment.\n- It refuses an assembly that needs a lookup the cache doesn't hold.\n\n**What a capture reports, as three separate things:**\n\n1. **Identity:** stack names, environments, tags, dependencies, logical IDs with their types, and export names.\n2. **Properties:** resource configuration, with asset hashes removed.\n3. **Assets:** which built asset each resource points at.\n\n**Options.**\n\n- **`--bundling`** builds the Lambda bundles, so asset hashes describe built output. Without it, they describe source.\n- **`compare <a> <b> [--strict]`** diffs two captures.\n\n**Why both modes.** A dev synth builds only what AWS invokes (Cognito and event Lambdas). A prod synth builds everything, including RDS and the website.\n\n**Expected difference after the planned move.** Only the routing Lambda's asset should change, because its handler becomes prebuilt in the package.\n\n**Nothing is deployed,** so this is a regression check, not a continuity requirement. A deliberate change before 1.0 is allowed if it's recorded.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Commits captured",
+            "value": ""
+          },
+          {
+            "label": "Capture paths",
+            "value": ""
+          },
+          {
+            "label": "Determinism compare results",
+            "value": ""
+          },
+          {
+            "label": "Lookups or context the capture needed",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 7,
+      "title": "Run the development golden path end to end",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Use the reference app the way a new user would, locally and in a development AWS deployment, and write down what breaks.",
+      "why": "- The development loop is the first thing every new user hits.\n- It exercises:\n  - project creation\n  - the local database and migrations\n  - sign-up\n  - a known problem where redeploying the development user pool stops people signing up again with the same email",
+      "references": "See [R11](REFACTOR-READINESS-REFERENCE.md#r11-identity-cognito-and-account-linking) and\n[R16](REFACTOR-READINESS-REFERENCE.md#r16-development-data-and-the-s3-baseline-idea).",
+      "do": "Use `<ref-app>` directly. It's throwaway, so reset its local database whenever it gets in\nthe way.\n\n1. Create a scratch project once, to confirm creation works. From `aws-studio`, run `npm run studio -- --create-project <scratch-dir>`. Check that it opens, then delete the scratch directory.\n2. Start the reference app's local runtime. Open `/database/schema`. Change a model, create a migration and apply it locally.\n3. Open `/graphql/schema` and run the Contract Chain verification.\n4. Add a development stage to `framework:targets` in `cdk-app/cdk.json` (see `docs/DEV-DEPLOYMENT.md` in `aws-studio`), then deploy it. This creates the Cognito pool and the event Lambdas.\n5. Sign up natively. Confirm the post-confirmation trigger created the user row through local replay.\n6. Sign in with Google, if it's configured.\n7. From the client app, run one GraphQL query and one mutation.\n8. Destroy and redeploy the development pool, then try signing up again with the same email. Record what happens.\n9. Tear the development deployment down.\n10. Classify every problem:\n    - **Structural:** it would change stack shape, outputs, exports, construct IDs, setting names or file locations.\n    - **Functional:** a behavior bug.",
+      "doneWhen": "Every item is marked working, broken or not tested, and every problem is classified.",
+      "technical": "**Project creation.** `npm run studio -- --create-project <dir> [--name <name>]` calls `createStudioProject` (`client-app/server/project-create.ts`). It:\n\n- copies `release/starter`, or the pinned git tree\n- sets the package name and a new `framework:appId`\n- deletes `framework:targets`\n- runs `npm ci` and `git init`\n\nIt records no provenance yet. Decision D11 adds that.\n\n**Local runtime.**\n\n- Docker Compose includes `node_modules/aws-studio/dev/compose.yml`, which runs `postgres:16`.\n- The Compose project name is the app's `framework:app`.\n- Local migrations use Prisma 8 RC, with history in `packages/database/prisma/migrations/app/`.\n\n**Development target.** A stage in `framework:targets` in `cdk-app/cdk.json`; see `docs/DEV-DEPLOYMENT.md`. A dev deployment builds only what AWS invokes: the Cognito pool and the event Lambdas.\n\n**Sign-up path.** The post-confirmation trigger (`compute/events/cognito-post-confirmation-trigger`) is wrapped in `withLocalReplay`. In development the invocation is captured and replayed against the local database, and it calls `ensureCognitoUser`.\n\n**The redeploy problem.**\n\n- A new pool issues new user IDs (`sub`s).\n- `ensureCognitoUser` throws `CognitoIdentityConflictError` when the email belongs to a row holding the old `sub`, because `users_email_key` is unique.\n- The Compose file documents this problem, and `packages/database/scripts/prune-cognito-orphans*` exists to clean up after it.\n\nThat evidence supports D16: identities keyed by `(issuer, subject)`, and a non-unique email.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Create command used",
+            "value": ""
+          },
+          {
+            "label": "Item-by-item result (1-9)",
+            "value": ""
+          },
+          {
+            "label": "Structural problems",
+            "value": ""
+          },
+          {
+            "label": "Functional problems",
+            "value": ""
+          },
+          {
+            "label": "Dev-pool redeploy behaviour observed",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 8,
+      "title": "Run the production golden path in a sandbox account",
+      "gate": true,
+      "done": false,
+      "status": "not started",
+      "objective": "Deploy the reference app to production in a test AWS account once, from start to finish, and write down what breaks.",
+      "why": "- Production has never been tested end to end. That covers deploying, setting up the database, migrations, the website release, sign-in, and tearing down while keeping data.\n- After 1.0 the shape of these stacks is permanent. Problems found now are cheap; problems found later are expensive.",
+      "references": "See [R10](REFACTOR-READINESS-REFERENCE.md#r10-managed-database-platform),\n[R13](REFACTOR-READINESS-REFERENCE.md#r13-production-deploy-and-frontend-release) and\n[R15](REFACTOR-READINESS-REFERENCE.md#r15-rds-availability-recovery-and-teardown).",
+      "do": "This step is billed. Use a sandbox account and record the cost.\n\n1. **Start clean.** Destroy anything left over from your earlier experiments; nothing needs keeping. These commands find it:\n   - `aws cloudformation describe-stacks --query \"Stacks[?Tags[?Key=='framework:owner']].StackName\"`\n   - `aws ssm get-parameters-by-path --path /framework/deployments/`\n   - `aws rds describe-db-instances`\n   - `aws cognito-idp list-user-pools --max-results 60`\n2. In `<ref-app>/cdk-app/cdk.json`, add a `prod` stage to `framework:targets` with the sandbox `account` and `region`, and `\"inputs\": \"cdk-app/.env.prod\"`. Create `cdk-app/.env.prod` from `cdk-app/.env.prod.template`. See `docs/PROD-DEPLOYMENT.md` in `aws-studio`.\n3. Deploy production through Studio's deploy review.\n4. Initialize the database: run the reviewed cloud review, then the separate apply. This launches the `db-migrate` Fargate task found through `framework:task-launch:v1:db-migrate`.\n5. Create an app migration locally. Deploy the tasks stack, then run the reviewed migration (review, then apply).\n6. Release the frontend through Studio's release page: local build, artifact-bound approval, S3 upload, CloudFront invalidation.\n7. Open the site. Sign up, sign in natively and with Google, then run a GraphQL query and a mutation so a row is written.\n8. Confirm the SSM deployment record exists under `/framework/deployments/`.\n9. Turn retention on, using the Data retention page or `RETAIN_STATEFUL_RESOURCES=true`. Destroy, then confirm the RDS instance and user pool survived.\n10. Reattach both by reference, redeploy, and confirm the row survived and sign-in works.\n11. Optionally, destroy without retention and confirm a final RDS snapshot exists.\n12. Destroy everything at the end.\n13. Classify every problem as structural or functional. Fix small structural problems now and record each one. Leave functional fixes for after the refactor.",
+      "doneWhen": "All thirteen items have results, and every structural problem is fixed or written down for the plan.",
+      "technical": "**Target.** A `prod` stage in `framework:targets` (`cdk-app/cdk.json`):\n\n```json\n{ \"account\": \"<id>\", \"region\": \"<region>\", \"inputs\": \"cdk-app/.env.prod\" }\n```\n\n- Create `.env.prod` from `cdk-app/.env.prod.template`.\n- It deploys as `<app>-<stage>`.\n- Commands use `-c prodDeployment=true`.\n- See `docs/PROD-DEPLOYMENT.md`.\n\n**Deploy review.** `packages/aws-studio/cli/deployment-plan.ts` flags stateful resource types and replacements, and the change set adds certainty.\n\n**Database review.** `client-app/server/database-cloud.ts` (`DatabaseCloudService`):\n\n- It finds the `${deployment}-EcsTasksStack` output described `framework:task-launch:v1:db-migrate`.\n- It requires `DATABASE_REVIEW_PROTOCOL=1` on the task definition.\n- It runs a billed Fargate task twice: once for review, once for apply.\n\n**The task** (`compute/tasks/db-migrate/review-task.ts`):\n\n- verifies its own ECS identity\n- binds an inputs digest\n- strictly checks for drift against the last migration snapshot\n- takes per-space advisory locks\n- only initializes an empty database, and only with additive steps\n\n**Known gaps:**\n\n- initialization assumes the single space `app` (`space === \"app\"` in `packages/aws-studio/database/studio-migrations.ts`)\n- `migrate.ts` applies migrations without any review when `FRAMEWORK_TASK_INPUT` is absent\n\n**Frontend release.** `client-app/server/frontend-release.ts`:\n\n- Settings come from `framework-config/deployment/frontend-release.json`.\n- It finds the bucket and distribution by the output names `FrontendWebsiteBucketName` and `CloudFrontId`/`FrontendDistributionId`.\n\n**Deployment record.** SSM `/framework/deployments/<deployment>`, written by `writeDeploymentRecord`.\n\n**Retention.**\n\n- Policy lives in `framework-config/deployment/stateful-resources.ts`.\n- A retained database gets `RETAIN` plus deletion protection.\n- Reference mode (`props.reference` in RdsStack) reattaches a retained instance, but refuses Proxy and replicas.\n- Cognito reports `UserPoolManagement: external-reference` when reattached.\n\n**Structural versus functional problems.**\n\n- **Structural** problems change stack shape, outputs, exports, construct IDs, setting names or file paths. These become permanent at 1.0, so fix them now.\n- **Functional** problems are behavior bugs, and can wait until after the refactor.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Item-by-item result (1-13)",
+            "value": ""
+          },
+          {
+            "label": "Structural problems found / fixed (commits)",
+            "value": ""
+          },
+          {
+            "label": "Functional problems logged",
+            "value": ""
+          },
+          {
+            "label": "Did reviewed cloud initialize/migrate work (yes/no, codes seen)",
+            "value": ""
+          },
+          {
+            "label": "Did frontend release work (yes/no)",
+            "value": ""
+          },
+          {
+            "label": "Did retain + reference reattach work for RDS / Cognito",
+            "value": ""
+          },
+          {
+            "label": "Cost",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 9,
+      "title": "Exercise the database high-availability settings",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Try the database's high-availability options (Multi-AZ, a read replica and RDS Proxy) and see whether they work.",
+      "why": "- These options already exist in the code but have never been tried.\n- The result decides whether 1.0 calls them finished (Stable) or experimental (Preview).",
+      "references": "See [R15](REFACTOR-READINESS-REFERENCE.md#r15-rds-availability-recovery-and-teardown).",
+      "do": "In the sandbox production deployment, either during Step 8 before teardown or separately:\n\n1. Set `multiAz: true`, `readReplicaCount: 1` and `proxyEnabled: true` in `<ref-app>/framework-config/databases/application.ts`, or through the `DATABASE_*` inputs.\n2. Review the deploy plan. Record whether anything is replaced.\n3. Deploy.\n4. Send application traffic through the Proxy, and run a reviewed migration.\n5. Destroy.",
+      "doneWhen": "Each setting is marked works, broken or not tested.",
+      "technical": "**Where the settings live.** In `defineDatabase` `settings`, or in the `DATABASE_*` inputs. Precedence, highest first:\n\n1. CDK context\n2. the inputs file\n3. the declaration\n4. framework defaults\n\n**What `RdsStack` builds:**\n\n- **Read replicas:** `DatabaseInstanceReadReplica` constructs `ReadReplica1…N`. They need backup retention above 0.\n- **Proxy:** `DatabaseProxy` with IAM auth and `requireTLS`. Its role is granted the `app_user` login.\n\n**Multi-AZ** should be an in-place change, with no replacement. Confirm this in the deploy plan.\n\n**Runtime routing.** The connection runtime (`aws-studio/runtime/database`) sends writers through the Proxy when it's enabled.\n\n**Reference mode** refuses Proxy and replicas.\n\n**Where the outcome goes.** It sets the tier in Step 15, and feeds the recovery slots (R15, D48).",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Multi-AZ",
+            "value": ""
+          },
+          {
+            "label": "Read replica",
+            "value": ""
+          },
+          {
+            "label": "Proxy (app traffic, migrator)",
+            "value": ""
+          },
+          {
+            "label": "Deploy plan showed replacement? (yes/no, which resource)",
+            "value": ""
+          },
+          {
+            "label": "Cost",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 10,
+      "title": "Survey every Studio page and operation",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Go through every Studio page and write down what works, what's unfinished, and what each page saves.",
+      "why": "- Several pages are unfinished. To decide what ships as finished or experimental, you need an honest list.\n- Pages can change in any Studio update. Anything a page saves into a project, or reads from one, is much harder to change later.",
+      "references": "See [R14](REFACTOR-READINESS-REFERENCE.md#r14-studio-pages-and-studio-state) and\n[R9](REFACTOR-READINESS-REFERENCE.md#r9-change-delivery-rules).",
+      "do": "Fill in one row per feature. Use what you saw in Steps 7 to 9 and a short manual pass of each page against the reference app.",
+      "doneWhen": "Every row is filled.",
+      "technical": "**Known facts:**\n\n- **Saved SQL** (`client-app/server/database-sql.ts`):\n  - It writes SQL files under `packages/database/sql/<kind>/` (`SQL_DIRECTORY`).\n  - It writes run records to `.cache/framework-studio/sql-operations/*.json`, with no version field.\n- **Data retention** (`client-app/server/stateful-resources.ts`) writes `framework-config/deployment/stateful-resources.ts`.\n- **History & migrations** (`client-app/server/database-history.ts`) reads every migration space.\n- **The Cognito pages' identity service** regex-parses `cognito-stack.ts`.\n- **Domains** (`client-app/server/identity/domain-*.ts`) reads setting env names such as `FRONTEND_URL` and `COGNITO_DOMAIN_NAME`.\n- **Studio's operations database** (`client-app/server/operations/store.ts`) uses `CREATE TABLE IF NOT EXISTS` with no schema version. Decision D45 adds versioning.\n\n**Why the columns matter:**\n\n- **\"Persists\"** marks a format that future Studio versions must keep reading. It needs a version and a migration.\n- **\"Reads from the project\"** marks a coupling. It goes into Step 21.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": {
+          "columns": [
+            "Feature",
+            "State (works, partial, broken, untested)",
+            "What it persists, and where",
+            "What it reads from the project",
+            "Notes"
+          ],
+          "rows": [
+            [
+              "Create project",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "Local runtime and logs",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "/database/schema",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "History & migrations",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "Database status",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "Saved SQL",
+              "",
+              "packages/database/sql/<kind>/, .cache/framework-studio/sql-operations/",
+              "",
+              ""
+            ],
+            [
+              "Data retention",
+              "",
+              "framework-config/deployment/stateful-resources.ts",
+              "",
+              ""
+            ],
+            [
+              "/graphql/schema and Contract Chain",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "Access Graph generation",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "/cognito routes (list each)",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "/domains pages",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "Deploy review",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "Cloud database review",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "Frontend release",
+              "",
+              "framework-config/deployment/frontend-release.json",
+              "",
+              ""
+            ],
+            [
+              "Review framework upgrade",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "Coding agents and Sightline",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "AgentCore agents and tools",
+              "",
+              "",
+              "",
+              ""
+            ],
+            [
+              "Inputs and secrets editors",
+              "",
+              "",
+              "",
+              ""
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "number": 11,
+      "title": "Decide the Prisma version for 1.0",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Decide which Prisma version AWS Studio 1.0 ships with.",
+      "why": "- Prisma writes migration files and database bookkeeping that will live in every user's project and database.\n- Right now AWS Studio uses a Prisma pre-release. Switching to the final release after 1.0 means migrating everyone's migration history.",
+      "references": "See [R10](REFACTOR-READINESS-REFERENCE.md#r10-managed-database-platform) and\n[R20 D38](REFACTOR-READINESS-REFERENCE.md#r20-decision-register).",
+      "do": "1. Run `npm view @prisma/orm-toolchain versions --json` and check whether an 8.x GA exists.\n2. If it does, read its release notes for changes to the migration package format, snapshot store, marker keys and contract-space APIs.\n3. Estimate the upgrade work.\n4. Decide.",
+      "doneWhen": "The version is decided, with the reason.",
+      "technical": "**Installed version:** `8.0.0-rc.14`. The packages are `@prisma/orm-toolchain`, `orm-framework`, `orm-family-sql`, `orm-postgres` and `orm-target-postgres`, plus `@prisma/cli-engine` 0.6.2. The starter pins them through `overrides`.\n\n**What Prisma persists:**\n\n- **Migration packages:** `migration.json`, `migration.ts` and `ops.json` under `prisma/migrations/<space>/`.\n- **Snapshots:** under `prisma/migrations/snapshots/<hash>/contract.json`.\n- **Database markers:** keyed `prisma_8.contract.marker:<namespace>:<space>`. Studio's advisory locks use the same keys.\n\n**The framework database plan depends on release-candidate APIs** (D15):\n\n- `ControlExtensionDescriptor.contractSpace`\n- the `migration-tools/spaces` exports\n- cross-space relations written `space:ns.Model`\n\n**Containing future churn.** The plan routes every toolchain call through one adapter module, so a Prisma change touches only that module.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Latest available versions",
+            "value": ""
+          },
+          {
+            "label": "Format or API changes found",
+            "value": ""
+          },
+          {
+            "label": "Decision (rc.14 / GA version)",
+            "value": ""
+          },
+          {
+            "label": "Rationale",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 12,
+      "title": "Decide the default PostgreSQL major version for new projects",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Decide which PostgreSQL major version new projects start on.",
+      "why": "- Every database eventually has to move to a newer PostgreSQL major version. AWS forces it, and charges extra in the meantime.\n- Starting new projects on an older version brings that day closer.\n- Changing the local version later breaks developers' local databases, so it needs care.",
+      "references": "See [R10](REFACTOR-READINESS-REFERENCE.md#r10-managed-database-platform) and\n[R22](REFACTOR-READINESS-REFERENCE.md#r22-feasibility-spikes) (S5).",
+      "do": "1. List the supported engines: `aws rds describe-db-engine-versions --engine postgres --query 'DBEngineVersions[].EngineVersion'`.\n2. Read AWS's RDS for PostgreSQL release calendar for the end of standard support of 16, 17 and 18.\n3. Check that the `postgres:17` image works with the current volume mount. The 18 image changed its data-directory layout.\n4. Check Prisma compatibility for the version chosen in Step 11.\n5. Decide.",
+      "doneWhen": "The major is decided, with dates and the reason.",
+      "technical": "**Where 16 comes from today:**\n\n- `DATABASE_ENGINE_VERSION` defaults to `\"16\"` in `packages/aws-studio/src/config/database.ts`.\n- The starter declares `engineVersion: \"16\"`.\n- Local Compose hard-codes `postgres:16` in `packages/aws-studio/dev/compose.yml`.\n- CI pulls `postgres:16`.\n\n**The plan (D24).** Derive the local image's major version from the declared `engineVersion`. Before starting, check the volume's `PG_VERSION` file and refuse a mismatch with clear guidance.\n\n**Minor versions.** Declaring only the major lets RDS pick and auto-upgrade minors, without template drift.\n\n**Forced majors.** After standard support ends, AWS bills Extended Support, then upgrades the instance itself. Blue/Green deployments don't support CloudFormation or RDS Proxy.\n\n**Docker.** The `postgres:18` image moved its data directory, so the current volume mount would behave differently.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "RDS-supported majors and end-of-standard-support dates",
+            "value": ""
+          },
+          {
+            "label": "Docker image check",
+            "value": ""
+          },
+          {
+            "label": "Decision",
+            "value": ""
+          },
+          {
+            "label": "Rationale",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 13,
+      "title": "Decide the database encryption-key policy",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Decide how production databases are encrypted.",
+      "why": "- The encryption key is chosen when a database is created, and swapping it means rebuilding the database.\n- The default key blocks copying backups to another AWS account, which disaster recovery needs.",
+      "references": "See [R15](REFACTOR-READINESS-REFERENCE.md#r15-rds-availability-recovery-and-teardown) and\n[R20 D26](REFACTOR-READINESS-REFERENCE.md#r20-decision-register).",
+      "do": "Choose one:\n\n- (a) AWS-managed key only\n- (b) AWS-managed key by default, with a customer-managed key option at creation in 1.0 (recommended)\n- (c) a customer-managed key by default, at roughly 1 USD a month per key plus requests",
+      "doneWhen": "The policy is decided.",
+      "technical": "**Current state.** `rds-stack.ts` sets `storageEncrypted: true` with no key, which means the AWS-managed `aws/rds` key.\n\n**Limits of the AWS-managed key:**\n\n- Snapshots encrypted with it can't be shared with another account.\n- Copying a snapshot to another region re-encrypts it with a key in that region.\n- Changing the key means a snapshot copy plus a restore, which replaces the instance.\n\n**What option (b) adds.** A creation-time choice, for example `encryption: \"customer-managed\"`, that creates a KMS key in the stack. The stack's retention aspect already lists `AWS::KMS::Key`.\n\n**Cost.** About 1 USD per key per month, plus requests.\n\n**Related:** R15, D26 and D48.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Decision (a/b/c)",
+            "value": ""
+          },
+          {
+            "label": "Rationale",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 14,
+      "title": "Decide the identity and account-linking policy",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Decide how sign-in identities work: what sign-up requires, and whether two accounts with the same email ever merge.",
+      "why": "- **Account takeover risk.** Today, signing in with Google can take over an existing account that has the same email address. You've ruled out treating a matching email as proof of identity.\n- **Email squatting.** Whoever claims an email first can block the real owner from signing up.\n- **Permanent pool settings.** Which fields sign-up requires is fixed forever for each user pool.",
+      "references": "See [R11](REFACTOR-READINESS-REFERENCE.md#r11-identity-cognito-and-account-linking).",
+      "do": "Decide each item. The recommendation is in brackets.\n\n1. Required pool attributes: [`email` only; names become optional]\n2. Automatic linking: [removed at 1.0]\n3. Email uniqueness in framework users: [not unique]\n4. Identity key: [`(issuer, subject)` plus `providerSubject`]\n5. Meta email trust: [recorded as profile data; never used as proof of anything]\n6. Explicit, user-initiated linking: [after 1.0]\n7. What happens when someone signs in with Google using an email that already has a native account: [a separate account, plus a message explaining how to sign in with the password and link later]",
+      "doneWhen": "All seven items are decided.",
+      "technical": "**Current state:**\n\n- **Pool settings.** `cdk-app/lib/app/cognito-stack.ts` requires `email`, `givenName` and `familyName`, and uses `signInAliases: { email: true }`.\n- **Automatic linking.** The pre-signup trigger calls `AdminLinkProviderForUser` to link a Google sign-in when both accounts' emails are verified.\n- **Email verification.**\n  - The pre-signup trigger sets `autoVerifyEmail = true` for every external provider.\n  - The pre-token trigger marks Facebook emails as verified.\n  - Microsoft Entra's `xms_edov` claim is mapped as verified.\n- **OAuth callback.** It requires `email_verified`.\n- **User creation.** `ensureCognitoUser` combined with a unique email allows squatting.\n\n**Why Google's \"verified\" isn't proof.** Google checks an address once, when the Google account is created. A reassigned or lost address (a former employee, an expired domain) can stay \"verified\". AWS also says `AdminLinkProviderForUser` should only be used with providers and attributes you trust.\n\n**The plan:**\n\n- **Framework tables (D15, D16).** A `users` table with a non-unique email, plus `identities(issuer, subject, provider, providerSubject)`, in the framework's own Prisma space.\n- **Triggers (D19).** Framework-owned triggers that never link accounts.\n- **User creation (C1).** Users are created on first sign-in by the auth endpoints and the GraphQL runtime, as a fallback.\n\n**Later:**\n\n- explicit, user-initiated linking\n- replacing a user pool: federated users map by `providerSubject`, and native users move through a migration trigger",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "1 Required attributes",
+            "value": ""
+          },
+          {
+            "label": "2 Automatic linking",
+            "value": ""
+          },
+          {
+            "label": "3 Email uniqueness",
+            "value": ""
+          },
+          {
+            "label": "4 Identity key",
+            "value": ""
+          },
+          {
+            "label": "5 Meta email trust",
+            "value": ""
+          },
+          {
+            "label": "6 Explicit linking timing",
+            "value": ""
+          },
+          {
+            "label": "7 Same-email UX",
+            "value": ""
+          },
+          {
+            "label": "Rationale for any change from the recommendation",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 15,
+      "title": "Assign a stability tier to every feature",
+      "gate": true,
+      "done": false,
+      "status": "not started",
+      "objective": "Label every feature Stable, Preview or Hidden for 1.0.",
+      "why": "- You can ship 1.0 with a finished, tested core while unfinished features keep improving in later releases.\n- The label tells users what's promised. It also tells the plan what has to be built now and what only needs an extension point.",
+      "references": "See [R9](REFACTOR-READINESS-REFERENCE.md#r9-change-delivery-rules).",
+      "do": "Use Steps 7 to 10. The suggested starting point:\n\n| Feature | Suggested tier |\n| --- | --- |\n| Create project, local dev loop, `/database/schema`, local migrations, `/graphql/schema`, Contract Chain, Access Graph generation, Review framework upgrade | Stable |\n| Production deploy, cloud database review | Stable only if Step 8 passed |\n| Frontend release | Stable if Step 8 passed, otherwise Preview |\n| History & migrations, Database status, Saved SQL, Data retention, `/cognito`, `/domains` | Preview |\n| High-availability settings | Per Step 9 |\n| GraphQL Access Graph enforcement, disaster recovery and restore, dev data baselines | Hidden (not built) |",
+      "doneWhen": "Every feature has a tier, and each Stable feature names its evidence.",
+      "technical": "**Studio's gating mechanism today.**\n\n- The package's `studioCompatibility.capabilities` currently lists only `http-get-with-head`.\n- `planCreationUpgrade` uses capabilities to require a newer framework before a feature runs.\n- D39 generalizes this so every page and operation declares what it needs.\n\n**The Preview persistence rule.** Anything a Preview feature saves needs a version and a migration.\n\n**What Stable requires (D47).**\n\n- automated tests\n- a recorded manual pass\n- a real-account pass, if the feature uses AWS\n\n**How tiers map to plan work:**\n\n| Tier | Plan work |\n| --- | --- |\n| Stable | Build |\n| Preview | Build what exists, and version what it persists |\n| Hidden | Slot only: the extension point, such as the AG plugin slot (D42), `database.recovery`, or the dev-data names (D48) |",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": {
+          "columns": [
+            "Feature",
+            "Tier",
+            "Evidence (step)",
+            "Gaps to close before 1.0"
+          ],
+          "rows": [
+            [
+              "",
+              "",
+              "",
+              ""
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "number": 16,
+      "title": "Confirm the change-delivery rules",
+      "gate": true,
+      "done": false,
+      "status": "not started",
+      "objective": "Agree on the rules for how changes reach projects after 1.0.",
+      "why": "- These rules decide where every future change goes: a Studio update, a framework upgrade, a database migration, or an opt-in infrastructure change.\n- The final plan treats them as settled, so disagree now if you're going to.",
+      "references": "See [R8](REFACTOR-READINESS-REFERENCE.md#r8-target-architecture) and\n[R9](REFACTOR-READINESS-REFERENCE.md#r9-change-delivery-rules).",
+      "do": "For each rule, write agree, or how you'd change it.\n\n1. **Four channels.**\n   - Studio UI and orchestration ship in a Studio release.\n   - Framework code ships in the package and arrives by a reviewed pin upgrade.\n   - Framework schema changes go through the two-approval database review.\n   - Changed infrastructure defaults go through behavior-revision adoption followed by a deploy.\n2. **Capability versus revision.** A new capability is an opt-in declaration, which is additive and needs no revision. A behavior revision is only for changing what an existing deployment synthesizes or does by default.\n3. **Preview persistence.** A Preview feature may change freely, but anything it persists carries a version and a migration. Otherwise it persists nothing durable.\n4. **Capability gating.** Every Studio page and operation that needs framework support declares a capability. Studio hides it, or offers an upgrade, when the project's framework doesn't declare that capability.\n5. **Freeze, Slot, Build.** Every item is classified:\n   - Freeze: final at 1.0.\n   - Slot: only the extension point exists at 1.0.\n   - Build: finished and tested at 1.0.\n6. **Separate gates.** A framework upgrade never deploys, migrates or publishes. Each of those stays a separately approved operation.\n7. **Ownership by origin.** Ownership follows where a definition lives. `managedBy` is removed, and there's no eject at 1.0.\n8. **Package-owned framework code.** No framework code the platform must be able to patch lives in project source. Projects hold declarations, small seed files and their own code.\n9. **Compatibility starts at 1.0.** Nothing before public 1.0 is kept compatible, and no existing project or deployment is migrated.",
+      "doneWhen": "All nine rules are answered.",
+      "technical": "**Rule-to-decision mapping:**\n\n| Rule | Source |\n| --- | --- |\n| 1. Four channels | R9 |\n| 2. Capability versus revision | D40 |\n| 3. Preview persistence | D39 |\n| 4. Capability gating | D39 |\n| 5. Freeze, Slot, Build | D41 |\n| 6. Separate approvals | R8 principle 3, ADR-010 invariants |\n| 7. Ownership by origin | D01, D35 |\n| 8. Package-owned framework code | D02 |\n| 9. Compatibility starts at 1.0 | D30, D49 |\n\n**What already exists:**\n\n- **The reviewed upgrade.** `client-app/server/project-upgrade.ts`, `prepareProjectUpgrade`. Its `prepare` callback can already carry source changes; creation upgrades use it. Interrupted upgrades are covered by a journal and `--recover-upgrade`.\n- **The deploy plan and change-set review.**\n- **The two-approval database review.**\n\n**What's new (D12).** Behavior revisions and layout revisions, both recorded in `package.json` under `awsStudio`.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Rule 1",
+            "value": ""
+          },
+          {
+            "label": "Rule 2",
+            "value": ""
+          },
+          {
+            "label": "Rule 3",
+            "value": ""
+          },
+          {
+            "label": "Rule 4",
+            "value": ""
+          },
+          {
+            "label": "Rule 5",
+            "value": ""
+          },
+          {
+            "label": "Rule 6",
+            "value": ""
+          },
+          {
+            "label": "Rule 7",
+            "value": ""
+          },
+          {
+            "label": "Rule 8",
+            "value": ""
+          },
+          {
+            "label": "Rule 9",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 17,
+      "title": "Decide the support window and deprecation policy",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Decide what compatibility you promise users after 1.0.",
+      "why": "- Users need to know how long an older project keeps working with a newer Studio, and how features get retired.",
+      "references": "See [R20 D28](REFACTOR-READINESS-REFERENCE.md#r20-decision-register).",
+      "do": "Confirm or change each part of the proposal:\n\n- Studio 1.y opens and upgrades every framework 1.x.\n- Fixes land only on the latest 1.x.\n- Deprecations are announced in a minor release, with diagnostics, and removed only in 2.0.\n- A project may stay on an older behavior revision for the whole major.\n- Prisma persisted formats are supported for the whole major.\n- Preview features are excluded from these promises.\n\nAlso decide how long old Studio distributions and framework archives stay downloadable.",
+      "doneWhen": "The policy text is written.",
+      "technical": "**Admission today:**\n\n- The package's `studioCompatibility.minimumStudio` sets the oldest Studio a project's framework accepts.\n- Studio refuses a project whose framework needs a newer Studio.\n- `availableFrameworkUpgrade` only offers a newer bundled framework.\n\n**What the promise costs:**\n\n- Studio must keep supporting every 1.x framework's protocol and capabilities.\n- Code for old behavior revisions stays until 2.0.\n- Each release's distribution and framework archive is retained, to make the promise testable (R19).",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Policy as decided",
+            "value": ""
+          },
+          {
+            "label": "Artifact retention period",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 18,
+      "title": "Decide the persisted owner value and confirm the persisted-name policy",
+      "gate": true,
+      "done": false,
+      "status": "not started",
+      "objective": "Decide the permanent tag values and reserved names written into every user's AWS account.",
+      "why": "- Every stack and AWS resource is tagged with an owner value. Today it's `matts-aws-framework`.\n- Nothing is deployed yet, so changing it now is free. After 1.0 it would mean updating every user's infrastructure.\n- Reserving names now stops users from picking names the framework needs later.",
+      "references": "See [R7](REFACTOR-READINESS-REFERENCE.md#r7-persisted-identifiers-and-names) and\n[R8](REFACTOR-READINESS-REFERENCE.md#r8-target-architecture) (Reserved names).",
+      "do": "Decide each item:\n\n1. The new owner value. The recommendation is your final npm package name.\n2. Keep the `framework:` key family for tags, metadata and context. [Recommended: keep.]\n3. Keep the SSM path `/framework/deployments/`, and add a deploy refusal when existing stacks carry a different appId. [Recommended: keep.]\n4. The reserved name lists in R8. Confirm each row.\n5. The project record key in `package.json`, from Step 3.\n6. The prefix for new framework environment variables, from Step 3.",
+      "doneWhen": "All six items are decided.",
+      "technical": "**Identity constants** (`packages/aws-studio/src/deploy/identity.ts`):\n\n- `DEPLOYMENT_METADATA_KEY = \"framework:deployment\"`\n- `FRAMEWORK_OWNER = \"matts-aws-framework\"`\n- `IDENTITY_TAGS`: `framework:owner`, `framework:deployment`, `framework:mode`, `framework:contract` (value `2`), `framework:app-id` and `framework:stage`\n\n**Where they're applied.** `packages/aws-studio/cdk/framework-resources.ts` applies them as template metadata and stack tags. CloudFormation copies stack tags onto resources.\n\n**The SSM record.** `cli/deployment-review.ts` `writeDeploymentRecord` writes SSM `/framework/deployments/<deployment>`, tagged with the owner value.\n\n**Scale.** The owner value appears in about 30 files.\n\n**Reserved names.** The proposed lists are in the reference file, R8, under \"Reserved names\".\n\n**An existing deploy check.** `docs/PROD-DEPLOYMENT.md` says a new production deploy is refused while the same app's stage is deployed under another name. Check how far that already covers a stack carrying a different `app-id`.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "1 Owner value",
+            "value": ""
+          },
+          {
+            "label": "2 Key family",
+            "value": ""
+          },
+          {
+            "label": "3 SSM path and appId refusal",
+            "value": ""
+          },
+          {
+            "label": "4 Reserved names (confirmed / changes)",
+            "value": ""
+          },
+          {
+            "label": "5 Record key",
+            "value": ""
+          },
+          {
+            "label": "6 New env prefix",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 19,
+      "title": "Decide what the public starter contains",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Decide what a brand-new project contains.",
+      "why": "- Everything in the starter becomes code every new user owns and has to maintain or delete.\n- Demo code and personal details shouldn't ship to everyone. The `author` field currently has your name.",
+      "references": "See [R18](REFACTOR-READINESS-REFERENCE.md#r18-starter).",
+      "do": "For each item, choose keep, remove, or move to a separate examples repository:\n\n- `compute/http/demo-board`, `demo-broken`, `demo-tasks`, `python-example`, `test-run-task`, `test-start-workflow`\n- `compute/tasks/invocation-test-task`, `compute/events/invocation-test-step`\n- `compute/agents/example-agent`, `compute/tools/*`, `compute/services/example-service`, `compute/websocket/*`\n- `cdk-app/lib/app/reference-example-stack.ts`\n- the Project, ProjectMember and Task models and the demo-board Access Graph\n- `packages/models`\n- `.github/scripts/*`\n\nAlso decide:\n\n- removing `author` from `package.json` and `cdk-app/package.json`\n- the license text\n- the README and QUICKSTART tone for a public audience",
+      "doneWhen": "Every item has a decision.",
+      "technical": "**What creation copies.** `createStudioProject` copies every starter file.\n\n**Personal fields.** `author` appears in `package.json` and in `cdk-app/package.json`.\n\n**Demo database models.**\n\n- `packages/database/prisma/contract.prisma` holds the demo models `Project`, `ProjectMember` and `Task`, with `@access` rules, plus their migrations.\n- The demo-board Lambdas use the Access Graph evaluator directly.\n\n**Platform CI helpers.** `.github/scripts/local-database-compose-smoke.mjs` and `windows-user-owner.ps1` belong to the platform, not to a public starter.\n\n**Where removed examples can go.** A separate examples repository keeps the starter lean, and the reference app stays your test bed.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Author fields",
+            "value": ""
+          },
+          {
+            "label": "License",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": {
+          "columns": [
+            "Item",
+            "Keep / remove / move",
+            "Reason"
+          ],
+          "rows": [
+            [
+              "",
+              "",
+              ""
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "number": 20,
+      "title": "List the pre-release compatibility code to delete",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "List the old compatibility code that can be deleted before 1.0.",
+      "why": "- Some code exists only to support pre-1.0 versions that nobody uses.\n- Deleting it now is free. After 1.0, each piece needs a slow deprecation.",
+      "references": "See [R5](REFACTOR-READINESS-REFERENCE.md#r5-verified-deficiencies) (item 16) and\n[R20 D49](REFACTOR-READINESS-REFERENCE.md#r20-decision-register).",
+      "do": "1. Check each candidate, and record whether it really is pre-release compatibility or still does something you need:\n   - the deprecated settings `prodUrl` and `prodCloudFrontCertificateArn` in `<ref-app>/framework-config/inputs/deployment.ts`, and their handling in `aws-studio/packages/aws-studio/cdk/deployment.ts`\n   - `REQUIRED_FRAMEWORK_INPUTS` in `<ref-app>/cdk-app/framework-inputs.ts`, a \"legacy requirement list\"\n   - the `PROD_DEPLOYMENT` and `CDK_APP_NAME` inputs-file checks in `aws-studio/packages/aws-studio/cdk/deployment.ts`\n   - readers for identity contract 1 in `aws-studio/packages/aws-studio/src/deploy/identity.ts`\n   - ADR-010's \"release guard for legacy artifacts\" in `aws-studio/client-app/server/project-release.ts` and `aws-studio/scripts/release-compatibility.ts`\n   - the `legacy-javascript` template variants under `<ref-app>/framework-config/templates/container-{service,task}/`\n   - the 24 `managedBy: \"framework\"` lines\n2. Search for more: `grep -rniE \"legacy|deprecated|no longer read|used to live|pre-release|backward\" aws-studio/packages/aws-studio aws-studio/client-app/server aws-studio/scripts --exclude-dir=node_modules --exclude-dir=test`. Review the hits.",
+      "doneWhen": "Every candidate is marked delete or keep, with the reason.",
+      "technical": "**Where to look:**\n\n- **Old setting names.** `prodUrl` and `prodCloudFrontCertificateArn` are \"deprecated spellings\" handled in `packages/aws-studio/cdk/deployment.ts`.\n- **An old requirement list.** `REQUIRED_FRAMEWORK_INPUTS`, a \"legacy requirement list\" in `cdk-app/framework-inputs.ts`, used by Studio's input requirements.\n- **Old inputs-file checks.** The `PROD_DEPLOYMENT` and `CDK_APP_NAME` warnings in `cdk/deployment.ts`.\n- **Identity contract 1.** Readers in `src/deploy/identity.ts` (contract 1 is \"the identity output only\").\n- **An old release guard.** ADR-010's \"release guard for legacy artifacts\", in `client-app/server/project-release.ts` and `scripts/release-compatibility.ts`.\n- **`legacy-javascript` templates** in `SCAFFOLD_TEMPLATES`. Check what these are for: they may be a real option for JavaScript-only users rather than compatibility code.\n\n**The rule:**\n\n- **Delete** code that exists only to read or accept pre-1.0 state.\n- **Keep** code that is a real feature.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": {
+          "columns": [
+            "Code",
+            "File:symbol",
+            "Delete / keep",
+            "Reason"
+          ],
+          "rows": [
+            [
+              "",
+              "",
+              "",
+              ""
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "number": 21,
+      "title": "Build the Studio-to-project coupling map",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "List every place Studio depends on a file path, or on a file's layout, inside a project.",
+      "why": "- Studio and the framework read some project files at fixed locations. One page even reads a file's text with pattern matching.\n- When the refactor moves those files, each of these places has to be updated or turned into a documented rule.",
+      "references": "See [R5](REFACTOR-READINESS-REFERENCE.md#r5-verified-deficiencies) and\n[R14](REFACTOR-READINESS-REFERENCE.md#r14-studio-pages-and-studio-state).",
+      "do": "1. Search `client-app/server`, `client-app/shared` and `packages/aws-studio` (excluding `node_modules` and tests) for project-relative path literals. For example:\n\n   ```sh\n   grep -rnoE \"[\\\"'\\`](cdk-app|framework-config|packages/database|packages/api-contract|packages/framework-generated|compute|client-app)/[^\\\"'\\`]+\" client-app/server client-app/shared packages/aws-studio --exclude-dir=node_modules --exclude-dir=test\n   ```\n\n2. Search for source-shape parsing: regular expressions run over project TypeScript, and TypeScript AST walks of project files.\n3. Write `aws-studio/REFACTOR-COUPLING-MAP.md` with one row per path or parser, and these columns:\n   - path\n   - readers and writers (file:symbol)\n   - purpose\n   - action after the refactor: keep as a layout contract, moves into the package, re-point at the evaluated model, or delete",
+      "doneWhen": "The map is committed and every row has an action.",
+      "technical": "**What happens to each place.** It either becomes part of a declared **layout contract** (planned `packages/aws-studio/layout/v1.ts`), or switches to reading the project's evaluated configuration instead of its files.\n\n**Known couplings:**\n\n- **Hard-coded database and GraphQL paths, in about 36 files:** `packages/database/prisma/...`, `packages/database/src/generated/*`, `compute/http/graphql-api` and `graphql-chain.review.json`.\n- **`PROJECT_DECLARATIONS`** (`packages/aws-studio/src/config/project-declarations.ts`): four project files loaded by path.\n- **`AUTHENTICATION_STACK_FILE`** (`client-app/shared/integrations.ts`): used by the identity service, ownership and `server/source/capabilities.ts`.\n- **`SQL_DIRECTORY`**, **`RELEASE_COMPOSE_FILE`**, the scaffolding folder `framework-config/templates`, and **`STARTER_STACKS`**.\n- **`client-app/server/project-modules.ts`**: loads a project's declarations with Studio's own loader rather than the project's. A version-skew risk.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Map file",
+            "value": ""
+          },
+          {
+            "label": "Number of paths / parsers found",
+            "value": ""
+          },
+          {
+            "label": "Surprises",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 22,
+      "title": "Build the freeze list",
+      "gate": true,
+      "done": false,
+      "status": "not started",
+      "objective": "Write down everything that becomes permanent at 1.0, and sign off on each item.",
+      "why": "- These are the decisions that can't be undone after release.\n- Putting them all in one list, with your sign-off, makes sure nothing permanent happens by accident.",
+      "references": "See [R7](REFACTOR-READINESS-REFERENCE.md#r7-persisted-identifiers-and-names),\n[R9](REFACTOR-READINESS-REFERENCE.md#r9-change-delivery-rules),\n[R12](REFACTOR-READINESS-REFERENCE.md#r12-graphql-and-prisma-access-ag) and\n[R13](REFACTOR-READINESS-REFERENCE.md#r13-production-deploy-and-frontend-release).",
+      "do": "Write `aws-studio/REFACTOR-FREEZE-LIST.md`. Seed it from the Step 6 captures (their\n`resources` and `outputs` fields) and the Step 21 map. Cover these categories:\n\n1. Tag, metadata and context keys, and the owner value (Step 18)\n2. Stack role names\n3. Construct and logical IDs of stateful resources: the RDS instance, user pool, buckets, secrets and log groups\n4. Output names and export names\n5. Descriptors: `framework:task-launch:v1`, and the planned `framework:frontend-release:v1`\n6. Setting environment names: `FRONTEND_URL`, `COGNITO_*`, `DATABASE_*`, `LOCAL_*` and the rest\n7. Project paths Studio and the tools read (from Step 21)\n8. Review and receipt formats: `graphql-chain.review.json`, Contract Chain proofs, `DATABASE_REVIEW_PROTOCOL` and the database review envelope\n9. `frontend-release.json`\n10. The `/// @access(...)` syntax\n11. The Prisma marker and snapshot layout\n12. Studio state files: `operations.sqlite` and `sql-operations` records\n13. The `package.json` record\n14. CLI command names and the npm scripts in the starter's `package.json`\n15. Public API entry points\n\nFor each entry, record the current value, keep or change before 1.0, and your sign-off.",
+      "doneWhen": "The list is committed and every entry is signed off.",
+      "technical": "**Where each category lives:**\n\n- **Tag keys and owner value:** `src/deploy/identity.ts`.\n- **Stack roles:** the stack IDs `${deployment}-<Role>`, for example `AsynchronousLambdaFunctionsStack`.\n- **Logical IDs of stateful resources:** the `resources` field of the Step 6 captures.\n- **Outputs and exports:** the `outputs` field of the captures. Explicit `exportName`s:\n\n  | Where | Count |\n  | --- | --- |\n  | Starter: website stack | 5 |\n  | Starter: Cognito stack | 3 |\n  | Starter: RDS stack | 1 |\n  | Starter: reference example stack | 5 |\n  | Package: replay stack | 4 |\n  | Package: framework-cloud | 2 |\n  | Package: HTTP API stack | 1 |\n  | Package: private hosted zones | 1 |\n\n- **Descriptors:** `framework:task-launch:v1:<target>`, and the planned `framework:frontend-release:v1`.\n- **Setting env names:** listed in reference R7.\n- **Paths:** from Step 21.\n- **Review formats:**\n  - `graphql-chain.review.json`\n  - the Contract Chain proofs\n  - `DATABASE_REVIEW_PROTOCOL = 1`, with envelope prefix `AWS_STUDIO_DATABASE_V1:`\n- **`frontend-release.json`.**\n- **`/// @access` syntax:** `database/access-syntax`.\n- **Prisma markers and snapshots.**\n- **Studio state:** `operations.sqlite` and the `sql-operations` records.\n- **The project record** (D11).\n- **CLI command names and the starter's npm scripts:** for example `deploy:resources` and `db:migrate:cloud`.\n- **Public entry points:** the `exports` field of `packages/aws-studio/package.json`. It has 105 today, and the plan narrows them (D14).\n\n**What happens next.** Every \"change before 1.0\" entry becomes a work item in the final plan.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Freeze list file",
+            "value": ""
+          },
+          {
+            "label": "Entries marked \"change before 1.0\"",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    },
+    {
+      "number": 23,
+      "title": "Final readiness review and handoff",
+      "gate": false,
+      "done": false,
+      "status": "not started",
+      "objective": "Check that everything is finished, then generate the prompt for the final plan.",
+      "why": "- The prompt generator turns your answers into the prompt for the final plan.\n- Gaps here become guesses there.",
+      "references": "",
+      "do": "1. Check that every step has a Status. Gate steps 3, 8, 15, 16, 18 and 22 must be `done` or `changed`.\n2. List any bug fixes made to frozen files under Step 2's freeze.\n3. Remove any private data that slipped into the checklist.\n4. Commit `REFACTOR-READINESS-CHECKLIST.json` and the files from Steps 21 and 22.\n5. Run the prompt generator from the workspace root by giving an agent the contents of `aws-studio/DISTRIBUTION-PLAN-PROMPT-GENERATOR.md` as its whole prompt. It writes `aws-studio/DISTRIBUTION-PLAN-PROMPT.md`.\n6. Read the generated prompt. Then run it in Plan Mode.",
+      "doneWhen": "`DISTRIBUTION-PLAN-PROMPT.md` exists and you've read it.",
+      "technical": "**What `DISTRIBUTION-PLAN-PROMPT-GENERATOR.md` reads:**\n\n- this JSON: steps, statuses, results, grounding, and any text you edited\n- `REFACTOR-FREEZE-LIST.md` and `REFACTOR-COUPLING-MAP.md`\n- the reference file and the ADRs\n- git history since the baseline tags\n\n**What it does:**\n\n1. **Checks the gate steps** (3, 8, 15, 16, 18 and 22) for status `done` or `changed`. If any isn't, it writes a NOT READY report instead of the prompt.\n2. **Maps your answers onto decisions** D01 to D49.\n3. **Re-checks 18 facts** in the code for drift.\n4. **Writes `aws-studio/DISTRIBUTION-PLAN-PROMPT.md`.**\n\nRun that output alone, in Plan Mode. It treats any step text you edited as the step's current intent.",
+      "results": {
+        "fields": [
+          {
+            "label": "Date",
+            "value": ""
+          },
+          {
+            "label": "Gate steps status (3, 8, 15, 16, 18, 22)",
+            "value": ""
+          },
+          {
+            "label": "Bug fixes made to frozen files",
+            "value": ""
+          },
+          {
+            "label": "Commits",
+            "value": ""
+          },
+          {
+            "label": "Generator run date and output file",
+            "value": ""
+          },
+          {
+            "label": "Decisions or deviations",
+            "value": ""
+          },
+          {
+            "label": "Follow-ups",
+            "value": ""
+          }
+        ],
+        "table": null
+      }
+    }
+  ]
+}

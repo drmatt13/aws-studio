@@ -1,0 +1,321 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="2520" viewBox="0 0 1920 2520" role="img" aria-labelledby="t d">
+<title id="t">AWS Studio refactor readiness: the 23 steps before the 1.0 boundary refactor</title>
+<desc id="d">Framework code is copied into every project today, so it can't be fixed after release. The fix moves it into the versioned package, but some choices become permanent at 1.0. Before refactoring, 23 steps protect the starting point, start the name clearance, record a baseline, prove what works, record the decisions only the owner can make, map dependencies and list what becomes permanent, then hand off to a prompt generator. Six steps are gates: 3, 8, 15, 16, 18 and 22. Each step shows why it exists and what it produces.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#7D8594" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect width="1920" height="2520" fill="#0A0C10"/>
+<text x="80" y="76" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#4A8DFF" letter-spacing="1.6">AWS STUDIO  ·  REFACTOR READINESS</text>
+<text x="80" y="112" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="30" font-weight="600" fill="#F2F4F7" letter-spacing="-0.3">The 23 Steps Before the 1.0 Boundary Refactor</text>
+<text x="80" y="142" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#7D8594">Why each step exists, what it produces, and how the answers become the final distribution plan.</text>
+<rect x="1450" y="108" width="40" height="22" rx="11" fill="#2A2112" stroke="#5C4416"/><path d="M1470 113 l5 6 l-5 6 l-5 -6 z" fill="#E0A33A"/>
+<text x="1502" y="124" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#C9CED8">Gate step: must be done before the final prompt</text>
+<text x="1450" y="150" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#7D8594">"feeds N": the result is an input to step N</text>
+<rect x="80.5" y="180.5" width="569.6666666666666" height="168" rx="16" fill="#11141A" stroke="#242933"/>
+<text x="104" y="212" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#4A8DFF" letter-spacing="1.2">THE PROBLEM</text>
+<text x="104" y="240" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="600" fill="#F2F4F7">Framework code is copied into every project</text>
+<text x="104" y="272" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">Once copied we can't fix it. A database bug, a sign-in security</text>
+<text x="104" y="293" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">hole or a new framework setting can never reach existing projects.</text>
+<rect x="675.1666666666666" y="180.5" width="569.6666666666666" height="168" rx="16" fill="#11141A" stroke="#242933"/>
+<text x="698.6666666666666" y="212" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#4A8DFF" letter-spacing="1.2">THE FIX</text>
+<text x="698.6666666666666" y="240" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="600" fill="#F2F4F7">Framework code moves into the versioned package</text>
+<text x="698.6666666666666" y="272" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">Projects keep their own code plus tiny seed files. Changes arrive</text>
+<text x="698.6666666666666" y="293" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">through a reviewed upgrade; deploys and database migrations stay</text>
+<text x="698.6666666666666" y="314" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">separate approvals.</text>
+<rect x="1269.8333333333333" y="180.5" width="569.6666666666666" height="168" rx="16" fill="#2A2112" stroke="#5C4416"/>
+<text x="1293.3333333333333" y="212" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#E0A33A" letter-spacing="1.2">THE CATCH</text>
+<text x="1293.3333333333333" y="240" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="600" fill="#F2F4F7">Some choices become permanent at 1.0</text>
+<text x="1293.3333333333333" y="272" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">Names, tags, the users table, Cognito sign-up fields and database</text>
+<text x="1293.3333333333333" y="293" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">encryption land in every user's account. Free to change now, a</text>
+<text x="1293.3333333333333" y="314" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">migration for everyone after.</text>
+<line x1="960" y1="349" x2="960" y2="412" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="976" y="386" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#7D8594">So, before refactoring:</text>
+<rect x="80.5" y="413.5" width="569" height="394" rx="16" fill="#0F1522" stroke="#1F3558"/>
+<text x="100" y="443" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#4A8DFF" letter-spacing="1.2">STEPS 1–2</text>
+<text x="100" y="469" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#F2F4F7" letter-spacing="-0.2">Protect the starting point</text>
+<text x="100" y="493" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#7D8594">Keep a way back, and stop work that would be wasted.</text>
+<rect x="96.5" y="527.5" width="262" height="264" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="114" y="557" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">01</text>
+<text x="114" y="585" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Create a recovery point</text>
+<text x="114" y="610" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Everything later is compared</text>
+<text x="114" y="629" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">against this snapshot, and you</text>
+<text x="114" y="648" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">can always return to it.</text>
+<line x1="114" y1="662" x2="341" y2="662" stroke="#242933"/>
+<text x="114" y="686" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="114" y="704" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Baseline tags in both</text>
+<text x="114" y="722" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">repositories</text>
+<rect x="371.5" y="527.5" width="262" height="264" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="389" y="557" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">02</text>
+<text x="389" y="585" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Declare the refactor</text>
+<text x="389" y="606" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">freeze</text>
+<text x="389" y="631" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">New features built in files</text>
+<text x="389" y="650" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">that are about to move get</text>
+<text x="389" y="669" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">thrown away.</text>
+<line x1="389" y1="683" x2="616" y2="683" stroke="#242933"/>
+<text x="389" y="707" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="389" y="725" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Freeze notes in each AGENTS.md</text>
+<rect x="674.5" y="413.5" width="294" height="394" rx="16" fill="#0F1522" stroke="#1F3558"/>
+<text x="694" y="443" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#4A8DFF" letter-spacing="1.2">STEP 3</text>
+<text x="694" y="469" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#F2F4F7" letter-spacing="-0.2">Start the slowest decision</text>
+<text x="694" y="493" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#7D8594">Name clearance takes time. Start</text>
+<text x="694" y="513" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#7D8594">now, finish later.</text>
+<rect x="690.5" y="527.5" width="262" height="264" rx="12" fill="#11141A" stroke="#E0A33A" stroke-width="1.5"/>
+<text x="708" y="557" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#E0A33A">03</text>
+<rect x="873" y="544" width="62" height="20" rx="10" fill="#2A2112" stroke="#5C4416"/>
+<path d="M886 549.5 l4.5 4.5 l-4.5 4.5 l-4.5 -4.5 z" fill="#E0A33A"/>
+<text x="895" y="558" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#E0A33A">Gate</text>
+<text x="708" y="585" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Clear the product,</text>
+<text x="708" y="606" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">package and CLI names</text>
+<text x="708" y="631" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">The package and CLI names end</text>
+<text x="708" y="650" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">up in every user's code, and</text>
+<text x="708" y="669" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">&quot;AWS&quot; is a trademark.</text>
+<line x1="708" y1="683" x2="935" y2="683" stroke="#242933"/>
+<text x="708" y="707" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="708" y="725" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Final names (feeds 18)</text>
+<rect x="993.5" y="413.5" width="844" height="394" rx="16" fill="#0F1522" stroke="#1F3558"/>
+<text x="1013" y="443" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#4A8DFF" letter-spacing="1.2">STEPS 4–6</text>
+<text x="1013" y="469" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#F2F4F7" letter-spacing="-0.2">Record the baseline</text>
+<text x="1013" y="493" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#7D8594">Tools, tests and an infrastructure fingerprint to compare against.</text>
+<rect x="1009.5" y="527.5" width="262" height="264" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="1027" y="557" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">04</text>
+<text x="1027" y="585" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Confirm toolchains and</text>
+<text x="1027" y="606" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">hosts</text>
+<text x="1027" y="631" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Every machine you advertise</text>
+<text x="1027" y="650" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">must be tested with the exact</text>
+<text x="1027" y="669" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Node versions.</text>
+<line x1="1027" y1="683" x2="1254" y2="683" stroke="#242933"/>
+<text x="1027" y="707" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="1027" y="725" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Host list; Node 24 and 26</text>
+<text x="1027" y="743" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">installed side by side</text>
+<rect x="1284.5" y="527.5" width="262" height="264" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="1302" y="557" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">05</text>
+<text x="1302" y="585" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Record the test baseline</text>
+<text x="1302" y="610" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Tells new breakage apart from</text>
+<text x="1302" y="629" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">breakage that was already</text>
+<text x="1302" y="648" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">there.</text>
+<line x1="1302" y1="662" x2="1529" y2="662" stroke="#242933"/>
+<text x="1302" y="686" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="1302" y="704" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">List of tests that already fail</text>
+<rect x="1559.5" y="527.5" width="262" height="264" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="1577" y="557" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">06</text>
+<text x="1577" y="585" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Capture the</text>
+<text x="1577" y="606" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">infrastructure</text>
+<text x="1577" y="627" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">fingerprint</text>
+<text x="1577" y="652" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Proves that moving stacks into</text>
+<text x="1577" y="671" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">the framework changes nothing</text>
+<text x="1577" y="690" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">by accident.</text>
+<line x1="1577" y1="704" x2="1804" y2="704" stroke="#242933"/>
+<text x="1577" y="728" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="1577" y="746" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Dev and prod identity captures</text>
+<text x="1577" y="764" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">(feeds 22)</text>
+<line x1="960" y1="808" x2="960" y2="871" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="976" y="845" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#7D8594">Baseline recorded</text>
+<rect x="80.5" y="872.5" width="1759" height="295" rx="16" fill="#0F1522" stroke="#1F3558"/>
+<text x="100" y="902" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#4A8DFF" letter-spacing="1.2">STEPS 7–10</text>
+<text x="100" y="928" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#F2F4F7" letter-spacing="-0.2">Prove what works today</text>
+<text x="100" y="952" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#7D8594">Use it the way a user would. You can't lock in what you haven't seen work. Structural problems get fixed now, because their shape becomes permanent.</text>
+<rect x="96.5" y="966.5" width="422" height="185" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="114" y="996" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">07</text>
+<text x="114" y="1024" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Run the development golden path</text>
+<text x="114" y="1049" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">It's the first thing every user hits, and it shows</text>
+<text x="114" y="1068" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">the dev-pool sign-up bug.</text>
+<line x1="114" y1="1082" x2="501" y2="1082" stroke="#242933"/>
+<text x="114" y="1106" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="114" y="1124" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Dev problems, split into structural and functional</text>
+<rect x="531.5" y="966.5" width="422" height="185" rx="12" fill="#11141A" stroke="#E0A33A" stroke-width="1.5"/>
+<text x="549" y="996" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#E0A33A">08</text>
+<rect x="874" y="983" width="62" height="20" rx="10" fill="#2A2112" stroke="#5C4416"/>
+<path d="M887 988.5 l4.5 4.5 l-4.5 4.5 l-4.5 -4.5 z" fill="#E0A33A"/>
+<text x="896" y="997" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#E0A33A">Gate</text>
+<text x="549" y="1024" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Run the production golden path</text>
+<text x="549" y="1049" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Production has never run end to end, and its shape</text>
+<text x="549" y="1068" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">becomes permanent at 1.0.</text>
+<line x1="549" y1="1082" x2="936" y2="1082" stroke="#242933"/>
+<text x="549" y="1106" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="549" y="1124" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Proof production works; structural fixes made now</text>
+<rect x="966.5" y="966.5" width="422" height="185" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="984" y="996" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">09</text>
+<text x="984" y="1024" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Exercise high-availability settings</text>
+<text x="984" y="1049" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Multi-AZ, read replicas and Proxy exist in code but</text>
+<text x="984" y="1068" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">have never been tried.</text>
+<line x1="984" y1="1082" x2="1371" y2="1082" stroke="#242933"/>
+<text x="984" y="1106" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="984" y="1124" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Stable or Preview verdict (feeds 15)</text>
+<rect x="1401.5" y="966.5" width="422" height="185" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="1419" y="996" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">10</text>
+<text x="1419" y="1024" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Survey every Studio page</text>
+<text x="1419" y="1049" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">An honest list of what works, and what each page</text>
+<text x="1419" y="1068" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">saves or reads.</text>
+<line x1="1419" y1="1082" x2="1806" y2="1082" stroke="#242933"/>
+<text x="1419" y="1106" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="1419" y="1124" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Feature table (feeds 15 and 21)</text>
+<line x1="960" y1="1168" x2="960" y2="1231" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="976" y="1205" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#7D8594">Evidence: what works, what's broken, what each page saves</text>
+<rect x="80.5" y="1232.5" width="1759" height="573" rx="16" fill="#0F1522" stroke="#1F3558"/>
+<text x="100" y="1262" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#4A8DFF" letter-spacing="1.2">STEPS 11–20</text>
+<text x="100" y="1288" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#F2F4F7" letter-spacing="-0.2">Make the decisions only you can make</text>
+<text x="100" y="1312" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#7D8594">Each one is free to change before 1.0 and expensive after it.</text>
+<rect x="96.5" y="1326.5" width="335" height="225" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="114" y="1356" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">11</text>
+<text x="114" y="1384" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Decide the Prisma version</text>
+<text x="114" y="1409" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Prisma's migration files and markers will</text>
+<text x="114" y="1428" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">live in every project and database.</text>
+<line x1="114" y1="1442" x2="414" y2="1442" stroke="#242933"/>
+<text x="114" y="1466" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="114" y="1484" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Release candidate or GA</text>
+<rect x="444.5" y="1326.5" width="335" height="225" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="462" y="1356" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">12</text>
+<text x="462" y="1384" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Decide the default PostgreSQL</text>
+<text x="462" y="1405" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">major</text>
+<text x="462" y="1430" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Older majors hit forced upgrades sooner,</text>
+<text x="462" y="1449" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">and local volumes break on change.</text>
+<line x1="462" y1="1463" x2="762" y2="1463" stroke="#242933"/>
+<text x="462" y="1487" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="462" y="1505" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Default major for new projects</text>
+<rect x="792.5" y="1326.5" width="335" height="225" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="810" y="1356" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">13</text>
+<text x="810" y="1384" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Decide the encryption-key policy</text>
+<text x="810" y="1409" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">The key is fixed at creation, and the</text>
+<text x="810" y="1428" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">default blocks cross-account backups.</text>
+<line x1="810" y1="1442" x2="1110" y2="1442" stroke="#242933"/>
+<text x="810" y="1466" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="810" y="1484" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Key policy for new databases</text>
+<rect x="1140.5" y="1326.5" width="335" height="225" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="1158" y="1356" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">14</text>
+<text x="1158" y="1384" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Decide identity and account</text>
+<text x="1158" y="1405" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">linking</text>
+<text x="1158" y="1430" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Google sign-in can take over a same-email</text>
+<text x="1158" y="1449" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">account today, and pool fields are</text>
+<text x="1158" y="1468" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">permanent.</text>
+<line x1="1158" y1="1482" x2="1458" y2="1482" stroke="#242933"/>
+<text x="1158" y="1506" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="1158" y="1524" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Sign-up fields and identity rules</text>
+<rect x="1488.5" y="1326.5" width="335" height="225" rx="12" fill="#11141A" stroke="#E0A33A" stroke-width="1.5"/>
+<text x="1506" y="1356" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#E0A33A">15</text>
+<rect x="1744" y="1343" width="62" height="20" rx="10" fill="#2A2112" stroke="#5C4416"/>
+<path d="M1757 1348.5 l4.5 4.5 l-4.5 4.5 l-4.5 -4.5 z" fill="#E0A33A"/>
+<text x="1766" y="1357" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#E0A33A">Gate</text>
+<text x="1506" y="1384" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Assign stability tiers</text>
+<text x="1506" y="1409" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Ship a tested core while unfinished</text>
+<text x="1506" y="1428" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">features keep improving after 1.0.</text>
+<line x1="1506" y1="1442" x2="1806" y2="1442" stroke="#242933"/>
+<text x="1506" y="1466" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="1506" y="1484" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Stable, Preview or Hidden per feature</text>
+<rect x="96.5" y="1564.5" width="335" height="225" rx="12" fill="#11141A" stroke="#E0A33A" stroke-width="1.5"/>
+<text x="114" y="1594" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#E0A33A">16</text>
+<rect x="352" y="1581" width="62" height="20" rx="10" fill="#2A2112" stroke="#5C4416"/>
+<path d="M365 1586.5 l4.5 4.5 l-4.5 4.5 l-4.5 -4.5 z" fill="#E0A33A"/>
+<text x="374" y="1595" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#E0A33A">Gate</text>
+<text x="114" y="1622" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Confirm the change-delivery</text>
+<text x="114" y="1643" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">rules</text>
+<text x="114" y="1668" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">They decide where every future change</text>
+<text x="114" y="1687" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">goes after release.</text>
+<line x1="114" y1="1701" x2="414" y2="1701" stroke="#242933"/>
+<text x="114" y="1725" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="114" y="1743" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Nine agreed rules</text>
+<rect x="444.5" y="1564.5" width="335" height="225" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="462" y="1594" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">17</text>
+<text x="462" y="1622" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Decide the support window</text>
+<text x="462" y="1647" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Users need to know how long older</text>
+<text x="462" y="1666" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">projects keep working.</text>
+<line x1="462" y1="1680" x2="762" y2="1680" stroke="#242933"/>
+<text x="462" y="1704" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="462" y="1722" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Published compatibility promise</text>
+<rect x="792.5" y="1564.5" width="335" height="225" rx="12" fill="#11141A" stroke="#E0A33A" stroke-width="1.5"/>
+<text x="810" y="1594" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#E0A33A">18</text>
+<rect x="1048" y="1581" width="62" height="20" rx="10" fill="#2A2112" stroke="#5C4416"/>
+<path d="M1061 1586.5 l4.5 4.5 l-4.5 4.5 l-4.5 -4.5 z" fill="#E0A33A"/>
+<text x="1070" y="1595" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#E0A33A">Gate</text>
+<text x="810" y="1622" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Fix owner value and reserved</text>
+<text x="810" y="1643" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">names</text>
+<text x="810" y="1668" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">These tags land on every AWS resource,</text>
+<text x="810" y="1687" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">and they're free to change only now.</text>
+<line x1="810" y1="1701" x2="1110" y2="1701" stroke="#242933"/>
+<text x="810" y="1725" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="810" y="1743" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Tag values and reserved names (feeds 22)</text>
+<rect x="1140.5" y="1564.5" width="335" height="225" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="1158" y="1594" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">19</text>
+<text x="1158" y="1622" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Decide the starter contents</text>
+<text x="1158" y="1647" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Everything in the starter becomes every</text>
+<text x="1158" y="1666" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">new user's code.</text>
+<line x1="1158" y1="1680" x2="1458" y2="1680" stroke="#242933"/>
+<text x="1158" y="1704" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="1158" y="1722" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Keep, remove or move list</text>
+<rect x="1488.5" y="1564.5" width="335" height="225" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="1506" y="1594" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">20</text>
+<text x="1506" y="1622" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">List old compatibility code</text>
+<text x="1506" y="1647" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Deleting it before 1.0 is free;</text>
+<text x="1506" y="1666" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">afterwards each piece needs a</text>
+<text x="1506" y="1685" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">deprecation.</text>
+<line x1="1506" y1="1699" x2="1806" y2="1699" stroke="#242933"/>
+<text x="1506" y="1723" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="1506" y="1741" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">Delete list</text>
+<line x1="960" y1="1806" x2="960" y2="1869" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="976" y="1843" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#7D8594">Decisions recorded</text>
+<rect x="80.5" y="1870.5" width="1149.6666666666667" height="295" rx="16" fill="#0F1522" stroke="#1F3558"/>
+<text x="100" y="1900" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#4A8DFF" letter-spacing="1.2">STEPS 21–22</text>
+<text x="100" y="1926" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#F2F4F7" letter-spacing="-0.2">Map and freeze</text>
+<text x="100" y="1950" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#7D8594">What depends on what, and what becomes permanent.</text>
+<rect x="96.5" y="1964.5" width="552.3333333333334" height="185" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="114" y="1994" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">21</text>
+<text x="114" y="2022" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Build the coupling map</text>
+<text x="114" y="2047" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Every fixed path Studio reads must move with the refactor or become a</text>
+<text x="114" y="2066" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">rule.</text>
+<line x1="114" y1="2080" x2="631.3333333333334" y2="2080" stroke="#242933"/>
+<text x="114" y="2104" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="114" y="2122" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">REFACTOR-COUPLING-MAP.md (feeds 22)</text>
+<rect x="661.8333333333334" y="1964.5" width="552.3333333333334" height="185" rx="12" fill="#11141A" stroke="#E0A33A" stroke-width="1.5"/>
+<text x="679.3333333333334" y="1994" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#E0A33A">22</text>
+<rect x="1134.6666666666667" y="1981" width="62" height="20" rx="10" fill="#2A2112" stroke="#5C4416"/>
+<path d="M1147.6666666666667 1986.5 l4.5 4.5 l-4.5 4.5 l-4.5 -4.5 z" fill="#E0A33A"/>
+<text x="1156.6666666666667" y="1995" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#E0A33A">Gate</text>
+<text x="679.3333333333334" y="2022" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Build the freeze list</text>
+<text x="679.3333333333334" y="2047" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Signing off every permanent item means nothing becomes permanent by</text>
+<text x="679.3333333333334" y="2066" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">accident.</text>
+<line x1="679.3333333333334" y1="2080" x2="1196.6666666666667" y2="2080" stroke="#242933"/>
+<text x="679.3333333333334" y="2104" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="679.3333333333334" y="2122" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">REFACTOR-FREEZE-LIST.md</text>
+<rect x="1255.1666666666667" y="1870.5" width="584.3333333333334" height="295" rx="16" fill="#0F1522" stroke="#1F3558"/>
+<text x="1274.6666666666667" y="1900" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#4A8DFF" letter-spacing="1.2">STEP 23</text>
+<text x="1274.6666666666667" y="1926" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#F2F4F7" letter-spacing="-0.2">Hand off</text>
+<text x="1274.6666666666667" y="1950" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#7D8594">Your answers become the final plan's prompt.</text>
+<rect x="1271.1666666666667" y="1964.5" width="552.3333333333334" height="185" rx="12" fill="#11141A" stroke="#242933" stroke-width="1"/>
+<text x="1288.6666666666667" y="1994" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" font-weight="600" fill="#4A8DFF">23</text>
+<text x="1288.6666666666667" y="2022" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#F2F4F7">Hand off to the prompt generator</text>
+<text x="1288.6666666666667" y="2047" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" fill="#C9CED8">Your answers become the prompt for the final plan.</text>
+<line x1="1288.6666666666667" y1="2061" x2="1806" y2="2061" stroke="#242933"/>
+<text x="1288.6666666666667" y="2085" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#7D8594">Produces</text>
+<text x="1288.6666666666667" y="2103" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#C9CED8">DISTRIBUTION-PLAN-PROMPT.md</text>
+<line x1="1230.6666666666667" y1="2048" x2="1253.6666666666667" y2="2048" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="960" y1="2166" x2="960" y2="2229" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="976" y="2203" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#7D8594">All gate steps done</text>
+<rect x="80.5" y="2230.5" width="1759" height="205" rx="16" fill="#0F1522" stroke="#1F3558"/>
+<text x="100" y="2260" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="12" font-weight="600" fill="#4A8DFF" letter-spacing="1.2">AFTER THE CHECKLIST</text>
+<text x="100" y="2286" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#F2F4F7" letter-spacing="-0.2">From your answers to public 1.0</text>
+<text x="100" y="2310" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#7D8594">Each stage needs your review. Nothing here deploys to AWS or migrates a database on its own.</text>
+<rect x="96.5" y="2324.5" width="263.6666666666667" height="95" rx="10" fill="#2A2112" stroke="#5C4416"/>
+<text x="112" y="2356" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#E0A33A">Gates 3, 8, 15, 16, 18 and 22</text>
+<text x="112" y="2376" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#E0A33A">are done</text>
+<line x1="366.6666666666667" y1="2372" x2="382.6666666666667" y2="2372" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="389.1666666666667" y="2324.5" width="263.6666666666667" height="95" rx="10" fill="#11141A" stroke="#242933"/>
+<text x="404.6666666666667" y="2356" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">The prompt generator reads</text>
+<text x="404.6666666666667" y="2376" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">your answers and re-checks</text>
+<text x="404.6666666666667" y="2396" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">the code</text>
+<line x1="659.3333333333334" y1="2372" x2="675.3333333333334" y2="2372" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="681.8333333333334" y="2324.5" width="263.6666666666667" height="95" rx="10" fill="#11141A" stroke="#242933"/>
+<text x="697.3333333333334" y="2356" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">It writes</text>
+<text x="697.3333333333334" y="2376" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">DISTRIBUTION-PLAN-PROMPT.md</text>
+<line x1="952" y1="2372" x2="968" y2="2372" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="974.5" y="2324.5" width="263.6666666666667" height="95" rx="10" fill="#11141A" stroke="#242933"/>
+<text x="990" y="2356" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">Plan Mode turns that prompt</text>
+<text x="990" y="2376" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">into the final implementation</text>
+<text x="990" y="2396" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">plan</text>
+<line x1="1244.6666666666667" y1="2372" x2="1260.6666666666667" y2="2372" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="1267.1666666666667" y="2324.5" width="263.6666666666667" height="95" rx="10" fill="#11141A" stroke="#242933"/>
+<text x="1282.6666666666667" y="2356" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">The refactor follows the</text>
+<text x="1282.6666666666667" y="2376" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">plan; upgrades to 1.0.1,</text>
+<text x="1282.6666666666667" y="2396" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#C9CED8">1.1.0 and 1.2.0 are rehearsed</text>
+<line x1="1537.3333333333335" y1="2372" x2="1553.3333333333335" y2="2372" stroke="#3A4250" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="1559.8333333333335" y="2324.5" width="263.6666666666667" height="95" rx="10" fill="#13213A" stroke="#4A8DFF"/>
+<text x="1575.3333333333335" y="2356" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="600" fill="#F2F4F7">Public 1.0</text>
+<text x="80" y="2480" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#C9CED8">Scope: no one uses AWS Studio yet, the reference app is throwaway, and compatibility promises start at public 1.0.</text>
+<text x="1840" y="2480" font-family="Inter, 'SF Pro Display', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#7D8594" text-anchor="end">Details: REFACTOR-READINESS-CHECKLIST.html and REFACTOR-READINESS-REFERENCE.md</text>
+</svg>

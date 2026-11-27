@@ -24,6 +24,7 @@ For an engineering task, read this router, **one first page**, then only its rel
 | Product scope, implementation status or future direction | [Status and direction](reference/status.md) | [Product overview](../AWS-STUDIO.md), [capabilities](reference/capabilities.md) |
 | Framework architecture across subsystems | [Framework architecture](framework/architecture.md) | [Architecture map](ARCHITECTURE-MAP.md), [decisions](architecture/decisions.md) |
 | Architectural rationale or boundary changes | [Decision records](architecture/decisions.md) | [Source authority](architecture/contracts.md), [invariants](reference/invariants.md) |
+| Pre-release research: framework/project boundary, upgrades, managed database ownership | [Architecture research](research/README.md) | [Decision records](architecture/decisions.md), [stateful database](framework/stateful-database.md) |
 | First Studio walkthrough or visible action | [Interface](studio/interface.md) | [Backend authorities](studio/backend.md), [editing](studio/editing.md) |
 | Native Coding tasks, isolated edits, approval, recovery or Studio restart | [Local coding agents](../framework-studio/local-agent-lab.md) | [Backend](studio/backend.md), [Editing](studio/editing.md), [Sightline](../framework-studio/sightline.md) |
 | Sightline and captured Conversation/Coding evidence | [Sightline](../framework-studio/sightline.md) | [Interface](studio/interface.md), [source authority](architecture/contracts.md), [secrets](deployment/secrets.md) |
